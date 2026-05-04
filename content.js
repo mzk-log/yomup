@@ -1,0 +1,2725 @@
+// Content Script for Chrome Extension 読むプ
+// Copyright (c) 2025 [MZK]
+// All rights reserved.
+// このソフトウェアおよび関連文書ファイル（以下「ソフトウェア」）の複製、
+// 使用、改変、配布を禁止します。
+
+// == 重複注入チェック ===================================================
+// 次回以降の重複実行を防ぐ
+if (typeof window !== 'undefined') {
+  window.YOMUP_CONTENT_SCRIPT_LOADED = true;
+}
+
+
+// == グローバル変数定義 =======================================================
+//要素の重複処理を防ぐためのキャッシュ
+const processedElementCache = new Set();
+
+// ハイライト処理のマウスカーソル機能
+let highLightOnOff = false; // 機能が有効かどうかのフラグ
+let currentHighlightedElement = null; // 現在ハイライトされている要素
+let mouseTimeoutForHighlight = null; // マウスが250ms間動かなかった場合のタイマー
+
+//ポップアップ内ストップウォッチ
+let stopwatchTimerID = null; //ストップウォッチのタイマーID
+let stopwatchSeconds = 0; //ストップウォッチ経過時間(秒)
+let stopwatchLimitMinutes = null; // ループタイマーの上限時間（分）。nullの場合は通常のストップウォッチ
+let stopwatchLoopCount = 0; // ループ回数
+
+// テキスト外モードのトグル機能
+let NoTextModeOnOff = false; // 機能が有効かどうかのフラグ
+
+// サブポップアップのトグル機能
+let subPopupOnOff = false; // 機能が有効かどうかのフラグ
+let countDownTimerForSub = 0;
+let countDownIntervalForSub = null; // カウントダウンタイマーのIDを保存
+
+// ドラッグ移動機能用の変数
+let isDragging = false; // ドラッグ中かどうかのフラグ
+let startX, startY, startLeft, startTop; // ドラッグ開始時の座標
+let currentDraggingPopup = null; // 現在ドラッグ中のポップアップ要素
+
+// 読書速度設定
+let readingSpeed = 250; // 1分間で読める文字数
+
+// ページ遷移判定用のグローバル変数
+let isPageTransition = false; // ページ遷移時かブラウザ起動時かを判定するフラグ
+
+// ハイライト遅延処理で使う最新ポインタ座標（setTimeout 内の event は古くなりうる）
+let lastHighlightClientX = 0;
+let lastHighlightClientY = 0;
+
+
+// === ページの読み込み状態に応じて初期化処理を実行================================
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', init);
+} else {
+  init();
+}
+
+
+// == ページ読み込み完了時の処理 ===============================================
+function init() {
+  debugLog('拡張機能のContent Scriptが読み込まれました');
+
+  // ページ遷移時かブラウザ起動時かを判定（sessionStorageを使用）
+  const pageTransitionFlag = sessionStorage.getItem(SESSIONSTRG_PAGE_TRANSITION);
+  isPageTransition = pageTransitionFlag === 'true';
+  debugLog('ページ遷移判定:', isPageTransition ? 'ページ遷移' : 'ブラウザ起動');
+
+  // ポップアップ表示状態を確認
+  const isPopupMainVisible = localStorage.getItem(LOCALSTRG_YOMUP_REDISP);
+  debugLog('ポップアップ復元チェック:', isPopupMainVisible);
+  
+  // ボタンの状態をlocalStorageから復元（ページ遷移時のみ）
+  if (ENABLE_BUTTON_STATE_RESTORE && isPageTransition && isPopupMainVisible === 'true') { //有効 or 無効を定数で切り替え、かつページ遷移時のみ
+    // 電球ボタン
+    const savedHighLight = localStorage.getItem(LOCALSTRG_HIGHLIGHT_ONOFF);
+    if (savedHighLight === 'true') {
+      highLightOnOff = true;
+      attachHighlightListeners(); // 復元時にリスナーを追加
+    }
+
+    // テキスト外ボタン
+    const savedNoText = localStorage.getItem(LOCALSTRG_NOTEXT_ONOFF);
+    if (savedNoText === 'true') NoTextModeOnOff = true;
+
+    // サブポップアップボタン
+    const savedSubPopup = localStorage.getItem(LOCALSTRG_SUBPOPUP_ONOFF);
+    if (savedSubPopup === 'true') subPopupOnOff = true;
+  }
+
+  if (isPopupMainVisible === 'true') {
+    debugLog('ポップアップを復元します');
+    // 少し遅延させてからポップアップを表示（2000msくらいが実測で妥当）
+    setTimeout(() => {
+      debugLog('executeYomuP()を実行します');
+      executeYomuP();
+      // 状態をクリア
+      localStorage.removeItem(LOCALSTRG_YOMUP_REDISP);
+      debugLog('localStorageをクリアしました');
+    }, 2000);
+  }
+
+  // sessionStorageのフラグを削除（次回の判定のため）
+  sessionStorage.removeItem(SESSIONSTRG_PAGE_TRANSITION);
+
+}; //end init
+
+
+// === 拡張機能ボタンクリック時の処理（Background scriptからのメッセージ受信）======
+chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
+  // 拡張機能アイコンがクリックされた場合
+  if (request && request.action === 'extensionIconClicked') {
+    debugLog('Content Script: 読むプ拡張機能ボタンを押しました');
+  }
+
+  // 読むプが選択された場合（右クリックメニュー）
+  if (request && request.action === 'executeYomuP') {
+    executeYomuP(); // 読むプの処理を実行
+  }
+
+  // レスポンスを返す
+  sendResponse({ success: true });
+
+  return true;
+});
+
+
+// === 読むプ本体処理 =========================================================
+function executeYomuP() {
+  // ポップアップが表示されているかどうかを確認
+  const existingPopup = document.getElementById(ID_YOMUP_POPUP_CONTAINER);
+  
+  if (existingPopup) {
+    // ポップアップが表示されている場合は閉じる（ダブルクリックと同じ動作）
+    hideYomuPPopup();
+  } else {
+    // ポップアップが表示されていない場合は表示する
+    const charCountInfo = getCharCountInfo(); // 共通関数を使用
+
+    if (charCountInfo.selectedText && charCountInfo.selectedLength > 0) {
+      //選択テキストがある場合
+      showYomuPPopup(
+        charCountInfo.textLengthAll,
+        charCountInfo.readingTimeAll,
+        charCountInfo.selectedText,
+        charCountInfo.selectedLength,
+        charCountInfo.selectedReadingTime
+      );
+    } else {
+      //選択テキストがない場合
+      showYomuPPopup(
+        charCountInfo.textLengthAll,
+        charCountInfo.readingTimeAll,
+        null,
+        0,
+        0
+      );
+    }
+  }
+} //end executeYomuP
+
+
+// === 文字数情報を取得する共通関数 ===========================================
+function getCharCountInfo() {
+  //ページ全体のテキスト文字数を取得
+  const textLengthAll = document.body.innerText.trim().length;
+  const readingTimeAll = calculateReadingTime(textLengthAll);
+
+  // 現在の選択範囲を取得
+  const selection = window.getSelection();
+  const selectedText = selection.toString().trim();
+  const selectedLength = selectedText.length;
+  const selectedReadingTime = calculateReadingTime(selectedLength);
+
+  return {
+    textLengthAll,
+    readingTimeAll,
+    selectedText: selectedText && selectedLength > 0 ? selectedText : null,
+    selectedLength: selectedLength > 0 ? selectedLength : 0,
+    selectedReadingTime: selectedLength > 0 ? selectedReadingTime : 0
+  };
+}
+
+
+// === 読書時間計算関数 ================== ===================================
+function calculateReadingTime(textLength) {
+  return Math.round(textLength * (60 / readingSpeed));
+}
+
+
+// === 文字数情報のみを更新する関数 ===========================================
+function updateCharCountInfo() {
+  const existingPopup = document.getElementById(ID_YOMUP_POPUP_CONTAINER);
+  if (!existingPopup) {
+    // ポップアップが存在しない場合は早期リターン（エラー処理）
+    return;
+  }
+
+  // 共通関数で文字数情報を取得
+  const charCountInfo = getCharCountInfo();
+
+  // 既存ポップアップ内の文字数情報のみを更新
+  const shadow = existingPopup.shadowRoot;
+  if (!shadow) return;
+
+  const selectionInfo = shadow.querySelector('.selection-info');
+
+  if (selectionInfo) {
+    setSelectionInfoContent(
+      selectionInfo,
+      charCountInfo.selectedText,
+      charCountInfo.selectedLength,
+      charCountInfo.selectedReadingTime
+    );
+  }
+}
+
+// === 時間表示フォーマット関数 ================================================
+function formatReadingTime(seconds) {
+  if (seconds < 60) {
+    return `${seconds}秒`;
+  } else {
+    const minutes = Math.floor(seconds / 60);
+    const remainingSeconds = seconds % 60;
+    if (minutes >= 60) {
+      return `${minutes}分`;
+    } else {
+      return `${minutes}分${remainingSeconds}秒`;
+    }
+  }
+}
+
+// === 選択範囲情報を表示する共通関数 ==========================================
+function setSelectionInfoContent(selectionInfoElement, selectedText, selectedLength, selectedReadingTime) {
+  if (!selectionInfoElement) return;
+
+  if (selectedText && selectedLength > 0) {
+    // セキュリティ対策: テキストを安全に処理
+    const startText = selectedText.substring(0, 3);
+    const endText = selectedText.substring(selectedText.length - 3);
+
+    // innerHTMLの代わりに安全な方法で表示
+    selectionInfoElement.textContent = ''; // クリア
+
+    // 1行目: 選択範囲の表示
+    const line1 = document.createElement('div');
+    line1.textContent = `選択：${startText} ～ ${endText}`;
+    selectionInfoElement.appendChild(line1);
+
+    // 2行目: 文字数と読書時間の表示
+    const line2 = document.createElement('div');
+    line2.textContent = `${selectedLength}字 ${formatReadingTime(selectedReadingTime)}`;
+    selectionInfoElement.appendChild(line2);
+  } else {
+    selectionInfoElement.textContent = '選択：選択範囲がありません';
+  }
+}  //end setSelectionInfoContent
+
+
+// === 読むプのポップアップ本体を表示 ===========================================
+function showYomuPPopup(textLength, readingTime, selectedText = null, selectedLength = 0, selectedReadingTime = 0) {
+  // 既存のポップアップを削除
+  hideYomuPPopup(true);
+  
+  // ページ遷移時かブラウザ起動時かを判定（グローバル変数を使用）
+  // isPageTransitionはinit()で設定される
+
+  // Shadow DOMコンテナを作成
+  const container = document.createElement('div');
+  container.id = ID_YOMUP_POPUP_CONTAINER;
+
+  const shadow = container.attachShadow({ mode: 'open' });
+
+  // スタイルシート（CSS）
+  const style = document.createElement('style');
+  style.textContent = `
+  .${CLASS_YOMUP_POPUP} {
+    position: fixed !important;
+    top: var(--YomuP-popup-top, 30%) !important;
+    left: var(--YomuP-popup-left, 10%) !important;
+    background: #f8f9fa !important;
+    border: 1px solid #dee2e6 !important;
+    border-radius: 8px !important;
+    padding: 6px 8px !important;
+    font-size: 14px !important;
+    font-family: Arial, sans-serif !important;
+    color: #495057 !important;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.1) !important;
+    z-index: 90001 !important;
+    width: 180px !important;
+    cursor: move !important;
+    user-select: none !important;
+    text-align: center !important;
+    line-height: 1.2 !important;
+    box-sizing: border-box !important;
+  }
+  .yomup-popup-icon {
+    position: absolute !important;
+    top: 6px !important;
+    left: 4px !important;
+    width: var(--yomup-icon-size, 14px) !important;
+    height: var(--yomup-icon-size, 14px) !important;
+    z-index: 1 !important;
+  }
+  .yomup-popup-icon img {
+    width: 100% !important;
+    height: 100% !important;
+    display: block !important;
+  }
+  .total-info {
+    font-weight: bold !important;
+    margin-bottom: 4px !important;
+    margin-left: 10px !important;
+    font-size: 12px !important;
+  }
+  .selection-info {
+    font-size: 12px !important;
+    color: #6c757d !important;
+    display: flex !important;
+    flex-direction: column !important;
+    justify-content: center !important;
+    align-items: center !important;
+    height: auto !important;
+    margin: 0 !important;
+    padding: 0 !important;
+  }
+  .stopwatch-container {
+    display: flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    gap: 8px !important;
+    margin-top: 8px !important;
+    flex-direction: column !important;
+  }
+  .stopwatch-row {
+    display: flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    gap: 8px !important;
+    width: 100% !important;
+  }
+  .stopwatch {
+    text-align: center !important;
+    color: #6c757d !important;
+    font-size: 16px !important;
+    font-weight: bold !important;
+    line-height: 1.2 !important;
+  }
+  .stopwatch-limit-select-wrapper {
+    position: relative !important;
+    display: inline-block !important;
+  }
+  .stopwatch-limit-select {
+    font-size: 12px !important;
+    padding: 2px 4px !important;
+    border: 1px solid #dee2e6 !important;
+    border-radius: 4px !important;
+    background: white !important;
+    color: #495057 !important;
+    cursor: pointer !important;
+    pointer-events: auto !important;
+    z-index: 10 !important;
+    position: relative !important;
+  }
+  .stopwatch-limit-select-wrapper .tooltip {
+    white-space: nowrap !important;
+    left: 50% !important;
+    transform: translateX(-50%) !important;
+  }
+  .stopwatch-loop-count {
+    font-size: 11px !important;
+    color: #6c757d !important;
+    text-align: center !important;
+    display: none !important; /* デフォルトは非表示 */
+  }
+  .stopwatch-loop-count.visible {
+    display: block !important;
+  }
+  .stopwatch-button-container {
+    margin-left: 4px !important; /*微調整*/
+    vertical-align: middle !important;
+  }
+  .stopwatch-control-button {
+    display: inline-block !important;
+    margin-right: 4px !important;
+    cursor: pointer !important;
+    position: relative !important;
+  }
+  .play-icon {
+    margin-top: 8px !important;
+    text-align: center !important;
+    color: #6c757d !important;
+    font-size: 16px !important;
+    line-height: 1.2 !important;
+  }
+  .strCnt-button,
+  .lightbulb-button,
+  .layer-button,
+  .stopwatch-button,
+  .hourglass-button,
+  .reload-button {
+    display: inline-block !important;
+    margin-right: 8px !important;
+    cursor: pointer !important;
+    position: relative !important;
+  }
+  .lightbulb-button img.active,
+  .layer-button img.active,
+  .hourglass-button img.active,
+  .stopwatch-button img.active {
+    background-color: red !important;
+    border-radius: 25% !important;
+    padding: 0px !important;
+  }
+  /* ツールチップのスタイル */
+  .tooltip {
+    position: absolute !important;
+    top: 100% !important;
+    left: 50% !important;
+    transform: translateX(-50%) !important;
+    background-color: rgba(0, 0, 0, 0.5) !important;
+    color: white !important;
+    padding: 4px 8px !important;
+    border-radius: 4px !important;
+    font-size: 12px !important;
+    white-space: nowrap !important;
+    opacity: 0 !important;
+    visibility: hidden !important;
+    transition: opacity 0.3s ease, visibility 0.3s ease !important;
+    pointer-events: none !important;
+    z-index: 1000 !important;
+    line-height: 1.2 !important;
+  }
+  .tooltip.show {
+    opacity: 1 !important;
+    visibility: visible !important;
+  }
+  .yomup-popup-icon .tooltip {
+    white-space: normal !important;
+    left: -8px !important; /* ポップアップの左端に揃える */
+    transform: none !important;
+  }
+  .strCnt-button .tooltip {
+    white-space: nowrap !important;
+    left: -12px !important; /* ポップアップの左端に揃える */
+    transform: none !important;
+  }
+`;
+
+  // ポップアップ要素
+  const popup = document.createElement('div');
+  popup.className = CLASS_YOMUP_POPUP;
+
+  // 左上にアイコンを追加
+  const popupIcon = document.createElement('div');
+  popupIcon.className = 'yomup-popup-icon';
+  popupIcon.innerHTML = `<img src="${chrome.runtime.getURL('icon48.png')}" alt="アイコン" style="width: 100%; height: 100%;"><div class="tooltip">読むプ<br>Version<br>${YOMUP_VERSION}</div>`;
+  popup.appendChild(popupIcon);
+
+  // 保存された位置があれば適用YomuP
+  const savedPosition = localStorage.getItem(LOCALSTRG_YOMUP_XYPOS);
+  if (savedPosition) {
+    try {
+      const parsed = JSON.parse(savedPosition);
+      if (parsed && typeof parsed.x === 'string' && typeof parsed.y === 'string') {
+        popup.style.setProperty('--YomuP-popup-top', parsed.y, 'important');
+        popup.style.setProperty('--YomuP-popup-left', parsed.x, 'important');
+      }
+    } catch (error) {
+      debugError('ポップアップ位置の復元に失敗しました:', error);
+      // 不正なデータをクリア
+      localStorage.removeItem(LOCALSTRG_YOMUP_XYPOS);
+    }
+  }
+
+  // アイコンを横並びで配置
+  // 文字カウントボタン
+  const strCntButton = document.createElement('div');
+  strCntButton.className = 'strCnt-button';
+  strCntButton.innerHTML = `<img src="${chrome.runtime.getURL('images/GB01_object-group-solid-full.svg')}" width="16" height="16" alt="文字カウント" style="cursor: pointer;"><div class="tooltip">選択範囲の<br>文字数を<br>カウント</div>`;
+
+  // 電球ボタン
+  const lightbulbButton = document.createElement('div');
+  lightbulbButton.className = 'lightbulb-button';
+  lightbulbButton.innerHTML = `<img src="${chrome.runtime.getURL('images/GA01_lightbulb-solid-full.svg')}" width="16" height="16" alt="電球" style="cursor: pointer;"><div class="tooltip">ハイライト実施</div>`;
+
+  // レイヤーボタン
+  const layerButton = document.createElement('div');
+  layerButton.className = 'layer-button';
+  layerButton.innerHTML = `<img src="${chrome.runtime.getURL('images/GA03_layer-group-solid-full.svg')}" width="16" height="16" alt="レイヤー" style="cursor: pointer;"><div class="tooltip">ハイライト予備<br>(うまくできない時)</div>`;
+
+  // ストップウォッチボタン
+  const stopwatchButton = document.createElement('div');
+  stopwatchButton.className = 'stopwatch-button';
+  stopwatchButton.innerHTML = `<img src="${chrome.runtime.getURL('images/GB02_stopwatch-solid-full.svg')}" width="16" height="16" alt="ストップウォッチ" style="cursor: pointer;"><div class="tooltip">ストップウォッチ</div>`;
+
+  // 砂時計ボタンを作成
+  const hourglassButton = document.createElement('div');
+  hourglassButton.className = 'hourglass-button';
+  hourglassButton.innerHTML = `<img src="${chrome.runtime.getURL('images/GA02_hourglass-start-solid-full.svg')}" width="16" height="16" alt="砂時計" style="cursor: pointer;"><div class="tooltip">ハイライト部分タイマー</div>`;
+
+  // リロードボタンを作成
+  const reloadButton = document.createElement('div');
+  reloadButton.className = 'reload-button';
+  reloadButton.innerHTML = `<img src="${chrome.runtime.getURL('images/GD01_rotate-right-solid-full.svg')}" width="16" height="16" alt="リロード" style="cursor: pointer;"><div class="tooltip">ページの<br>再読み込み</div>`;
+
+
+  // 文字数カウントボタンのクリックイベントを追加
+  const strCntIcon = strCntButton.querySelector('img');
+  strCntIcon.addEventListener('click', function (e) {
+    e.stopPropagation(); // イベントの伝播を停止
+    this.classList.toggle('active');
+    updateCharCountInfo(); // 文字数情報箇所を更新
+  });
+
+
+  // 電球アイコンのクリックイベントを追加
+  const lightbulbIcon = lightbulbButton.querySelector('img');
+  lightbulbIcon.addEventListener('click', function (e) {
+    e.stopPropagation(); // イベントの伝播を停止
+    this.classList.toggle('active');
+    toggleHighlightMode(); // ハイライト処理を実行
+  });
+
+
+  // レイヤーボタンのクリックイベントを追加
+  const layerIcon = layerButton.querySelector('img');
+  layerIcon.addEventListener('click', function (e) {
+    e.stopPropagation(); // イベントの伝播を停止
+    this.classList.toggle('active');
+    toggleNoTextMode();
+  });
+
+  // ストップウォッチ表示要素を追加（コンテナで囲む）
+  const stopwatchContainer = document.createElement('div');
+  stopwatchContainer.className = 'stopwatch-container';
+  stopwatchContainer.style.setProperty('display', 'none', 'important'); // 初期状態は非表示
+
+  // ストップウォッチ表示とドロップダウンを横並びにするコンテナ
+  const stopwatchRow = document.createElement('div');
+  stopwatchRow.className = 'stopwatch-row';
+
+  const stopwatch = document.createElement('div');
+  stopwatch.className = 'stopwatch';
+  stopwatch.textContent = '00:00';
+
+  // ドロップダウンリストを追加（ラッパーで囲む）
+  const limitSelectWrapper = document.createElement('div');
+  limitSelectWrapper.className = 'stopwatch-limit-select-wrapper';
+  
+  const limitSelect = document.createElement('select');
+  limitSelect.className = 'stopwatch-limit-select';
+  limitSelect.innerHTML = `
+    <option value="-">-</option>
+    <option value="1">1分</option>
+    <option value="3">3分</option>
+    <option value="5">5分</option>
+    <option value="10">10分</option>
+    <option value="15">15分</option>
+  `;
+  limitSelect.value = '-'; // デフォルト値
+  
+  // ツールチップを追加
+  const limitSelectTooltip = document.createElement('div');
+  limitSelectTooltip.className = 'tooltip';
+  limitSelectTooltip.textContent = 'インターバル時間(分)';
+  
+  limitSelectWrapper.appendChild(limitSelect);
+  limitSelectWrapper.appendChild(limitSelectTooltip);
+
+  // ループ回数表示を追加
+  const loopCountDisplay = document.createElement('div');
+  loopCountDisplay.className = 'stopwatch-loop-count';
+  loopCountDisplay.textContent = '0回';
+
+  // 横並びコンテナにストップウォッチ、ドロップダウン、ループ回数表示を追加
+  stopwatchRow.appendChild(stopwatch);
+  stopwatchRow.appendChild(limitSelectWrapper);
+  stopwatchRow.appendChild(loopCountDisplay);
+  
+  // 外側コンテナに横並びコンテナを追加
+  stopwatchContainer.appendChild(stopwatchRow);
+
+  // ストップウォッチ用のボタンコンテナを作成
+  const stopwatchButtonContainer = document.createElement('div');
+  stopwatchButtonContainer.className = 'stopwatch-button-container';
+  stopwatchButtonContainer.style.setProperty('display', 'none', 'important'); // 強制的に非表示
+
+  // 再生ボタン
+  const playButton = document.createElement('div');
+  playButton.className = 'stopwatch-control-button';
+  playButton.innerHTML = `<img src="${chrome.runtime.getURL('images/GC01_play-solid-full.svg')}" width="10" height="10" alt="再生" style="cursor: pointer;">`;
+
+  // 一時停止ボタン
+  const pauseButton = document.createElement('div');
+  pauseButton.className = 'stopwatch-control-button';
+  pauseButton.innerHTML = `<img src="${chrome.runtime.getURL('images/GC02_pause-solid-full.svg')}" width="10" height="10" alt="一時停止" style="cursor: pointer;">`;
+  pauseButton.style.display = 'none'; // 初期状態は非表示
+
+  // 停止ボタン
+  const stopButton = document.createElement('div');
+  stopButton.className = 'stopwatch-control-button';
+  stopButton.innerHTML = `<img src="${chrome.runtime.getURL('images/GC03_stop-solid-full.svg')}" width="10" height="10" alt="停止" style="cursor: pointer;">`;
+
+  // ストップウォッチ制御ボタンをコンテナに追加
+  stopwatchButtonContainer.appendChild(playButton);
+  stopwatchButtonContainer.appendChild(stopButton);
+
+  // ストップウォッチボタンのクリックイベントを追加
+  const stopwatchIcon = stopwatchButton.querySelector('img'); // 追加
+  stopwatchButton.addEventListener('click', function (e) {
+    e.stopPropagation();
+    // ストップウォッチの表示・非表示を制御（activeクラスで判定）
+    const isCurrentlyVisible = stopwatchIcon.classList.contains('active');
+    
+    if (!isCurrentlyVisible) {
+      // 表示
+      stopwatchContainer.style.setProperty('display', 'flex', 'important');
+      stopwatchButtonContainer.style.setProperty('display', 'block', 'important');
+      stopwatchIcon.classList.add('active');
+    } else {
+      // 非表示
+      // 動作中の場合は停止してリセット
+      if (stopwatchTimerID) {
+        try {
+          // タイマーを停止
+          clearInterval(stopwatchTimerID);
+          stopwatchTimerID = null;
+          stopwatchSeconds = 0;
+          stopwatchLoopCount = 0;
+          if (stopwatch && stopwatch.textContent !== undefined) {
+            stopwatch.textContent = '00:00';
+          }
+          if (loopCountDisplay) {
+            loopCountDisplay.textContent = '0回';
+          }
+          // ボタンを再生/停止に戻す
+          if (playButton?.parentNode) playButton.remove();
+          if (pauseButton?.parentNode) pauseButton.remove();
+          if (stopButton?.parentNode) stopButton.remove();
+          if (stopwatchButtonContainer) {
+            stopwatchButtonContainer.appendChild(playButton);
+            stopwatchButtonContainer.appendChild(stopButton);
+          }
+        } catch (error) {
+          debugError('ストップウォッチ停止処理中にエラーが発生:', error);
+        }
+      }
+      // 非表示にする（ループ回数は保持しない）
+      stopwatchContainer.style.setProperty('display', 'none', 'important');
+      stopwatchButtonContainer.style.setProperty('display', 'none', 'important');
+      stopwatchIcon.classList.remove('active');
+    }
+  });
+
+  // ドロップダウンリストのクリックイベント（ドラッグとの干渉を防ぐ）
+  limitSelect.addEventListener('click', function (e) {
+    e.stopPropagation();
+    // ツールチップを非表示にする
+    if (limitSelectTooltip) {
+      limitSelectTooltip.classList.remove('show');
+    }
+  });
+
+  limitSelect.addEventListener('mousedown', function (e) {
+    e.stopPropagation();
+    // ツールチップを非表示にする
+    if (limitSelectTooltip) {
+      limitSelectTooltip.classList.remove('show');
+    }
+  });
+
+  // ドロップダウンリストの変更イベント
+  limitSelect.addEventListener('change', function (e) {
+    e.stopPropagation();
+    const selectedValue = this.value;
+    
+    // ストップウォッチを停止してリセット
+    if (stopwatchTimerID) {
+      clearInterval(stopwatchTimerID);
+      stopwatchTimerID = null;
+    }
+    stopwatchSeconds = 0;
+    stopwatchLoopCount = 0;
+    stopwatch.textContent = '00:00';
+    loopCountDisplay.textContent = '0回';
+    
+    // ループ回数表示の表示/非表示を切り替え
+    if (selectedValue === '-') {
+      stopwatchLimitMinutes = null;
+      loopCountDisplay.classList.remove('visible');
+    } else {
+      stopwatchLimitMinutes = parseInt(selectedValue);
+      loopCountDisplay.classList.add('visible');
+      loopCountDisplay.textContent = '0回';
+    }
+    
+    // ボタンを再生/停止に戻す
+    if (playButton?.parentNode) playButton.remove();
+    if (pauseButton?.parentNode) pauseButton.remove();
+    if (stopButton?.parentNode) stopButton.remove();
+    if (stopwatchButtonContainer) {
+      stopwatchButtonContainer.appendChild(playButton);
+      stopwatchButtonContainer.appendChild(stopButton);
+    }
+  });
+
+  // 再生ボタンのクリックイベント
+  playButton.addEventListener('click', function (e) {
+    e.stopPropagation();
+    if (!stopwatchTimerID) {
+      try {
+        // ストップウォッチ開始
+        stopwatchTimerID = setInterval(() => {
+          try {
+            stopwatchSeconds++;
+            
+            // ループタイマーの上限チェック
+            if (stopwatchLimitMinutes !== null) {
+              const limitSeconds = stopwatchLimitMinutes * 60;
+              if (stopwatchSeconds >= limitSeconds) {
+                // 上限に達したら0にリセットしてループ回数を増やす
+                stopwatchSeconds = 0;
+                stopwatchLoopCount++;
+                loopCountDisplay.textContent = `${stopwatchLoopCount}回`;
+              }
+            }
+            
+            const minutes = Math.floor(stopwatchSeconds / 60);
+            const seconds = stopwatchSeconds % 60;
+            if (stopwatch && stopwatch.textContent !== undefined) {
+              stopwatch.textContent = `${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
+            }
+          } catch (error) {
+            debugError('ストップウォッチ更新中にエラーが発生:', error);
+            // タイマーを停止してエラーを防ぐ
+            if (stopwatchTimerID) {
+              clearInterval(stopwatchTimerID);
+              stopwatchTimerID = null;
+            }
+          }
+        }, 1000);
+        // playButtonをpauseButtonに置き換え
+        if (playButton?.parentNode) playButton.remove();
+        if (stopButton?.parentNode) stopButton.remove();
+        if (stopwatchButtonContainer) {
+          stopwatchButtonContainer.appendChild(pauseButton);
+          stopwatchButtonContainer.appendChild(stopButton);
+        }
+      } catch (error) {
+        debugError('ストップウォッチ開始中にエラーが発生:', error);
+      }
+    }
+  });
+
+  // 一時停止ボタンのクリックイベント
+  pauseButton.addEventListener('click', function (e) {
+    e.stopPropagation();
+    try {
+      if (stopwatchTimerID) {
+        clearInterval(stopwatchTimerID);
+        stopwatchTimerID = null;
+        if (pauseButton?.parentNode) pauseButton.remove();
+        if (stopButton?.parentNode) stopButton.remove();
+        if (stopwatchButtonContainer) { // nullチェック
+          stopwatchButtonContainer.appendChild(playButton);
+          stopwatchButtonContainer.appendChild(stopButton);
+        }
+      }
+    } catch (error) {
+      debugError('一時停止処理中にエラーが発生:', error);
+    }
+  });
+
+  // 停止ボタンのクリックイベント
+  stopButton.addEventListener('click', function (e) {
+    e.stopPropagation();
+    try {
+      if (stopwatchTimerID) {
+        // 停止
+        clearInterval(stopwatchTimerID);
+        stopwatchTimerID = null;
+      }
+      stopwatchSeconds = 0;
+      stopwatchLoopCount = 0; // ループ回数もリセット
+      if (stopwatch && stopwatch.textContent !== undefined) {
+        stopwatch.textContent = '00:00';
+      }
+      if (loopCountDisplay) {
+        loopCountDisplay.textContent = '0回';
+      }
+      if (playButton?.parentNode) playButton.remove();
+      if (pauseButton?.parentNode) pauseButton.remove();
+      if (stopButton?.parentNode) stopButton.remove();
+      if (stopwatchButtonContainer) {
+        stopwatchButtonContainer.appendChild(playButton);
+        stopwatchButtonContainer.appendChild(stopButton);
+      }
+    } catch (error) {
+      debugError('停止処理中にエラーが発生:', error);
+    }
+  });
+
+  // 砂時計ボタンのクリックイベントを追加
+  const hourglassIcon = hourglassButton.querySelector('img');
+  hourglassIcon.addEventListener('click', function (e) {
+    e.stopPropagation();
+    this.classList.toggle('active');
+    debugLog('砂時計ボタンがクリックされました');
+    toggleSubPopup(); // サブポップアップの処理を実行
+  });
+
+  // リロードボタンのクリックイベントを追加
+  const reloadIcon = reloadButton.querySelector('img');
+  reloadIcon.addEventListener('click', function (e) {
+    e.stopPropagation();
+    // e.preventDefault()は削除（location.reload()を明示的に呼ぶので不要）
+    debugLog('リロードボタンがクリックされました');
+    try {
+      // リロード前にポップアップ表示状態を保存
+      const popupMain = document.getElementById(ID_YOMUP_POPUP_CONTAINER);
+      if (popupMain) {
+        localStorage.setItem(LOCALSTRG_YOMUP_REDISP, 'true');
+        // 保存を確実にするため、同期的に確認
+        const saved = localStorage.getItem(LOCALSTRG_YOMUP_REDISP);
+        if (saved !== 'true') {
+          debugError('localStorageへの保存に失敗しました');
+        } else {
+          debugLog('localStorageに保存しました:', saved);
+        }
+      }
+      // リロード前にクリーンアップ処理を実行
+      cleanupAllListeners();
+      // localStorageは同期的に保存されるので、setTimeoutは不要
+      // 直接リロードを実行
+      location.reload();
+    } catch (error) {
+      debugError('リロード処理中にエラーが発生:', error);
+      // エラーが発生してもリロードは実行
+      location.reload();
+    }
+  });
+
+
+  // 全体情報（1行目）
+  const totalInfo = document.createElement('div');
+  totalInfo.className = 'total-info';
+  totalInfo.textContent = `全体： ${textLength}字　${formatReadingTime(readingTime)}`;
+
+  // 選択範囲情報（2-3行目）
+  const selectionInfo = document.createElement('div');
+  selectionInfo.className = 'selection-info';
+
+  setSelectionInfoContent(selectionInfo, selectedText, selectedLength, selectedReadingTime);
+
+  popup.appendChild(totalInfo);
+  popup.appendChild(selectionInfo);
+
+
+  //要素の配置（上から並べる順番が大切）
+  // アイコンを追加
+  const playIcon = document.createElement('div');
+  playIcon.className = 'play-icon';
+  playIcon.appendChild(strCntButton);
+  playIcon.appendChild(lightbulbButton);
+  playIcon.appendChild(hourglassButton);
+  playIcon.appendChild(layerButton);
+  playIcon.appendChild(stopwatchButton);
+  playIcon.appendChild(reloadButton);
+  popup.appendChild(playIcon);
+
+
+  popup.appendChild(stopwatchContainer);
+  popup.appendChild(stopwatchButtonContainer);
+
+  shadow.appendChild(style);
+  shadow.appendChild(popup);
+
+  document.body.appendChild(container);
+
+  // ドラッグ移動機能を追加
+  addDragFunctionality(popup);
+
+  // ポップアップWクリック時の非表示機能
+  addClickToCloseFunctionality(popup);
+
+
+  // 各ボタンにマウスイベントを追加
+  function addTooltipEvents(button) {
+    const tooltip = button.querySelector('.tooltip');
+
+    button.addEventListener('mouseenter', function () {
+      tooltip.classList.add('show');
+    });
+
+    button.addEventListener('mouseleave', function () {
+      tooltip.classList.remove('show');
+    });
+  }
+
+  // 各ボタンにイベントを追加（ツールチップ）
+  addTooltipEvents(popupIcon);
+  addTooltipEvents(strCntButton);
+  addTooltipEvents(lightbulbButton);
+  addTooltipEvents(hourglassButton);
+  addTooltipEvents(layerButton);
+  addTooltipEvents(stopwatchButton);
+  addTooltipEvents(reloadButton);
+  addTooltipEvents(limitSelectWrapper);
+
+  // モード状態に基づいてボタンのactiveクラスを復元
+  if (isPageTransition && ENABLE_BUTTON_STATE_RESTORE) { //ページ遷移時のみ、有効 or 無効 を定数で切り替え
+    if (highLightOnOff && lightbulbIcon) {
+      lightbulbIcon.classList.add('active');
+    }
+    if (NoTextModeOnOff && layerIcon) {
+      layerIcon.classList.add('active');
+    }
+    if (subPopupOnOff && hourglassIcon) {
+      hourglassIcon.classList.add('active');
+    }
+  } else if (!isPageTransition) {
+    // ブラウザ起動時はボタン状態を初期化
+    highLightOnOff = false;
+    NoTextModeOnOff = false;
+    subPopupOnOff = false;
+  }
+
+  // ストップウォッチの状態を復元（ページ遷移時のみ）
+  // ブラウザ起動時は、LOCALSTRG_STOPWATCH_STATEを削除してストップウォッチをOFFにする
+  // ページ遷移時は、LOCALSTRG_STOPWATCH_STATEを復元する
+  // 判定方法：isPageTransition（sessionStorageで判定）を使用
+  const savedStopwatchState = localStorage.getItem(LOCALSTRG_STOPWATCH_STATE);
+  if (isPageTransition && savedStopwatchState) {
+    try {
+      const stopwatchState = JSON.parse(savedStopwatchState);
+      
+      // ストップウォッチの状態を復元
+      stopwatchSeconds = stopwatchState.seconds || 0;
+      stopwatchLimitMinutes = stopwatchState.limitMinutes !== undefined ? stopwatchState.limitMinutes : null;
+      stopwatchLoopCount = stopwatchState.loopCount || 0;
+      
+      // ストップウォッチが表示されていた場合
+      if (stopwatchState.isVisible) {
+        // ストップウォッチを表示
+        stopwatchContainer.style.setProperty('display', 'flex', 'important');
+        stopwatchButtonContainer.style.setProperty('display', 'block', 'important');
+        stopwatchIcon.classList.add('active');
+        
+        // 経過時間を表示
+        const minutes = Math.floor(stopwatchSeconds / 60);
+        const seconds = stopwatchSeconds % 60;
+        stopwatch.textContent = `${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
+        
+        // ドロップダウンの選択値を復元
+        if (stopwatchLimitMinutes !== null) {
+          limitSelect.value = stopwatchLimitMinutes.toString();
+          loopCountDisplay.classList.add('visible');
+          loopCountDisplay.textContent = `${stopwatchLoopCount}回`;
+        } else {
+          limitSelect.value = '-';
+          loopCountDisplay.classList.remove('visible');
+        }
+        
+        // ストップウォッチが動作中だった場合、タイマーを再開
+        if (stopwatchState.isRunning) {
+          // ボタンを一時停止/停止に変更
+          if (playButton?.parentNode) playButton.remove();
+          if (stopButton?.parentNode) stopButton.remove();
+          if (stopwatchButtonContainer) {
+            stopwatchButtonContainer.appendChild(pauseButton);
+            stopwatchButtonContainer.appendChild(stopButton);
+          }
+          
+          // タイマーを再開
+          stopwatchTimerID = setInterval(() => {
+            try {
+              stopwatchSeconds++;
+              
+              // ループタイマーの上限チェック
+              if (stopwatchLimitMinutes !== null) {
+                const limitSeconds = stopwatchLimitMinutes * 60;
+                if (stopwatchSeconds >= limitSeconds) {
+                  // 上限に達したら0にリセットしてループ回数を増やす
+                  stopwatchSeconds = 0;
+                  stopwatchLoopCount++;
+                  loopCountDisplay.textContent = `${stopwatchLoopCount}回`;
+                }
+              }
+              
+              const minutes = Math.floor(stopwatchSeconds / 60);
+              const seconds = stopwatchSeconds % 60;
+              if (stopwatch && stopwatch.textContent !== undefined) {
+                stopwatch.textContent = `${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
+              }
+            } catch (error) {
+              debugError('ストップウォッチ更新中にエラーが発生:', error);
+              // タイマーを停止してエラーを防ぐ
+              if (stopwatchTimerID) {
+                clearInterval(stopwatchTimerID);
+                stopwatchTimerID = null;
+              }
+            }
+          }, 1000);
+        }
+      }
+      
+      // 復元後、保存された状態をクリア
+      localStorage.removeItem(LOCALSTRG_STOPWATCH_STATE);
+    } catch (error) {
+      debugError('ストップウォッチ状態の復元中にエラーが発生:', error);
+    }
+  } else if (savedStopwatchState) {
+    // ブラウザ起動時はストップウォッチ状態を削除（ストップウォッチはOFFにする）
+    // isPageTransitionがfalseの場合、またはsavedStopwatchStateが存在するがisPageTransitionがfalseの場合
+    localStorage.removeItem(LOCALSTRG_STOPWATCH_STATE);
+  }
+
+} //end showYomuPPopup
+
+
+// === 読むプのホップアップ本体を非表示 ========================================
+function hideYomuPPopup(preserveModes = false) {
+  const existingPopupMain = document.getElementById(ID_YOMUP_POPUP_CONTAINER);
+  if (existingPopupMain) {
+    debugLog('hideYomuPPopup() がコールされました'); // 追加
+    // 1. 全モード状態をOFF化（リスナー・タイマーも同時クリア）
+    // preserveModesがtrueの場合はモードを保持する
+    if (!preserveModes) {
+      if (highLightOnOff) {
+        toggleHighlightMode();
+      } else {
+        // 念のため、highLightOnOffがfalseでもリスナーが残っている可能性があるので削除
+        detachHighlightListeners();
+      }
+      if (NoTextModeOnOff) toggleNoTextMode();
+      if (subPopupOnOff) toggleSubPopup();
+    }
+
+    // 2. 残存タイマー・ハイライトをクリア
+    if (mouseTimeoutForHighlight) {
+      clearTimeout(mouseTimeoutForHighlight);
+      mouseTimeoutForHighlight = null;
+    }
+    if (stopwatchTimerID) {
+      clearInterval(stopwatchTimerID);
+      stopwatchTimerID = null;
+    }
+    // ドラッグ用リスナーも削除
+    if (isDragging) {
+      isDragging = false;
+      currentDraggingPopup = null;
+    }
+    clearCurrentHighlight();
+
+    // 3. ポップアップ削除
+    existingPopupMain.remove();
+  }
+} //end hideYomuPPopup
+
+
+// === ハイライト処理モードをトグルON/OFFする関数 ===============================
+function toggleHighlightMode() {
+  highLightOnOff = !highLightOnOff; // 状態を反転
+  localStorage.setItem(LOCALSTRG_HIGHLIGHT_ONOFF, highLightOnOff.toString());
+
+  if (highLightOnOff) {
+    debugLog('Highlightモードが有効になりました');
+    attachHighlightListeners(); // イベントリスナーを追加
+  } else {
+    // 現在のハイライトをクリア
+    clearCurrentHighlight();
+    debugLog('Highlightモードが無効になりました');
+    detachHighlightListeners(); // イベントリスナーを削除
+  }
+}
+
+
+// === マウス移動時の処理 ======================================================
+function handleMouseMove(event) {
+  if (!highLightOnOff) return;
+
+  // テキスト入力可能な要素の場合は処理をスキップ
+  if (isEditableElement(event.target)) {
+    return;
+  }
+
+  lastHighlightClientX = event.clientX;
+  lastHighlightClientY = event.clientY;
+
+  // マウスが動く度に既存のタイマーをキャンセル
+  if (mouseTimeoutForHighlight) {
+    clearTimeout(mouseTimeoutForHighlight);
+  }
+
+  // 新しいタイマーを設定（#ms後にハイライト）
+  try {
+    mouseTimeoutForHighlight = setTimeout(() => {
+      try {
+        highlightElement(event.target, lastHighlightClientX, lastHighlightClientY);
+      } catch (error) {
+        debugError('ハイライト処理中にエラーが発生:', error);
+      }
+    }, 250);
+  } catch (error) {
+    debugError('タイマー設定中にエラーが発生:', error);
+  }
+} //end handleMouseMove
+
+
+// === マウスが要素から出た時の処理 =============================================
+function handleMouseOut() {
+  if (!highLightOnOff) return;
+
+  // タイマーをクリア
+  if (mouseTimeoutForHighlight) {
+    clearTimeout(mouseTimeoutForHighlight);
+    mouseTimeoutForHighlight = null;
+  }
+
+  // ハイライトをクリア
+  clearCurrentHighlight();
+}
+
+// === タグ名判定用のヘルパー関数 ============================================
+function isHighlightTargetTag(tagName) {
+  return HIGHLIGHT_TARGET_TAGS.includes(tagName);
+}
+
+function isConsecutiveGroupTag(tagName) {
+  return CONSECUTIVE_GROUP_TAGS.includes(tagName);
+}
+
+// === キャレット位置取得（Chrome / Firefox 互換）==============================
+function caretRangeFromClientXY(clientX, clientY) {
+  if (typeof document.caretRangeFromPoint === 'function') {
+    return document.caretRangeFromPoint(clientX, clientY);
+  }
+  if (typeof document.caretPositionFromPoint === 'function') {
+    const pos = document.caretPositionFromPoint(clientX, clientY);
+    if (!pos || !pos.offsetNode) return null;
+    const range = document.createRange();
+    try {
+      range.setStart(pos.offsetNode, Math.min(pos.offset, (pos.offsetNode.textContent || '').length));
+      range.collapse(true);
+      return range;
+    } catch (_e) {
+      return null;
+    }
+  }
+  return null;
+}
+
+function isYomupUiElement(el) {
+  if (!el || typeof el.closest !== 'function') return false;
+  return !!(el.closest('#' + ID_YOMUP_POPUP_CONTAINER) || el.closest('#' + ID_SUBPOPUP_CONTAINER));
+}
+
+// === 巨大な混在コンテナを、ポインタ直下のテキストに基づき狭い要素へ絞り込む =====
+function resolveNarrowHighlightTarget(element, clientX, clientY) {
+  const textLength = (element.textContent || '').trim().length;
+  const cst = getChildSiblingCounts(element);
+  if (!((cst > 0) && (textLength > MAX_TEXT_LENGTH_FOR_HIGHLIGHT))) {
+    return null;
+  }
+  return refineHighlightTargetFromPoint(element, clientX, clientY);
+}
+
+function refineHighlightTargetFromPoint(containerEl, clientX, clientY) {
+  try {
+    const range = caretRangeFromClientXY(clientX, clientY);
+    if (!range || !range.startContainer) return null;
+
+    let textNode = range.startContainer;
+    if (textNode.nodeType !== Node.TEXT_NODE) return null;
+    if (!containerEl.contains(textNode)) return null;
+    if (isYomupUiElement(textNode.parentElement)) return null;
+
+    let el = textNode.parentElement;
+    while (el && containerEl.contains(el)) {
+      if (isYomupUiElement(el) || isEditableElement(el)) return null;
+      const len = (el.textContent || '').trim().length;
+      if (len > 0 && len <= MAX_TEXT_LENGTH_FOR_HIGHLIGHT + 5) {
+        return el;
+      }
+      el = el.parentElement;
+    }
+
+    const raw = textNode.textContent || '';
+    const chunkLen = raw.trim().length;
+    const parent = textNode.parentElement;
+    if (!parent || !containerEl.contains(parent)) return null;
+
+    if (chunkLen > 0 && chunkLen <= MAX_TEXT_LENGTH_FOR_HIGHLIGHT + 5) {
+      if (!parent.closest('code') && !isYomupUiElement(parent)) {
+        if (parent.tagName === 'SPAN' && parent.classList.contains(CLASS_PROCESSED_SPAN) && parent.childNodes.length === 1) {
+          return parent;
+        }
+        const span = document.createElement('span');
+        span.className = CLASS_PROCESSED_SPAN;
+        parent.insertBefore(span, textNode);
+        span.appendChild(textNode);
+        return span;
+      }
+    }
+
+    if (chunkLen > MAX_TEXT_LENGTH_FOR_HIGHLIGHT && shouldProcessTextNode(textNode)) {
+      splitTextNodeByLength(textNode, MAX_TEXT_LENGTH_FOR_HIGHLIGHT);
+      const range2 = caretRangeFromClientXY(clientX, clientY);
+      if (range2 && range2.startContainer.nodeType === Node.TEXT_NODE) {
+        let e2 = range2.startContainer.parentElement;
+        while (e2 && containerEl.contains(e2)) {
+          if (isYomupUiElement(e2)) break;
+          const slen = (e2.textContent || '').trim().length;
+          if (slen > 0 && slen <= MAX_TEXT_LENGTH_FOR_HIGHLIGHT + 5) {
+            return e2;
+          }
+          e2 = e2.parentElement;
+        }
+      }
+    }
+  } catch (err) {
+    debugError('refineHighlightTargetFromPoint:', err);
+  }
+  return null;
+}
+
+// === 連続するspan要素を含む親要素を検出する関数 ============================
+function findParentWithConsecutiveSpans(element) {
+  if (!element || !isHighlightTargetTag(element.tagName)) {
+    return null;
+  }
+
+  const parent = element.parentElement;
+  if (!parent) {
+    return null;
+  }
+
+  // 親要素の直接の子要素を取得
+  const children = Array.from(parent.childNodes);
+
+  // 連続するspan要素のグループを検出
+  let consecutiveSpans = [];
+  let currentGroup = [];
+
+  for (let i = 0; i < children.length; i++) {
+    const child = children[i];
+
+    // span要素、a要素、strong要素、またはテキストノード（空白のみでない）の場合
+    if ((child.nodeType === Node.ELEMENT_NODE && isConsecutiveGroupTag(child.tagName)) ||
+      (child.nodeType === Node.TEXT_NODE && child.textContent.trim() !== '')) {
+      currentGroup.push(child);
+    } else {
+      // 連続が途切れた場合、現在のグループを評価
+      if (currentGroup.length >= 2) {
+        // グループ内にspan要素、a要素、またはstrong要素が2つ以上あるかチェック
+        const textElementCount = currentGroup.filter(node =>
+          node.nodeType === Node.ELEMENT_NODE && isConsecutiveGroupTag(node.tagName)
+        ).length;
+
+        if (textElementCount >= 2) {
+          consecutiveSpans = currentGroup;
+          break;
+        }
+      }
+      currentGroup = [];
+    }
+  }
+
+  // 最後のグループもチェック
+  if (currentGroup.length >= 2) {
+    const textElementCount = currentGroup.filter(node =>
+      node.nodeType === Node.ELEMENT_NODE && isConsecutiveGroupTag(node.tagName)
+    ).length;
+
+    if (textElementCount >= 2) {
+      consecutiveSpans = currentGroup;
+    }
+  }
+
+  // 連続するspan要素が2つ以上ある場合、親要素を返す
+  if (consecutiveSpans.length >= 2) {
+    // マウスオーバーした要素が連続グループに含まれているかチェック
+    const isElementInGroup = consecutiveSpans.some(node =>
+      node === element || (node.nodeType === Node.ELEMENT_NODE && node.contains && node.contains(element))
+    );
+
+    if (isElementInGroup) {
+      // 親要素のテキスト長をチェック
+      const parentTextLength = parent.textContent.trim().length;
+      if (parentTextLength <= MAX_TEXT_LENGTH_FOR_HIGHLIGHT + 5) {
+        return parent;
+      }
+    }
+  }
+
+  return null;
+}  // findParentWithConsecutiveSpans
+
+
+// === 要素をハイライトする関数 ===============================================
+function highlightElement(element, clientX, clientY) {
+  try {
+    // テキスト入力可能な要素の場合は処理をスキップ
+    if (isEditableElement(element)) {
+      return;
+    }
+
+    // 要素下に html/head/body がある場合は処理しない（section は HTML5 記事で一般的なため含めない）
+    if (!!(element.querySelector('html,head,body'))) {
+      debugLog('要素下にhtml,head,bodyがある場合');
+      return;
+    }
+
+    // 要素下にテキストノードがない場合は処理しない
+    if (getFirstTextNodeDepth(element) === -1) {
+      debugLog('要素下にテキストノードがない場合');
+      return;
+    }
+
+    if (typeof clientX === 'number' && typeof clientY === 'number') {
+      const narrowed = resolveNarrowHighlightTarget(element, clientX, clientY);
+      if (narrowed) {
+        element = narrowed;
+      }
+    }
+
+    if (getFirstTextNodeDepth(element) === -1) {
+      return;
+    }
+
+    let preHilightSts = 0; //init:0
+    let textContent = element.textContent || '';
+    let textLength = textContent.trim().length;
+    const cstChildsiblingCounts = getChildSiblingCounts(element); //同一階層の子要素数(br等除く)
+
+    //code要素がまとまって存在する場合の処理（親要素にcodeがある場合）
+    if (element.closest('code')
+      && (element.children.length >= 1) //要素ノードがある場合
+      && !element.classList.contains(CODE_WRAP_CLASS_NAME) //自分がラップ済か
+      && !element.closest('.' + CODE_WRAP_CLASS_NAME)) { //先祖がラップ済か
+      preHilightSts = 1; //code
+      debugLog('CODEの要素:', element);
+      if (!processedElementCache.has(element)) {
+        processedElementCache.add(element);
+        //code要素内において、改行を基準にテキストを分割し、改行文字を単独ノードにする。
+        splitTextNodesByNewline(element);
+        //改行以外のテキストノードを1つずつspanで包む
+        addSpanToNonNewlineText(element);
+        //改行ノード('\n')を境に行単位グルーピング(code_line_wrapクラス)
+        wrapCodeLines(element);
+        //inline-blockでラッピングし行ラップ、ハイライト枠の表示を安定化
+        wrapAllChildElements(element);
+      }
+    }
+
+    //code が単独で存在する場合の処理（上記は子要素が存在する場合のため上記と重複しない）
+    if (element.closest('code')) {
+      if (!processedElementCache.has(element)) {
+        processedElementCache.add(element);
+        preHilightSts = 2; //code2
+        //code要素内の改行を分割する
+        splitTextNodesByNewline(element);
+        //単独のテキストノードにspanを付けて要素化しハイライト可能にする
+        splitLongTextNodes(element);
+      }
+    }
+
+
+    //ruby要素がある場合の処理
+    if (element.querySelector('ruby')) {
+      if (!processedElementCache.has(element)) {
+        preHilightSts = 3; //ruby
+        debugLog('RUBYの要素:', element);
+        processedElementCache.add(element);
+        //ruby・rb・rt要素を分割テキスト化し、以降の分割に備える
+        replaceRubyWithText(element);
+        // 上記の分割テキスト化後に残る\nを削除し以降の分割に備える(◆注意◆ruby削除後しか使えない処理)
+        removeEnNAfterRuby(element);
+        //長文テキストを分割しハイライト可能な長さに整える
+        splitAllTextNodesByLength(element);
+      }
+    } else {
+    }
+
+    //GMAIL向け
+    if (element.querySelector('wbr') &&
+      element.textContent &&
+      element.textContent.includes('\n') &&
+      (element.textContent.match(/\n/g) || []).length <= 1) {
+      preHilightSts = 4; //gmail
+      removeWbrTags(element); //wbrを削除
+      splitLongTextNodes(element); //単独テキストにspan
+      wrapBrLines(element); //br境界でspan
+    }
+
+    // 一通りの前処理が終わりハイライトまで進めて良いかの判定
+    // 同一階層の子要素数(br,span,code,ruby,em,a除く)が1を超える場合かつ長文テキストは処理しない
+    if ((cstChildsiblingCounts > 0)
+      && (textLength > MAX_TEXT_LENGTH_FOR_HIGHLIGHT)) {
+      debugLog(`同一階層の子要素数(br等除く)が0を超える場合かつ長文テキストの場合: ${cstChildsiblingCounts}要素、${textLength}文字`);
+      return;
+    }
+
+    //一通りの前処理が終わりハイライトをする前に残ったテキストノードにspanを付ける
+    if (preHilightSts === 0) {
+      if (textLength > MAX_TEXT_LENGTH_FOR_HIGHLIGHT) {
+        if (!processedElementCache.has(element)) {
+          processedElementCache.add(element);
+          //長文テキストを分割
+          splitAllTextNodesByLength(element);
+          // 行頭～<br>までの要素をpadding-right:20pxのspanで囲む
+          wrapBrLineGroups(element);
+        }
+      }
+    }
+
+    //ハイライトを実施（文字数制限あり(5文字余裕持たせてある)）
+    // 分割処理が実行された場合は、親要素全体をハイライト
+    if (preHilightSts === 0 && textLength > MAX_TEXT_LENGTH_FOR_HIGHLIGHT) {
+      // 分割処理が実行された場合、親要素全体をハイライト
+      //aaaaa applyHighlight(element);
+      //aaaaa startCountdownSubPopup(textLength);
+    } else if (textLength <= MAX_TEXT_LENGTH_FOR_HIGHLIGHT + 5) {
+      // 連続するspan要素を含む親要素を検出（span要素またはstrong要素の場合）
+      let highlightTarget = element;
+
+      // processed-span要素の場合、wrapBrLineGroups()で作成されたグループを探す
+      if (element.classList && element.classList.contains(CLASS_PROCESSED_SPAN)) {
+        // 親要素がpadding-rightのspan（wrapBrLineGroups()で作成されたグループ）かチェック
+        let parent = element.parentElement;
+        let depth = 0;
+        const maxDepth = 5; // 無限ループ防止
+
+        while (parent && depth < maxDepth) {
+          // インラインスタイルでpaddingRightが設定されているかチェック
+          // wrapBrLineGroups()で作成されたグループはpadding-right: 0pxまたは20pxを持つ
+          if (parent.style && parent.style.paddingRight) {
+            const paddingRight = parent.style.paddingRight;
+            // paddingRightが設定されている場合（'0px'も含む、wrapBrLineGroups()で作成されたグループ）
+            if (paddingRight !== undefined && paddingRight !== null && paddingRight !== '') {
+              // wrapBrLineGroups()で作成されたグループは、文字数制限に関係なく常にハイライト対象とする
+              highlightTarget = parent;
+              debugLog('wrapBrLineGroups()で作成されたグループを検出:', parent, 'paddingRight:', paddingRight);
+              break;
+            }
+          }
+          parent = parent.parentElement;
+          depth++;
+        }
+      }
+
+      if (isHighlightTargetTag(highlightTarget.tagName)) {
+        const parentWithSpans = findParentWithConsecutiveSpans(highlightTarget);
+        if (parentWithSpans) {
+          highlightTarget = parentWithSpans;
+          debugLog('連続するspan要素を含む親要素を検出:', parentWithSpans);
+        }
+      }
+
+      // highlightTargetの文字数を使用
+      const finalTextLength = highlightTarget.textContent.trim().length;
+      applyHighlight(highlightTarget);
+      startCountdownSubPopup(finalTextLength);
+    }
+  } catch (error) {
+    debugError('highlightElement処理中にエラーが発生:', error);
+    // エラーが発生しても拡張機能は停止しないようにする
+  }
+} //end highlightElement
+
+
+// === 現在のハイライトをクリアする関数 =========================================
+function clearCurrentHighlight() {
+  if (currentHighlightedElement) {
+    currentHighlightedElement.style.border = '';
+    currentHighlightedElement.style.outline = '';
+    currentHighlightedElement = null;
+  }
+
+  // カウントダウンタイマーをクリア
+  if (countDownIntervalForSub) {
+    clearInterval(countDownIntervalForSub);
+    countDownIntervalForSub = null;
+  }
+
+  // サブポップアップの文字数を非表示にする
+  hideSubPopupCharCount();
+} //end clearCurrentHighlight
+
+
+// === テキスト入力可能なDOMの判定 =============================================
+function isEditableElement(element) {
+  if (!element) return false;
+
+  // 1. contenteditable属性がtrue
+  if (element.contentEditable === 'true' || element.isContentEditable) {
+    return true;
+  }
+
+  // 2. input要素（text, email, search, tel, url, passwordなど）
+  if (element.tagName === 'INPUT' &&
+    ['text', 'email', 'search', 'tel', 'url', 'password', 'number'].includes(element.type)) {
+    return true;
+  }
+
+  // 3. textarea要素
+  if (element.tagName === 'TEXTAREA') {
+    return true;
+  }
+
+  // 4. role="textbox"の要素
+  if (element.getAttribute('role') === 'textbox') {
+    return true;
+  }
+
+  // 5. 親要素がテキスト入力可能な場合もスキップ（オプション）
+  // 例: contenteditableな親要素内の子要素
+  if (element.closest('[contenteditable="true"]')) {
+    return true;
+  }
+
+  return false;
+} //end isEditableElement
+
+
+// === サブポップアップの文字数を非表示にする関数 ================================
+function hideSubPopupCharCount() {
+  const subpopup = document.getElementById(ID_SUBPOPUP_CONTAINER);
+  if (subpopup) {
+    const shadow = subpopup.shadowRoot;
+    if (shadow) {
+      const charCount = shadow.querySelector('.char-count');
+      if (charCount) {
+        charCount.style.display = 'none';
+      }
+    }
+  }
+}
+
+
+
+// === 同一階層の子要素数(br,span,code,ruby,em,a除く)を出力 =====================
+function getChildSiblingCounts(element) {
+  if (!element?.children) {
+    return 100; //error値
+  }
+
+  const children = element.children;
+  const tagCounts = {};
+  const excludeTags = ['br', 'span', 'code', 'ruby', 'em', 'a', 'strong', 'b', 'i', 'img'];
+
+  for (let i = 0; i < children.length; i++) {
+    const tagName = children[i].tagName.toLowerCase();
+    tagCounts[tagName] = (tagCounts[tagName] || 0) + 1;
+  }
+
+  // 除外タグを除いた種類数
+  const validTagCount = Object.keys(tagCounts)
+    .filter(tag => !excludeTags.includes(tag))
+    .length;
+
+  return validTagCount;
+}
+
+
+
+// === <br>を境界として連続する要素をbr_line_wrapクラスで囲む ===================
+function wrapBrLines(element) {
+  // 後ろから処理してインデックスのずれを防ぐ
+  for (let i = element.childNodes.length - 1; i >= 0; i--) {
+    const currentNode = element.childNodes[i];
+
+    // brタグの場合はスキップ
+    if (currentNode.nodeType === Node.ELEMENT_NODE && currentNode.tagName === 'BR') {
+      continue;
+    }
+
+    // 既にbr_line_wrapでラップされている要素はスキップ
+    if (currentNode.nodeType === Node.ELEMENT_NODE &&
+      currentNode.classList &&
+      currentNode.parentNode.classList.contains(CLASS_BR_LINE_WRAP)) {
+      continue;
+    }
+
+    // 連続する要素を収集（後ろから）
+    const lineElements = [];
+    let j = i;
+    while (j >= 0) {
+      const node = element.childNodes[j];
+
+      // brタグで終了
+      if (node.nodeType === Node.ELEMENT_NODE && node.tagName === 'BR') {
+        break;
+      }
+
+      // 要素ノードまたはテキストノードを収集
+      if (node.nodeType === Node.ELEMENT_NODE ||
+        node.nodeType === Node.TEXT_NODE) {
+        lineElements.unshift(node); // 前から順番に追加
+      }
+
+      j--;
+    }
+
+    // 収集した要素が2個以上の場合のみラッピング
+    if (lineElements.length >= 2) {
+      // br_line_wrapコンテナを作成
+      const container = document.createElement('span');
+      container.className = CLASS_BR_LINE_WRAP;
+      container.style.display = 'inline-block';
+      container.style.width = '98%';
+
+      // 最初の要素の前にコンテナを挿入
+      element.insertBefore(container, lineElements[0]);
+
+      // 収集した要素をコンテナに移動
+      lineElements.forEach(el => {
+        container.appendChild(el);
+      });
+    }
+
+    // 次の処理位置を更新
+    i = j;
+  }
+} //end wrapBrLines
+
+
+// === wbrを削除 ==============================================================
+function removeWbrTags(element) {
+  const children = Array.from(element.childNodes);
+
+  children.forEach(node => {
+    if (node.nodeType === Node.ELEMENT_NODE) {
+      if (node.tagName === 'WBR') {
+        // wbrタグを削除
+        node.parentNode.removeChild(node);
+      } else {
+        // 他の要素内のwbrタグも再帰的に削除
+        removeWbrTags(node);
+      }
+    }
+  });
+}
+
+
+// === テキストノードが初めて存在する子階数数を算出 ==============================
+function getFirstTextNodeDepth(element, maxDepth = 10) {
+  // スタック: [{node: 要素, level: 深さ}, ...]
+  const stack = [{ node: element, level: 0 }];
+
+  while (stack.length > 0) {
+    const { node: el, level } = stack.pop(); // 最後に追加したものから取り出す
+
+    // 最大深さチェック
+    if (level >= maxDepth) continue;
+
+    // 子ノードをチェック
+    if (el.childNodes) {
+      // 逆順でスタックに追加（後で処理するため）
+      for (let i = el.childNodes.length - 1; i >= 0; i--) {
+        const child = el.childNodes[i];
+
+        // テキストノードかチェック
+        if (child.nodeType === Node.TEXT_NODE && child.textContent.trim()) {
+          return level + 1; // 見つかったら即座に返す
+        }
+
+        // 要素ノードならスタックに追加
+        if (child.nodeType === Node.ELEMENT_NODE) {
+          stack.push({ node: child, level: level + 1 });
+        }
+      }
+    }
+  }
+
+  return -1; // テキストノードが見つからない
+} //end getFirstTextNodeDepth
+
+
+// === rubyでnを削除後に長文テキストを分割(句読点を考慮して分割) =================
+function splitTextByPunctuation(text, maxLength) {
+  const chunks = [];
+  let start = 0;
+
+  while (start < text.length) {
+    const quotient = Math.floor(text.length / maxLength);
+    const segmentLength = Math.floor(text.length / (quotient + 1));
+    let end = start + segmentLength;
+
+    // 句読点で分割位置を調整
+    if (end < text.length) {
+      const punctuation = /[。、！？．，！？]/;
+      const searchStart = Math.max(start, end - 10);
+      const searchEnd = Math.min(text.length, end + 10);
+
+      for (let i = searchEnd; i >= searchStart; i--) {
+        if (punctuation.test(text[i])) {
+          end = i + 1;
+          break;
+        }
+      }
+    }
+
+    chunks.push(text.slice(start, end));
+    start = end;
+  }
+
+  return chunks;
+} //end splitTextByPunctuation
+
+
+// === テキストノードをspanで囲む共通処理 =======================================
+function wrapTextNodeWithSpan(textNode, text, className = CLASS_PROCESSED_SPAN) {
+  const span = document.createElement('span');
+  span.className = className;
+  span.textContent = text;
+  const parent = textNode.parentNode;
+  parent.insertBefore(span, textNode);
+  parent.removeChild(textNode);
+
+  // 1行だけの場合、inline-blockスタイルを追加
+  if (isSingleLineElement(span)) {
+    span.style.display = 'inline-block';
+    span.style.width = '90%';
+  }
+}
+
+
+// === spanが一行に単独で存在するか判定するヘルパー関数 ==========================
+function isSingleLineElement(span) {
+  const parent = span.parentNode;
+  if (!parent) return false;
+
+  // 親要素がインライン要素（<b>, <span>, <a>など）の場合は、さらに上位の親要素を確認
+  const inlineTags = ['B', 'SPAN', 'A', 'STRONG', 'EM', 'I', 'U'];
+  let checkParent = parent;
+  let targetElement = span; // 確認対象の要素（spanまたはその親要素）
+
+  if (inlineTags.includes(checkParent.tagName)) {
+    targetElement = checkParent; // 親要素（<b>タグなど）を確認対象にする
+    checkParent = checkParent.parentNode;
+    if (!checkParent) return false;
+  }
+
+  const allSiblings = Array.from(checkParent.childNodes);
+  const targetIndex = allSiblings.indexOf(targetElement);
+  if (targetIndex === -1) return false;
+
+  // 前の<br>を探す
+  let lineStartIndex = 0;
+  for (let i = targetIndex - 1; i >= 0; i--) {
+    const node = allSiblings[i];
+    if (node.nodeType === Node.ELEMENT_NODE && node.tagName === 'BR') {
+      lineStartIndex = i + 1;
+      break;
+    }
+  }
+
+  // 後の<br>を探す
+  let lineEndIndex = allSiblings.length;
+  for (let i = targetIndex + 1; i < allSiblings.length; i++) {
+    const node = allSiblings[i];
+    if (node.nodeType === Node.ELEMENT_NODE && node.tagName === 'BR') {
+      lineEndIndex = i;
+      break;
+    }
+  }
+
+  // その行の要素ノード（BRを除く）をカウントし、文字数も同時にカウント
+  let elementCount = 0;
+  let totalTextLength = 0;
+  for (let i = lineStartIndex; i < lineEndIndex; i++) {
+    const node = allSiblings[i];
+    totalTextLength += getNodeTextLength(node);
+    if (node.nodeType === Node.ELEMENT_NODE && node.tagName !== 'BR') {
+      elementCount++;
+    }
+  }
+
+  // まず要素数で一行か判定（要素が1つだけなら一行候補）
+  if (elementCount !== 1) {
+    return false; // 要素が2つ以上なら一行ではない（文字数に関係なく）
+  }
+
+  // 一行と判定した上で、40文字以下なら最終的に一行と確定
+  return totalTextLength <= 40;
+} //end isSingleLineElement
+
+
+// === テキストノードを処理すべきかチェック =====================================
+function shouldProcessTextNode(textNode) {
+  // aタグ内はスキップ
+  if (textNode.parentElement?.tagName === 'A') return false;
+
+  // 既にクラス名付きspanで囲まれている場合はスキップ
+  if (textNode.parentElement?.tagName === 'SPAN' &&
+    textNode.parentElement.className.trim() !== '') {
+    return false;
+  }
+
+  return true;
+}
+
+// === 単一テキストノードの分割処理 ============================================
+function splitTextNodeByLength(textNode, maxLength) {
+  if (!textNode || textNode.nodeType !== Node.TEXT_NODE) return;
+  if (!shouldProcessTextNode(textNode)) return;
+
+  const text = textNode.textContent;
+  if (!text) return;
+
+  // 改行文字一文字の場合は処理をスキップ
+  if (text === '\n') return;
+
+  // 空文字、空白文字のみ、または&nbsp;（非改行スペース）のみの場合は通常のスペースに置換
+  const trimmed = text.trim();
+  if (trimmed === '' || trimmed === '\u00A0') {
+    // テキストノードを通常のスペースに置換
+    const parent = textNode.parentNode;
+    if (parent) {
+      const spaceNode = document.createTextNode(' ');
+      parent.replaceChild(spaceNode, textNode);
+    }
+    return;
+  }
+
+
+  const parent = textNode.parentNode;
+  if (!parent) return;
+
+  try {
+    if (text.length <= maxLength) {
+      wrapTextNodeWithSpan(textNode, text);
+    } else {
+      const chunks = splitTextByPunctuation(text, maxLength);
+      chunks.forEach(chunk => {
+        const span = document.createElement('span');
+        span.textContent = chunk;
+        parent.insertBefore(span, textNode);
+      });
+      parent.removeChild(textNode);
+    }
+  } catch (error) {
+    debugError('テキストノード分割中にエラーが発生:', error);
+  }
+} //end splitTextNodeByLength
+
+// === 長文テキストを指定長に分割 ==============================================
+function splitAllTextNodesByLength(parentElement, maxLength = MAX_TEXT_LENGTH_FOR_HIGHLIGHT) {
+  if (!parentElement?.childNodes) return;
+
+  try {
+    Array.from(parentElement.childNodes).forEach(child => {
+      if (child.nodeType === Node.TEXT_NODE) {
+        splitTextNodeByLength(child, maxLength);
+      } else if (child.nodeType === Node.ELEMENT_NODE) {
+        if (child.tagName !== 'STRONG') {
+          splitAllTextNodesByLength(child, maxLength); // 再帰処理
+        }
+      }
+    });
+  } catch (error) {
+    debugError('テキストノード分割処理中にエラーが発生:', error);
+  }
+}
+
+// === 行頭～<br>までの要素をpadding-right:20pxのspanで囲む ====================
+function wrapBrLineGroups(element) {
+  if (!element?.childNodes) return;
+
+  const children = Array.from(element.childNodes);
+  let currentGroup = []; // 現在のグループ
+  let currentLength = 0; // 現在のグループの累積文字数
+
+  for (let i = 0; i < children.length; i++) {
+    const node = children[i];
+
+    // brタグに到達した場合
+    if (node.nodeType === Node.ELEMENT_NODE && node.tagName === 'BR') {
+      // 既存のグループが1個以上の場合のみ処理（2個以上から1個以上に変更）
+      if (currentGroup.length >= 1 && currentLength > 0) { // 修正が必要
+        wrapNodesWithPaddingSpan(currentGroup, element, "20px");
+      }
+      currentGroup = [];
+      currentLength = 0;
+      continue;
+    }
+
+    // &nbsp;（非改行スペース）だけを含むテキストノードはスキップ
+    if (node.nodeType === Node.TEXT_NODE) {
+      const text = node.textContent || '';
+      const trimmed = text.trim();
+      if (trimmed === '' || trimmed === '\u00A0') {
+        continue; // スキップ
+      }
+    }
+
+    // テキストノードまたは要素ノードを処理
+    const textLength = getNodeTextLength(node);
+
+    // 追加するとMAX_TEXT_LENGTH_FOR_HIGHLIGHT文字を超える場合
+    if (currentLength + textLength > MAX_TEXT_LENGTH_FOR_HIGHLIGHT) {
+      if (currentGroup.length >= 1 && currentLength > 0) { // 2個以上から1個以上に変更
+        // 現在のグループを処理
+        wrapNodesWithPaddingSpan(currentGroup, element);
+        currentGroup = [];
+        currentLength = 0;
+      }
+      // 現在の要素を新しいグループの最初の要素として追加
+    }
+
+    // ノードを現在のグループに追加
+    currentGroup.push(node);
+    currentLength += textLength;
+  }
+
+  // ループ終了時に currentGroup が残っていれば処理
+  if (currentGroup.length >= 1 && currentLength > 0) { // 2個以上から1個以上に変更
+    // 最後の要素がBRかどうかを確認
+    const lastNode = children[children.length - 1];
+    const isLastNodeBR = lastNode &&
+      lastNode.nodeType === Node.ELEMENT_NODE &&
+      lastNode.tagName === 'BR';
+
+    const padding = isLastNodeBR ? '20px' : '0px';
+    wrapNodesWithPaddingSpan(currentGroup, element, padding);
+  }
+} //end wrapBrLineGroups
+
+
+// === ノードのテキスト長を取得するヘルパー関数 ==================================
+function getNodeTextLength(node) {
+  if (node.nodeType === Node.TEXT_NODE) {
+    return (node.textContent || '').length;
+  } else if (node.nodeType === Node.ELEMENT_NODE) {
+    return (node.textContent || '').length;
+  }
+  return 0;
+}
+
+// === ノードグループをpadding-right:20pxのspanで囲む関数 =======================
+function wrapNodesWithPaddingSpan(nodes, parentElement, paddingRight = '0px') {
+  if (nodes.length === 0) return;
+
+  const firstNode = nodes[0];
+  const parent = firstNode.parentNode || parentElement;
+  if (!parent) return;
+
+  // 新しいspan要素を作成
+  const wrapper = document.createElement('span');
+  wrapper.style.paddingRight = paddingRight;
+
+  // 最初のノードの前にwrapperを挿入
+  parent.insertBefore(wrapper, firstNode);
+
+  // グループ内のすべてのノードをwrapperに移動（前から順に処理）
+  for (let i = 0; i < nodes.length; i++) {
+    const node = nodes[i];
+    if (node.parentNode === parent) {
+      wrapper.appendChild(node);
+    }
+  }
+} //end wrapNodesWithPaddingSpan
+
+
+// === ruby・rb・rt要素を分割削除後に\nを削除 ==================================
+function removeEnNAfterRuby(element) {
+  if (element && element.innerHTML.includes('\n')) {
+    element.innerHTML = element.innerHTML.replace(/\n/g, '');
+  }
+}
+
+
+// === ruby・rb・rt要素を分割削除 ==============================================
+function replaceRubyWithText(element) {
+  const children = Array.from(element.childNodes);
+
+  children.forEach(node => {
+    if (node.nodeType === Node.ELEMENT_NODE) {
+      if (node.tagName === 'RUBY') {
+        const rbElement = node.querySelector('rb');
+        const rtElement = node.querySelector('rt');
+
+        let textContent = '';
+        if (rbElement) textContent += rbElement.textContent;
+        if (rtElement) textContent += `（${rtElement.textContent}）`;
+
+        const textNode = document.createTextNode(textContent);
+        node.parentNode.replaceChild(textNode, node);
+      } else {
+        replaceRubyWithText(node);
+      }
+    }
+  });
+}
+
+
+// === 単独のテキストノードにspanを付ける =======================================
+function splitLongTextNodes(element) {
+  const childNodes = Array.from(element.childNodes);
+
+  // 逆順で処理してインデックスずれを防ぐ
+  for (let i = childNodes.length - 1; i >= 0; i--) {
+    const node = childNodes[i];
+
+    if (node.nodeType === Node.TEXT_NODE &&
+      childNodes.length > 1) {
+      const text = node.textContent;
+
+      // 既にspanで囲まれているかチェック
+      if (node.parentElement && node.parentElement.tagName === 'SPAN') {
+        continue; // 既にspanで囲まれている場合はスキップ
+      }
+
+      // 条件チェック: 空文字でない かつ 改行文字でない かつ 1文字以上
+      // かつ &nbsp;（非改行スペース）のみでない
+      if (text && text.trim() !== '' && !text.match(/^\s*$/) &&
+        text.trim() !== '\u00A0' && text !== '\u00A0') {
+        const parent = node.parentNode;
+        const nextSibling = node.nextSibling;
+
+        // 元のノードを削除
+        node.remove();
+
+        // spanで囲む
+        const span = document.createElement('span');
+        span.textContent = text;
+        parent.insertBefore(span, nextSibling);
+      }
+    }
+  }
+} //end splitLongTextNodes
+
+
+
+// === code要素内の改行を分割する ==============================================
+function splitTextNodesByNewline(element) {
+  let i = 0;
+  while (i < element.childNodes.length) {
+    let targetNode = element.childNodes[i];
+    
+    // 要素ノードの場合は、その中身を再帰的に処理
+    if (targetNode.nodeType === Node.ELEMENT_NODE) {
+      // 要素ノード内のテキストノードを再帰的に処理
+      splitTextNodesByNewline(targetNode);
+      
+      // 要素ノード内に改行が含まれているかチェック
+      // 要素ノード内のすべてのテキストノードをチェック
+      let hasNewline = false;
+      const walker = document.createTreeWalker(
+        targetNode,
+        NodeFilter.SHOW_TEXT,
+        null,
+        false
+      );
+      let textNode;
+      while (textNode = walker.nextNode()) {
+        if (textNode.textContent.includes('\n')) {
+          hasNewline = true;
+          break;
+        }
+      }
+      
+      // 改行が含まれている場合、要素ノードを分割して改行を外に出す
+      if (hasNewline) {
+        splitElementNodeByNewline(targetNode, element, i);
+        // 分割後はインデックスを調整せず、次の要素を処理
+        i++;
+        continue;
+      }
+      
+      i++;
+      continue;
+    }
+    
+    // テキストノードのみを処理
+    if (targetNode.nodeType !== Node.TEXT_NODE) {
+      i++;
+      continue;
+    }
+    
+    let originalText = targetNode.textContent;
+
+    if (originalText.includes('\n')) {
+      // \nの数をカウント
+      const newlineCount = (originalText.match(/\n/g) || []).length;
+
+      // 分割数 = \nの数 × 2 + 1
+      const splitCount = newlineCount * 2 + 1;
+
+      // \nで分割
+      const parts = originalText.split('\n');
+
+      // 分割したテキストを新しいテキストノードとして追加
+      for (let j = parts.length - 1; j >= 0; j--) {
+        // 空文字列でない場合のみ処理（空白文字は保持）
+        if (parts[j] !== '') {
+          element.insertBefore(document.createTextNode(parts[j]), element.childNodes[i + 1]);
+        }
+
+        if (j > 0) {  //改行文字の挿入処理。この処理は必要
+          element.insertBefore(document.createTextNode('\n'), element.childNodes[i + 1]);
+        }
+      }
+
+      // 既存のテキストノードを削除
+      element.removeChild(element.childNodes[i]);
+
+      // 分割により増えた要素数分、インデックスを進める
+      i += splitCount;
+    } else {
+      // 分割処理をしなかった場合は、次の要素に進む
+      i++;
+    }
+  }
+} //end splitTextNodesByNewline
+
+// === 要素ノード内の改行を要素ノードの外に出す関数 =======================
+function splitElementNodeByNewline(elementNode, parentElement, insertIndex) {
+  // 要素ノードの属性を取得（クラス、スタイルなど）
+  const tagName = elementNode.tagName;
+  const className = elementNode.className;
+  const attributes = {};
+  for (let attr of elementNode.attributes) {
+    attributes[attr.name] = attr.value;
+  }
+  
+  // 要素ノード内のすべての子ノードを取得
+  const childNodes = Array.from(elementNode.childNodes);
+  
+  // 要素ノードを削除
+  parentElement.removeChild(elementNode);
+  
+  // 子ノードを処理して、改行で分割
+  let currentGroup = [];
+  let insertPos = insertIndex;
+  
+  for (let child of childNodes) {
+    if (child.nodeType === Node.TEXT_NODE) {
+      const text = child.textContent;
+      if (text.includes('\n')) {
+        // 現在のグループがあれば、新しい要素ノードでラップ
+        if (currentGroup.length > 0) {
+          const newElement = document.createElement(tagName);
+          // 属性をコピー
+          for (let attrName in attributes) {
+            newElement.setAttribute(attrName, attributes[attrName]);
+          }
+          // グループのノードを追加
+          currentGroup.forEach(node => newElement.appendChild(node.cloneNode(true)));
+          parentElement.insertBefore(newElement, parentElement.childNodes[insertPos]);
+          insertPos++;
+          currentGroup = [];
+        }
+        
+        // テキストを改行で分割
+        const parts = text.split('\n');
+        for (let k = 0; k < parts.length; k++) {
+          if (parts[k] !== '') {
+            const textNode = document.createTextNode(parts[k]);
+            // テキストノードを新しい要素ノードでラップ
+            const newElement = document.createElement(tagName);
+            for (let attrName in attributes) {
+              newElement.setAttribute(attrName, attributes[attrName]);
+            }
+            newElement.appendChild(textNode);
+            parentElement.insertBefore(newElement, parentElement.childNodes[insertPos]);
+            insertPos++;
+          }
+          
+          if (k < parts.length - 1) {
+            // 改行文字を親要素の直接の子として挿入
+            parentElement.insertBefore(document.createTextNode('\n'), parentElement.childNodes[insertPos]);
+            insertPos++;
+          }
+        }
+      } else {
+        // 改行がないテキストノードはグループに追加
+        currentGroup.push(child);
+      }
+    } else if (child.nodeType === Node.ELEMENT_NODE) {
+      // 要素ノードもグループに追加
+      currentGroup.push(child);
+    }
+  }
+  
+  // 残りのグループがあれば、新しい要素ノードでラップ
+  if (currentGroup.length > 0) {
+    const newElement = document.createElement(tagName);
+    for (let attrName in attributes) {
+      newElement.setAttribute(attrName, attributes[attrName]);
+    }
+    currentGroup.forEach(node => newElement.appendChild(node.cloneNode(true)));
+    parentElement.insertBefore(newElement, parentElement.childNodes[insertPos]);
+  }
+} //end splitElementNodeByNewline
+
+
+// === elementのchildNodesを探索して、\nを除くテキストノードにspanを付ける関数 ====
+function addSpanToNonNewlineText(element) {
+  if (!element || !element.childNodes) {
+    debugLog('無効な要素です');
+    return;
+  }
+
+  for (let current = 0; current < element.childNodes.length; current++) {
+    const currentNode = element.childNodes[current];
+
+    // 安全チェック
+    if (!currentNode) continue;
+
+    // 条件チェック：テキストノードかつ\nでないかつ空でない
+    if (currentNode.nodeType === Node.TEXT_NODE &&
+      currentNode.textContent !== '\n' &&
+      currentNode.textContent.trim() !== '') {
+
+      // 既にspanで囲まれているかチェック
+      if (currentNode.parentElement && currentNode.parentElement.tagName === 'SPAN') {
+        continue; // 既にspanで囲まれている場合はスキップ
+      }
+
+      // spanで囲む
+      const spanWrapper = document.createElement('span');
+      spanWrapper.appendChild(currentNode.cloneNode(true));
+
+      // 元のテキストノードを置換
+      element.replaceChild(spanWrapper, currentNode);
+    }
+  }
+} //end addSpanToNonNewlineText
+
+// === code要素内の改行文字を境界として連続する要素をcode_line_wrapクラスで囲む ===
+function wrapCodeLines(element) {
+  // 後ろから処理してインデックスのずれを防ぐ
+  for (let i = element.childNodes.length - 1; i >= 0; i--) {
+    const currentNode = element.childNodes[i];
+
+    // 改行文字の場合はスキップ
+    if (currentNode.nodeType === Node.TEXT_NODE && currentNode.textContent === '\n') {
+      continue;
+    }
+
+    // 連続する要素を収集（後ろから）
+    const lineElements = [];
+    let j = i;
+    while (j >= 0) {
+      const node = element.childNodes[j];
+
+      // 改行文字で終了
+      if (node.nodeType === Node.TEXT_NODE && node.textContent === '\n') {
+        break;
+      }
+
+      // 要素ノードまたはテキストノード（改行以外）を収集
+      if (node.nodeType === Node.ELEMENT_NODE ||
+        (node.nodeType === Node.TEXT_NODE && node.textContent !== '\n')) {
+        lineElements.unshift(node); // 前から順番に追加
+      }
+
+      j--;
+    }
+
+    // 収集した要素が2個以上の場合のみラッピング
+    if (lineElements.length >= 2) {
+      // code_line_wrapコンテナを作成
+      const container = document.createElement('span');
+      container.className = CLASS_CODE_LINE_WRAP;
+
+      // 最初の要素の前にコンテナを挿入
+      element.insertBefore(container, lineElements[0]);
+
+      // 収集した要素をコンテナに移動
+      lineElements.forEach(el => {
+        container.appendChild(el);
+      });
+    }
+
+    // 次の処理位置を更新
+    i = j;
+  }
+} //end wrapCodeLines
+
+
+// === code要素内のspanタグをinline-blockでラッピングする =======================
+function wrapAllChildElements(element) {
+  if (element && element.nodeType === Node.ELEMENT_NODE) {
+    const childCount = element.childNodes.length;
+
+    // 後ろから処理（インデックスがずれないように）
+    for (let i = childCount - 1; i >= 0; i--) {
+      let child = element.childNodes[i];
+      if (child.nodeType === Node.ELEMENT_NODE) { // 要素ノードのみ
+        let container = document.createElement('span');
+        container.className = CODE_WRAP_CLASS_NAME;
+        container.style.display = 'inline-block';
+        container.style.width = '90%';
+        container.style.color = 'inherit'; // 親要素の色を継承
+
+        element.insertBefore(container, child);
+        container.appendChild(child);
+      }
+    }
+  }
+}
+
+
+// === ハイライト適用関数 ======================================================
+function applyHighlight(element) {
+  try {
+    if (!element) {
+      debugError('applyHighlight: elementがnullまたはundefinedです');
+      return;
+    }
+
+    // 既存のハイライトをクリア
+    clearCurrentHighlight();
+
+    // 赤色、2px、solidのborderを追加
+    if (NoTextModeOnOff) {
+      // 新しい要素をハイライト
+      currentHighlightedElement = element.parentNode;
+
+      if (currentHighlightedElement) {
+        // 親要素が存在し、かつ子要素数が1以外の場合のみ親に移動
+        currentHighlightedElement.style.border = '2px solid red';
+        currentHighlightedElement.style.outline = '';
+        debugLog(`要素をハイライトしました(NoTextMode=On))`);
+      }
+    } else {
+      // 新しい要素をハイライト
+      currentHighlightedElement = element;
+
+      if (currentHighlightedElement) {
+        currentHighlightedElement.style.border = '';
+        currentHighlightedElement.style.outline = '2px solid red';
+        debugLog(`要素をハイライトしました(NoTextMode=Off)`);
+      }
+    }
+  } catch (error) {
+    debugError('applyHighlight処理中にエラーが発生:', error);
+  }
+} //end applyHighlight
+
+
+// === カウントダウン開始関数 ==================================================
+function startCountdownSubPopup(textLength) {
+  try {
+    // カウントダウンタイマーを開始
+    const readTime = calculateReadingTime(textLength); //1分(60秒)で250文字
+    countDownTimerForSub = readTime;
+
+    // 既存のタイマーをクリア（重複防止）
+    if (countDownIntervalForSub) {
+      clearInterval(countDownIntervalForSub);
+      countDownIntervalForSub = null;
+    }
+
+    // 1秒毎のダウンカウントタイマーを開始
+    countDownIntervalForSub = setInterval(() => {
+      try {
+        countDownTimerForSub--;
+        updateSubPopupCharCount(textLength, readTime);
+      } catch (error) {
+        debugError('カウントダウン更新中にエラーが発生:', error);
+        // タイマーを停止してエラーを防ぐ
+        if (countDownIntervalForSub) {
+          clearInterval(countDownIntervalForSub);
+          countDownIntervalForSub = null;
+        }
+      }
+    }, 1000);
+
+    // ポップアップの文字数を更新
+    updateSubPopupCharCount(textLength, readTime);
+
+    debugLog(`文字数: ${textLength}, 読書: ${readTime}秒`);
+  } catch (error) {
+    debugError('カウントダウン開始中にエラーが発生:', error);
+  }
+} //end startCountdownSubPopup
+
+
+// === テキスト外モードをトグルする関数 ========================================
+function toggleNoTextMode() {
+  NoTextModeOnOff = !NoTextModeOnOff; // 状態を反転
+  localStorage.setItem(LOCALSTRG_NOTEXT_ONOFF, NoTextModeOnOff.toString());
+
+  debugLog('テキスト外モード:', NoTextModeOnOff);
+
+  if (NoTextModeOnOff) {
+    // テキスト外モード有効時（何もしない）
+  } else {
+    // テキスト外モード無効時（何もしない）
+  }
+}
+
+
+
+// === サブポップアップモードをトグルする関数 =================================
+function toggleSubPopup() {
+  subPopupOnOff = !subPopupOnOff; // 状態を反転
+  localStorage.setItem(LOCALSTRG_SUBPOPUP_ONOFF, subPopupOnOff.toString());
+
+  debugLog('サブポップアップモード:', subPopupOnOff);
+
+  if (subPopupOnOff) {
+    // ポップアップを表示
+    showSubPopup();
+  } else {
+    // ポップアップを非表示
+    hideSubPopup();
+  }
+} //end toggleSubPopup
+
+
+// === サブポップアップを表示する関数 ===========================================
+function showSubPopup() {
+  // 既存のポップアップがあれば削除
+  const existingSubPopup = document.getElementById(ID_SUBPOPUP_CONTAINER);
+  if (existingSubPopup) {
+    existingSubPopup.remove();
+  }
+
+  // Shadow DOMのコンテナ要素を作成
+  const container = document.createElement('div');
+  container.id = ID_SUBPOPUP_CONTAINER;
+
+  // Shadow DOMを作成
+  const shadow = container.attachShadow({ mode: 'open' });
+
+  // Shadow DOM内にスタイルシートを作成(CSS)
+  const subPopupStyles = document.createElement('style');
+  subPopupStyles.textContent = `
+    .${CLASS_SUBPOPUP} {
+      position: fixed !important;
+      top: var(--subpopup-top, 50%) !important;
+      left: var(--subpopup-left, 50%) !important;
+      background: white !important;
+      border: 2px solid #333 !important;
+      border-radius: 10px !important;
+      padding: 5px !important;
+      font-size: 12px !important;
+      font-family: Arial, sans-serif !important;
+      color: #333 !important;
+      box-shadow: 0 4px 20px rgba(0,0,0,0.3) !important;
+      z-index: 10000 !important;
+      width: 140px !important;
+      height: 40px !important;
+      display: flex !important;
+      flex-direction: column !important;
+      text-align: center !important;
+      cursor: move !important;
+      user-select: none !important;
+    }
+    .char-count {
+      margin: auto 0 !important;
+      font-size: 12px !important;
+      color: #666 !important;
+    }
+  `;
+
+  // Shadow DOM内にポップアップ要素を作成
+  const subpopup = document.createElement('div');
+  subpopup.className = CLASS_SUBPOPUP;
+
+  // メッセージ
+  const message = document.createElement('div');
+  message.textContent = 'ハイライト部分タイマー';
+
+  // 文字数表示要素（初期状態では非表示）
+  const charCount = document.createElement('div');
+  charCount.className = 'char-count';
+  charCount.style.display = 'none';
+
+  // ポップアップに要素を追加
+  subpopup.appendChild(message);
+  subpopup.appendChild(charCount);
+
+  // Shadow DOMに要素を追加
+  shadow.appendChild(subPopupStyles);
+  shadow.appendChild(subpopup);
+
+  // ページに追加
+  document.body.appendChild(container);
+
+  // サブポップアップの位置復元部分
+  // サブポップアップの位置復元部分
+  const savedPosition = localStorage.getItem(LOCALSTRG_YOMUPSUB_XYPOS);
+  if (savedPosition) {
+    try {
+      const parsed = JSON.parse(savedPosition);
+      if (parsed && typeof parsed.x === 'string' && typeof parsed.y === 'string') {
+        // CSS変数を直接設定
+        subpopup.style.setProperty('--subpopup-top', parsed.y, 'important');
+        subpopup.style.setProperty('--subpopup-left', parsed.x, 'important');
+      }
+    } catch (error) {
+      debugError('サブポップアップ位置の復元に失敗しました:', error);
+      // 不正なデータをクリア
+      localStorage.removeItem(LOCALSTRG_YOMUPSUB_XYPOS);
+    }
+  }
+
+  // ドラッグ移動機能を追加
+  addDragFunctionality(subpopup);
+
+  debugLog('ポップアップを表示しました');
+} //end showSubPopup
+
+
+// === サブポップアップを非表示にする関数 =======================================
+function hideSubPopup() {
+  const existingSubPopup = document.getElementById(ID_SUBPOPUP_CONTAINER);
+  if (existingSubPopup) {
+    existingSubPopup.remove();
+    debugLog('サブポップアップを非表示にしました');
+  }
+}
+
+// === サブポップアップの文字数を更新する関数 ===================================
+function updateSubPopupCharCount(textLength, readTime) {
+  const subpopup = document.getElementById(ID_SUBPOPUP_CONTAINER);
+  if (subpopup) {
+    const shadow = subpopup.shadowRoot;
+    if (shadow) {
+      const charCount = shadow.querySelector('.char-count');
+      if (charCount) {
+        charCount.textContent = `${textLength}字⇒［${countDownTimerForSub}／${readTime}秒］`;
+        charCount.style.display = 'block';
+      }
+    }
+  }
+}
+
+
+// === ポップアップをマウスでドラッグ ==========================================
+function addDragFunctionality(popup) {
+
+  popup.addEventListener('mousedown', function (e) {
+    // select要素やその他の操作可能な要素をクリックした場合はドラッグを開始しない
+    if (e.target.tagName === 'SELECT' || 
+        e.target.tagName === 'INPUT' || 
+        e.target.tagName === 'BUTTON' ||
+        e.target.closest('select') ||
+        e.target.closest('input') ||
+        e.target.closest('button')) {
+      return; // ドラッグを開始しない
+    }
+
+    isDragging = true;
+    currentDraggingPopup = popup; // 現在のポップアップを設定
+    startX = e.clientX;
+    startY = e.clientY;
+
+    const rect = popup.getBoundingClientRect();
+    startLeft = rect.left;
+    startTop = rect.top;
+
+    e.preventDefault();
+  });
+
+} //end addDragFunctionality
+
+
+// === ポップアップWクリック時に非表示 =========================================
+function addClickToCloseFunctionality(popup) {
+  popup.addEventListener('dblclick', function (e) {
+    e.preventDefault();
+    hideYomuPPopup();
+  });
+}
+
+// === processedElementCacheをクリアする関数 =================================
+function clearProcessedElementCache() {
+  processedElementCache.clear();
+}
+
+
+
+//////////////////////////////////////////////////////////////////////////////
+// イベントリスナー定義
+//////////////////////////////////////////////////////////////////////////////
+
+// === ページ離脱前に状態を保存（リロード時に再表示のため） ===================
+window.addEventListener('beforeunload', function () {
+  const popupMain = document.getElementById(ID_YOMUP_POPUP_CONTAINER);
+  if (popupMain) {
+    localStorage.setItem(LOCALSTRG_YOMUP_REDISP, 'true');
+    
+    // ページ遷移判定用のフラグをsessionStorageに設定
+    sessionStorage.setItem(SESSIONSTRG_PAGE_TRANSITION, 'true');
+    
+    // ストップウォッチの状態を保存（cleanupAllListeners()でタイマーがクリアされる前に保存）
+    const stopwatchState = {
+      isRunning: stopwatchTimerID !== null,
+      seconds: stopwatchSeconds,
+      limitMinutes: stopwatchLimitMinutes,
+      loopCount: stopwatchLoopCount,
+      isVisible: popupMain !== null
+    };
+    localStorage.setItem(LOCALSTRG_STOPWATCH_STATE, JSON.stringify(stopwatchState));
+  }
+  // キャッシュをクリア
+  clearProcessedElementCache();
+  // 全リスナーとタイマーをクリーンアップ
+  cleanupAllListeners();
+});
+
+// === ページ遷移時にキャッシュをクリア（より確実） =========================
+window.addEventListener('pagehide', function () {
+  clearProcessedElementCache();
+  // 全リスナーとタイマーをクリーンアップ
+  cleanupAllListeners();
+});
+
+// === ポップアップドラッグ機能 =================================================
+// 名前付き関数に変更（削除可能にするため）
+function handleDragMouseMove(e) {
+  if (!isDragging || !currentDraggingPopup) return;
+
+  const popup = currentDraggingPopup;
+
+  // ポップアップ種別を判定
+  const isYomuP = popup.classList.contains(CLASS_YOMUP_POPUP);
+
+  // CSS変数名を動的に決定
+  const topVar = isYomuP ? '--YomuP-popup-top' : '--subpopup-top';
+  const leftVar = isYomuP ? '--YomuP-popup-left' : '--subpopup-left';
+
+  // 移動量を計算
+  const deltaX = e.clientX - startX;
+  const deltaY = e.clientY - startY;
+
+  // 位置更新
+  popup.style.setProperty(leftVar, (startLeft + deltaX) + 'px', 'important');
+  popup.style.setProperty(topVar, (startTop + deltaY) + 'px', 'important');
+
+  // 保存キー判定（既存）
+  const popupId = isYomuP ? LOCALSTRG_YOMUP_XYPOS : LOCALSTRG_YOMUPSUB_XYPOS;
+  localStorage.setItem(popupId, JSON.stringify({
+    x: (startLeft + deltaX) + 'px',
+    y: (startTop + deltaY) + 'px'
+  }));
+}
+
+// 名前付き関数に変更（削除可能にするため）
+function handleDragMouseUp() {
+  // ドラッグ終了フラグを設定
+  isDragging = false;
+  currentDraggingPopup = null;
+}
+
+// リスナーを追加
+document.addEventListener('mousemove', handleDragMouseMove);
+document.addEventListener('mouseup', handleDragMouseUp);
+
+
+
+// === 全イベントリスナーを削除するクリーンアップ関数 ===========================
+function cleanupAllListeners() {
+  try {
+    // ハイライト用リスナーを削除
+    detachHighlightListeners();
+
+    // ドラッグ用リスナーを削除
+    document.removeEventListener('mousemove', handleDragMouseMove);
+    document.removeEventListener('mouseup', handleDragMouseUp);
+
+    // タイマーをクリア
+    if (mouseTimeoutForHighlight) {
+      clearTimeout(mouseTimeoutForHighlight);
+      mouseTimeoutForHighlight = null;
+    }
+    if (stopwatchTimerID) {
+      clearInterval(stopwatchTimerID);
+      stopwatchTimerID = null;
+    }
+    if (countDownIntervalForSub) {
+      clearInterval(countDownIntervalForSub);
+      countDownIntervalForSub = null;
+    }
+
+    // タイマー変数をリセット
+    stopwatchSeconds = 0;
+    countDownTimerForSub = 0;
+
+    // フラグをリセット
+    isDragging = false;
+    currentDraggingPopup = null;
+
+    debugLog('全イベントリスナーとタイマーをクリーンアップしました');
+  } catch (error) {
+    debugError('クリーンアップ処理中にエラーが発生:', error);
+  }
+}
+
+
+
+// === ハイライト用イベントリスナーの管理 =================================
+function attachHighlightListeners() {
+  document.addEventListener('mousemove', handleMouseMove);
+  document.addEventListener('mouseout', handleMouseOut);
+}
+
+function detachHighlightListeners() {
+  document.removeEventListener('mousemove', handleMouseMove);
+  document.removeEventListener('mouseout', handleMouseOut);
+}
+
+
+// === デバッグログ出力用のラッパー関数 =========================================
+function debugLog(...args) {
+  if (typeof ENABLE_DEBUG_LOG !== 'undefined' && ENABLE_DEBUG_LOG) {
+    console.log(...args);
+  }
+}
+
+function debugError(...args) {
+  if (typeof ENABLE_DEBUG_LOG !== 'undefined' && ENABLE_DEBUG_LOG) {
+    console.error(...args);
+  }
+}
+

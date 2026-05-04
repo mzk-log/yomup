@@ -1,0 +1,184 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>読むプ - デモページ</title>
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+    
+    body {
+      font-family: 'Hiragino Kaku Gothic ProN', 'Hiragino Sans', Meiryo, sans-serif;
+      line-height: 1.8;
+      color: #333;
+      background: linear-gradient(135deg, #f5f7fa 0%, #c3cfe2 100%);
+      padding: 40px 20px;
+      min-height: 100vh;
+    }
+    
+    .container {
+      max-width: 900px;
+      margin: 0 auto;
+      background: white;
+      padding: 60px 50px;
+      border-radius: 12px;
+      box-shadow: 0 10px 40px rgba(0,0,0,0.1);
+    }
+    
+    h1 {
+      font-size: 2.5em;
+      color: #2c3e50;
+      margin-bottom: 20px;
+      border-bottom: 3px solid #3498db;
+      padding-bottom: 15px;
+    }
+    
+    h2 {
+      font-size: 1.8em;
+      color: #34495e;
+      margin-top: 40px;
+      margin-bottom: 20px;
+      padding-left: 15px;
+      border-left: 5px solid #3498db;
+    }
+    
+    .intro {
+      font-size: 1.1em;
+      color: #555;
+      margin-bottom: 30px;
+      padding: 20px;
+      background: #f8f9fa;
+      border-radius: 8px;
+      border-left: 4px solid #3498db;
+    }
+    
+    p {
+      margin-bottom: 20px;
+      text-align: justify;
+      font-size: 1.05em;
+    }
+    
+    .highlight-section {
+      background: #fff3cd;
+      padding: 25px;
+      border-radius: 8px;
+      margin: 30px 0;
+      border: 2px dashed #ffc107;
+    }
+    
+    .feature-list {
+      background: #e7f3ff;
+      padding: 25px;
+      border-radius: 8px;
+      margin: 30px 0;
+    }
+    
+    .feature-list ul {
+      margin-left: 25px;
+      margin-top: 15px;
+    }
+    
+    .feature-list li {
+      margin-bottom: 12px;
+      font-size: 1.05em;
+    }
+    
+    .quote {
+      font-style: italic;
+      color: #666;
+      padding: 20px;
+      margin: 30px 0;
+      background: #f8f9fa;
+      border-left: 4px solid #6c757d;
+      border-radius: 4px;
+    }
+    
+    .conclusion {
+      background: #d4edda;
+      padding: 25px;
+      border-radius: 8px;
+      margin-top: 40px;
+      border: 2px solid #28a745;
+    }
+    
+    .conclusion h3 {
+      color: #155724;
+      margin-bottom: 15px;
+    }
+    
+    @media (max-width: 768px) {
+      .container {
+        padding: 30px 20px;
+      }
+      
+      h1 {
+        font-size: 2em;
+      }
+      
+      h2 {
+        font-size: 1.5em;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>読むプ - 読書支援拡張機能の説明</h1>
+    
+    <div class="intro">
+      <p>このページでは、Chrome拡張機能「読むプ」の機能について説明します。拡張機能を有効にすると、ページ上の要素にマウスをホバーするとハイライト表示され、文字数カウントや読書時間の計算、ストップウォッチ・カウントダウンタイマーなどの便利な機能が利用できます。</p>
+    </div>
+    
+    <h2>拡張機能の主な機能</h2>
+    
+    <div class="feature-list">
+      <p><strong>読むプ</strong>は、Webページでの読書をサポートするための多機能な拡張機能です。以下のような機能を提供します：</p>
+      <ul>
+        <li><strong>マウスオーバーハイライト機能</strong>：ページ上の要素にマウスをホバーすると、その要素が自動的にハイライト表示されます。これにより、読みたい部分を視覚的に確認しながら読書を進めることができます。</li>
+        <li><strong>文字数カウント機能</strong>：ページ全体または選択したテキストの文字数を自動的にカウントし、表示します。長文を読む際の進捗管理に役立ちます。</li>
+        <li><strong>読書時間の計算</strong>：文字数に基づいて、その文章を読むのに必要な時間を自動計算します。読書計画を立てる際の参考になります。（250文字/分で計算しています）</li>
+        <li><strong>ストップウォッチ機能</strong>：実際の読書時間を計測することができます。読書の習慣化や時間管理に活用できます。</li>
+        <li><strong>カウントダウンタイマー機能</strong>：計算された時間までカウントダウンするタイマー機能です。読書時間の目標設定に便利です。</li>
+      </ul>
+    </div>
+    
+    <h2>使い方のヒント</h2>
+    
+    <div class="highlight-section">
+      <p>拡張機能のアイコンをクリックするか、右クリックメニューから「読むプ」を選択すると、ポップアップが表示されます。ポップアップには、ページ全体の文字数と読書時間が表示され、各種機能へのアクセスボタンが配置されています。</p>
+      
+      <p>ハイライト機能を有効にすると、マウスを動かすだけでページ上の要素が自動的にハイライトされます。特に長い記事や論文を読む際に、現在読んでいる部分を視覚的に把握しやすくなります。</p>
+    </div>
+    
+    <h2>読書体験の向上</h2>
+    
+    <p>現代のWeb環境では、情報量が膨大で、効率的に情報を読み取ることが重要になっています。読むプは、そんな読書ニーズに応えるために開発しました。</p>
+    
+    <p>特に、読むのが苦手な方、時間を確認しながら読み進めたい方にお勧めです。</p>
+        
+    <h2>実践的な活用例</h2>
+    
+    <p>読むプは、様々な場面で活用できます。例えば、学生が論文を読む際には、文字数カウント機能で読書量を管理し、ストップウォッチ機能で実際の読書時間を記録することができます。</p>
+    
+    <p>ビジネスパーソンが技術文書を読む際には、ハイライト機能で重要な部分を視覚的に確認しながら、読書時間の計算機能で読書計画を立てることができます。</p>
+    
+    <p>また、ブログ記事やニュース記事を読む際にも、カウントダウンタイマー機能を使って、読書時間の目標を設定し、集中力を維持しながら読書を進めることができます。</p>
+    
+    <h2>今後の展望</h2>
+    
+    <p>読むプは、継続的な改善と機能追加を予定しています。ユーザーのフィードバックを基に、より使いやすく、より便利な拡張機能へと進化していきます。</p>
+    
+    <p>読書は、知識を得るための重要な手段です。読むプが、その読書体験をより良いものにする一助となれば幸いです。</p>
+    
+    <div class="conclusion">
+      <h3>まとめ</h3>
+      <p>読むプは、Webページでの読書をサポートする多機能なChrome拡張機能です。マウスオーバーハイライト、文字数カウント、読書時間の計算、ストップウォッチ、カウントダウンタイマーなどの機能を提供し、効率的で快適な読書体験を実現します。ぜひ、この拡張機能を活用して、より良い読書体験をお楽しみください。</p>
+    </div>
+  </div>
+</body>
+</html>
+

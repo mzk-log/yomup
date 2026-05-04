@@ -1,0 +1,35 @@
+{
+  "manifest_version": 3,
+  "name": "読むプ ： ハイライト・タイマーで集中Web読書",
+  "version": "2.2.0",
+"description": "ハイライトで読みやすさを、タイマーでWeb読書への集中を支援します。",
+  "permissions": [
+    "contextMenus",
+    "activeTab",
+    "scripting"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["http://*/*", "https://*/*"],
+      "js": ["constants.js", "content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "action": {
+    "default_title": "ハイライト＆タイマーで読書をヘルプ"
+  },
+  "icons": {
+    "16": "icon16.png",
+    "48": "icon48.png",
+    "128": "icon128.png"
+  },
+  "web_accessible_resources": [
+    {
+      "resources": ["images/*", "icon48.png"],
+      "matches": ["http://*/*","https://*/*"]
+    }
+  ]
+}
