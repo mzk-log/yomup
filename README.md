@@ -52,15 +52,15 @@ Icons by [Font Awesome](https://fontawesome.com), licensed under [CC BY 4.0](htt
 
 ## フォルダ構成（抜粋）
 
-manifest.json
-background.js
-constants.js
-content.js
-icon16.png / icon48.png / icon128.png
-images/          … UI 用 SVG 等
-docs/            … プライバシーポリシー・デモ用 HTML
-LICENSE
-README.md
+manifest.json <br>
+background.js <br>
+constants.js <br>
+content.js <br>
+icon16.png / icon48.png / icon128.png <br>
+images/          … UI 用 SVG 等 <br>
+docs/            … プライバシーポリシー・デモ用 HTML <br>
+LICENSE <br>
+README.md <br>
 
 ## ライセンス
 
