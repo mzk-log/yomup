@@ -51,6 +51,7 @@ UI の SVG アイコンに **Font Awesome**（無料版）を利用していま�
 Icons by [Font Awesome](https://fontawesome.com), licensed under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/).
 
 ## フォルダ構成（抜粋）
+
 manifest.json
 background.js
 constants.js
