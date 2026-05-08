@@ -52,15 +52,20 @@ Icons by [Font Awesome](https://fontawesome.com), licensed under [CC BY 4.0](htt
 
 ## フォルダ構成（抜粋）
 
-manifest.json <br>
-background.js <br>
-constants.js <br>
-content.js <br>
-icon16.png / icon48.png / icon128.png <br>
-images/          … UI 用 SVG 等 <br>
-docs/            … プライバシーポリシー・デモ用 HTML <br>
-LICENSE <br>
-README.md <br>
+- **manifest.json** ： 拡張機能の定義と権限管理 <br>
+- **background.js** ： 拡張機能全体のイベント管理や各プログラム間の仲介を行う <br>
+- **constants.js** ： 定数の定義ファイル <br>
+- **content.js** ： 閲覧中のページからテキストを抽出するメインロジック <br>
+- **icon16.png / icon48.png / icon128.png** ： アイコン画像 <br>
+- **images/** ： UI 用 SVG 等 <br>
+- **docs/** ： プライバシーポリシー・デモ用 HTML <br>
+- **LICENSE** <br>
+- **README.md** <br>
+
+## 今後の開発課題
+
+- ハイライトがうまくできない箇所に対応する（難易度高。デグレが起きやすい）
+- ハイライトを英文に対応させる（難易度高。文字数の考え方が日本語と合わない）
 
 ## ライセンス
 
