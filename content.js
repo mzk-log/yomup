@@ -1476,6 +1476,7 @@ function clearCurrentHighlight() {
   if (currentHighlightedElement) {
     currentHighlightedElement.style.border = '';
     currentHighlightedElement.style.outline = '';
+    currentHighlightedElement.style.outlineOffset = '';
     currentHighlightedElement = null;
   }
 
@@ -2306,6 +2307,33 @@ function wrapAllChildElements(element) {
 }
 
 
+// === 祖先要素のクリッピング(overflow:hidden/clip 等)を検出 ====================
+// outline は要素の外側に描画されるため、祖先の overflow:hidden 等によって
+// 上下左右が切り取られて見えなくなる場合がある。その場合は outline-offset を
+// 負値にして要素の「内側」に描画することで、ハイライトを常に可視化する。
+function hasClippingAncestor(element) {
+  try {
+    let current = element && element.parentElement;
+    let depth = 0;
+    const maxDepth = 12; // 過剰な遡及を防止
+    const clipValues = ['hidden', 'clip', 'auto', 'scroll'];
+    while (current && depth < maxDepth && current !== document.body && current !== document.documentElement) {
+      const style = window.getComputedStyle(current);
+      if (clipValues.includes(style.overflow) ||
+          clipValues.includes(style.overflowX) ||
+          clipValues.includes(style.overflowY)) {
+        return true;
+      }
+      current = current.parentElement;
+      depth++;
+    }
+  } catch (_e) {
+    // エラー時は安全側（クリッピングありとみなして内側描画）
+    return true;
+  }
+  return false;
+}
+
 // === ハイライト適用関数 ======================================================
 function applyHighlight(element) {
   try {
@@ -2335,6 +2363,13 @@ function applyHighlight(element) {
       if (currentHighlightedElement) {
         currentHighlightedElement.style.border = '';
         currentHighlightedElement.style.outline = '2px solid red';
+        // 祖先に overflow:hidden 等があると outline が切り取られて見えないため、
+        // 内側に描画してクリップを回避する
+        if (hasClippingAncestor(currentHighlightedElement)) {
+          currentHighlightedElement.style.outlineOffset = '-2px';
+        } else {
+          currentHighlightedElement.style.outlineOffset = '';
+        }
         debugLog(`要素をハイライトしました(NoTextMode=Off)`);
       }
     }
