@@ -11,7 +11,7 @@ const MENU_CONFIG = [
 ];
 
 // 読むプバージョン（機能変更.不具合修正）
-const YOMUP_VERSION = "2.3";
+const YOMUP_VERSION = "2.4";
 
 
 // デバッグログ出力の有効/無効（コンパイルスイッチ）

@@ -416,7 +416,9 @@ function showYomuPPopup(textLength, readingTime, selectedText = null, selectedLe
   /* ツールチップのスタイル */
   .tooltip {
     position: absolute !important;
-    top: 100% !important;
+    top: auto !important;
+    bottom: 100% !important;
+    margin-bottom: 5px !important;
     left: 50% !important;
     transform: translateX(-50%) !important;
     background-color: rgba(0, 0, 0, 0.5) !important;
