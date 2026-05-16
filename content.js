@@ -439,7 +439,7 @@ function showYomuPPopup(textLength, readingTime, selectedText = null, selectedLe
     visibility: visible !important;
   }
   .yomup-popup-icon .tooltip {
-    white-space: normal !important;
+    white-space: nowrap !important;
     left: -8px !important; /* ポップアップの左端に揃える */
     transform: none !important;
   }
