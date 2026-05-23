@@ -59,12 +59,12 @@ const BLOCK_ANCESTOR_TAGS = new Set([
   'P', 'LI', 'DD', 'DT', 'BLOCKQUOTE', 'FIGCAPTION', 'TD', 'TH',
   'H1', 'H2', 'H3', 'H4', 'H5', 'H6'
 ]);
-// 案1: 見出し間ブロック（H2/H3 区切りの本文など、P が無い記事向け）
+// 見出し間ブロック（H2/H3 区切りの本文など、P が無い記事向け）
 const HEADING_SECTION_TAGS = new Set(['H2', 'H3']);
 let highlightOverlayRoot = null;
 let currentHighlightRange = null;
 
-// 案3: getClientRects の矩形をマージして枠の細片化を抑える（テストNG時は false に戻す）
+// getClientRects の矩形をマージして枠の細片化を抑える（テストNG時は false に戻す）
 const ENABLE_HIGHLIGHT_OVERLAY_RECT_MERGE = true;
 const HIGHLIGHT_RECT_MERGE_LINE_TOLERANCE_PX = 6;
 const HIGHLIGHT_RECT_MERGE_GAP_TOLERANCE_PX = 12;
@@ -1476,6 +1476,71 @@ function getPointReferenceNode(clientX, clientY) {
   return hit || null;
 }
 
+function isNodeInsideTable(node) {
+  if (!node) return false;
+  const el = node.nodeType === Node.TEXT_NODE ? node.parentElement : node;
+  return !!(el && el.closest && el.closest('table'));
+}
+
+function findTableCellFromNode(node) {
+  if (!node) return null;
+  let el = node.nodeType === Node.TEXT_NODE ? node.parentElement : node;
+  while (el && el !== document.body && el !== document.documentElement) {
+    if (isYomupUiElement(el) || isEditableElement(el)) return null;
+    if (el.closest && el.closest('code')) return null;
+    if (el.tagName === 'TD' || el.tagName === 'TH') return el;
+    if (el.tagName === 'TABLE') break;
+    el = el.parentElement;
+  }
+  return null;
+}
+
+function findNearestTableCell(table, clientX, clientY) {
+  const cells = table.querySelectorAll('td, th');
+  let best = null;
+  let bestDist = Infinity;
+
+  for (let i = 0; i < cells.length; i++) {
+    const cell = cells[i];
+    if (isYomupUiElement(cell) || cell.closest('code,script,style,noscript')) continue;
+
+    const rect = cell.getBoundingClientRect();
+    if (
+      clientX >= rect.left && clientX <= rect.right &&
+      clientY >= rect.top && clientY <= rect.bottom
+    ) {
+      return cell;
+    }
+
+    const cx = rect.left + rect.width / 2;
+    const cy = rect.top + rect.height / 2;
+    const dist = (cx - clientX) ** 2 + (cy - clientY) ** 2;
+    if (dist < bestDist) {
+      bestDist = dist;
+      best = cell;
+    }
+  }
+  return best;
+}
+
+// 表内は TD/TH をブロックとする（セル隙間は最近傍セル）
+function findTableCellBlockFromPoint(clientX, clientY) {
+  const caretNode = getPointReferenceNode(clientX, clientY);
+  const hitEl = document.elementFromPoint(clientX, clientY);
+
+  let cell = findTableCellFromNode(caretNode) || findTableCellFromNode(hitEl);
+  if (cell) return cell;
+
+  let table = hitEl && hitEl.closest ? hitEl.closest('table') : null;
+  if (!table && caretNode) {
+    const el = caretNode.nodeType === Node.TEXT_NODE ? caretNode.parentElement : caretNode;
+    if (el && el.closest) table = el.closest('table');
+  }
+
+  if (!table || isYomupUiElement(table) || isEditableElement(table)) return null;
+  return findNearestTableCell(table, clientX, clientY);
+}
+
 function findBlockAncestorFromPoint(clientX, clientY) {
   let node = getPointReferenceNode(clientX, clientY);
   if (node && node.nodeType === Node.TEXT_NODE) {
@@ -1558,6 +1623,9 @@ function findHeadingIntervalBlockFromPoint(clientX, clientY) {
   const caretNode = getPointReferenceNode(clientX, clientY);
   if (!caretNode) return null;
 
+  // 表内はセル単位（findTableCellBlockFromPoint）に任せ、見出し間ブロックは使わない
+  if (isNodeInsideTable(caretNode)) return null;
+
   const root = findHeadingSectionRoot(caretNode);
   if (!root) return null;
 
@@ -1576,6 +1644,11 @@ function findHeadingIntervalBlockFromPoint(clientX, clientY) {
 }
 
 function findHighlightBlockFromPoint(clientX, clientY) {
+  const tableCell = findTableCellBlockFromPoint(clientX, clientY);
+  if (tableCell) {
+    return { mode: 'element', element: tableCell };
+  }
+
   const element = findBlockAncestorFromPoint(clientX, clientY);
   if (element) {
     return { mode: 'element', element };
@@ -1588,6 +1661,8 @@ function findHighlightBlockFromPoint(clientX, clientY) {
 function isNodeInHeadingInterval(node, root, startHeading, endHeading) {
   if (!node || !root) return false;
   if (!root.contains(node)) return false;
+  // 見出し間ブロックの収集対象から table 配下を除外（表は TD/TH 単位で処理）
+  if (isNodeInsideTable(node)) return false;
 
   if (startHeading && (startHeading === node || startHeading.contains(node))) return false;
   if (endHeading && (endHeading === node || endHeading.contains(node))) return false;
@@ -2524,9 +2599,9 @@ function splitTextByPunctuation(text, maxLength) {
     const segmentLength = Math.floor(text.length / (quotient + 1));
     let end = start + segmentLength;
 
-    // 句読点で分割位置を調整
+    // 句読点・閉じ括弧の直後で分割位置を調整（『…』列挙など）
     if (end < text.length) {
-      const punctuation = /[。、！？．，！？]/;
+      const punctuation = /[。、！？．，』」）)]/;
       const searchStart = Math.max(start, end - 10);
       const searchEnd = Math.min(text.length, end + 10);
 
