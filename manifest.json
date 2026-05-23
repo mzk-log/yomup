@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "読むプ ： ハイライト・タイマーで集中Web読書",
-  "version": "2.4.1",
+  "version": "2.5.1000",
 "description": "ハイライトで読みやすさを、タイマーでWeb読書への集中を支援します。",
   "permissions": [
     "contextMenus",

@@ -21,6 +21,7 @@ let currentHighlightedElement = null; // 現在ハイライトされている要
 let mouseTimeoutForHighlight = null; // マウスが250ms間動かなかった場合のタイマー
 
 //ポップアップ内ストップウォッチ
+let stopwatchOnOff = false; // ストップウォッチUI表示中かどうかのフラグ
 let stopwatchTimerID = null; //ストップウォッチのタイマーID
 let stopwatchSeconds = 0; //ストップウォッチ経過時間(秒)
 let stopwatchLimitMinutes = null; // ループタイマーの上限時間（分）。nullの場合は通常のストップウォッチ
@@ -48,6 +49,23 @@ let isPageTransition = false; // ページ遷移時かブラウザ起動時か�
 // ハイライト遅延処理で使う最新ポインタ座標（setTimeout 内の event は古くなりうる）
 let lastHighlightClientX = 0;
 let lastHighlightClientY = 0;
+
+// 論理塊ハイライト（オーバーレイ）用
+const LANGUAGE_MODE_JA = 'ja';
+const LANGUAGE_MODE_EN = 'en';
+const COALESCE_MIN_WORDS_EN = 8;
+const COALESCE_MIN_CHARS_JA = 40;
+const BLOCK_ANCESTOR_TAGS = new Set([
+  'P', 'LI', 'DD', 'DT', 'BLOCKQUOTE', 'FIGCAPTION', 'TD', 'TH',
+  'H1', 'H2', 'H3', 'H4', 'H5', 'H6'
+]);
+let highlightOverlayRoot = null;
+let currentHighlightRange = null;
+
+// 案3: getClientRects の矩形をマージして枠の細片化を抑える（テストNG時は false に戻す）
+const ENABLE_HIGHLIGHT_OVERLAY_RECT_MERGE = true;
+const HIGHLIGHT_RECT_MERGE_LINE_TOLERANCE_PX = 6;
+const HIGHLIGHT_RECT_MERGE_GAP_TOLERANCE_PX = 12;
 
 
 // === ページの読み込み状態に応じて初期化処理を実行================================
@@ -145,7 +163,8 @@ function executeYomuP() {
         charCountInfo.readingTimeAll,
         charCountInfo.selectedText,
         charCountInfo.selectedLength,
-        charCountInfo.selectedReadingTime
+        charCountInfo.selectedReadingTime,
+        charCountInfo.unitLabelAll
       );
     } else {
       //選択テキストがない場合
@@ -154,7 +173,8 @@ function executeYomuP() {
         charCountInfo.readingTimeAll,
         null,
         0,
-        0
+        0,
+        charCountInfo.unitLabelAll
       );
     }
   }
@@ -163,29 +183,100 @@ function executeYomuP() {
 
 // === 文字数情報を取得する共通関数 ===========================================
 function getCharCountInfo() {
-  //ページ全体のテキスト文字数を取得
-  const textLengthAll = document.body.innerText.trim().length;
-  const readingTimeAll = calculateReadingTime(textLengthAll);
+  const bodyText = document.body.innerText.trim();
+  const languageModeAll = detectLanguageMode(bodyText);
+  const unitCountAll = countUnits(bodyText, languageModeAll);
+  const readingTimeAll = calculateReadingTime(unitCountAll, languageModeAll);
 
-  // 現在の選択範囲を取得
   const selection = window.getSelection();
   const selectedText = selection.toString().trim();
-  const selectedLength = selectedText.length;
-  const selectedReadingTime = calculateReadingTime(selectedLength);
+  const hasSelection = selectedText.length > 0;
+  const languageModeSelected = hasSelection
+    ? detectLanguageMode(selectedText, selection.anchorNode)
+    : languageModeAll;
+  const unitCountSelected = hasSelection
+    ? countUnits(selectedText, languageModeSelected)
+    : 0;
+  const selectedReadingTime = hasSelection
+    ? calculateReadingTime(unitCountSelected, languageModeSelected)
+    : 0;
 
   return {
-    textLengthAll,
+    textLengthAll: unitCountAll,
     readingTimeAll,
-    selectedText: selectedText && selectedLength > 0 ? selectedText : null,
-    selectedLength: selectedLength > 0 ? selectedLength : 0,
-    selectedReadingTime: selectedLength > 0 ? selectedReadingTime : 0
+    languageModeAll,
+    unitLabelAll: getUnitLabel(languageModeAll),
+    selectedText: hasSelection ? selectedText : null,
+    selectedLength: unitCountSelected,
+    selectedReadingTime,
+    languageModeSelected,
+    unitLabelSelected: getUnitLabel(languageModeSelected)
   };
 }
 
 
 // === 読書時間計算関数 ================== ===================================
-function calculateReadingTime(textLength) {
-  return Math.round(textLength * (60 / readingSpeed));
+function calculateReadingTime(unitCount, languageMode = LANGUAGE_MODE_JA) {
+  if (languageMode === LANGUAGE_MODE_EN) {
+    return Math.round(unitCount * (60 / WORDS_PER_MINUTE));
+  }
+  return Math.round(unitCount * (60 / READING_SPEED_CHARS_PER_MIN));
+}
+
+
+// === 言語モード・単位カウント（フェーズ A）===================================
+function getUnitLabel(languageMode) {
+  return languageMode === LANGUAGE_MODE_EN ? '語' : '字';
+}
+
+// 語数: 空白区切り。ハイフン語は1語、句読点直後の空トークンは filter で除外
+function countWords(text) {
+  return (text || '').trim().split(/\s+/).filter(Boolean).length;
+}
+
+function countUnits(text, languageMode) {
+  if (languageMode === LANGUAGE_MODE_EN) {
+    return countWords(text);
+  }
+  return (text || '').trim().length;
+}
+
+function normalizeLangTag(lang) {
+  if (!lang) return null;
+  const primary = lang.trim().toLowerCase().split(/[-_]/)[0];
+  if (primary === 'ja' || primary === 'jp') return LANGUAGE_MODE_JA;
+  if (primary === 'en') return LANGUAGE_MODE_EN;
+  return null;
+}
+
+function detectLanguageByHeuristic(text) {
+  const sample = (text || '').slice(0, 4000);
+  if (!sample.trim()) return LANGUAGE_MODE_JA;
+
+  const cjk = (sample.match(/[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]/g) || []).length;
+  const letters = (sample.match(/[A-Za-z]/g) || []).length;
+  const denom = cjk + letters;
+  const ratio = denom > 0 ? cjk / denom : 0;
+  if (ratio >= CJK_RATIO_THRESHOLD) return LANGUAGE_MODE_JA;
+
+  const words = countWords(sample);
+  if (words >= 3 && letters > cjk * 2) return LANGUAGE_MODE_EN;
+  return LANGUAGE_MODE_JA;
+}
+
+function detectLanguageMode(text, contextNode) {
+  let el = contextNode;
+  if (el && el.nodeType === Node.TEXT_NODE) el = el.parentElement;
+  while (el && el.nodeType === Node.ELEMENT_NODE) {
+    const fromAttr = normalizeLangTag(el.getAttribute && el.getAttribute('lang'));
+    if (fromAttr) return fromAttr;
+    el = el.parentElement;
+  }
+
+  const docLang = normalizeLangTag(document.documentElement.getAttribute('lang'));
+  if (docLang) return docLang;
+
+  return detectLanguageByHeuristic(text);
 }
 
 
@@ -211,7 +302,8 @@ function updateCharCountInfo() {
       selectionInfo,
       charCountInfo.selectedText,
       charCountInfo.selectedLength,
-      charCountInfo.selectedReadingTime
+      charCountInfo.selectedReadingTime,
+      charCountInfo.unitLabelSelected
     );
   }
 }
@@ -232,7 +324,13 @@ function formatReadingTime(seconds) {
 }
 
 // === 選択範囲情報を表示する共通関数 ==========================================
-function setSelectionInfoContent(selectionInfoElement, selectedText, selectedLength, selectedReadingTime) {
+function setSelectionInfoContent(
+  selectionInfoElement,
+  selectedText,
+  selectedLength,
+  selectedReadingTime,
+  unitLabel = '字'
+) {
   if (!selectionInfoElement) return;
 
   if (selectedText && selectedLength > 0) {
@@ -250,7 +348,7 @@ function setSelectionInfoContent(selectionInfoElement, selectedText, selectedLen
 
     // 2行目: 文字数と読書時間の表示
     const line2 = document.createElement('div');
-    line2.textContent = `${selectedLength}字 ${formatReadingTime(selectedReadingTime)}`;
+    line2.textContent = `${selectedLength}${unitLabel} ${formatReadingTime(selectedReadingTime)}`;
     selectionInfoElement.appendChild(line2);
   } else {
     selectionInfoElement.textContent = '選択：選択範囲がありません';
@@ -259,7 +357,14 @@ function setSelectionInfoContent(selectionInfoElement, selectedText, selectedLen
 
 
 // === 読むプのポップアップ本体を表示 ===========================================
-function showYomuPPopup(textLength, readingTime, selectedText = null, selectedLength = 0, selectedReadingTime = 0) {
+function showYomuPPopup(
+  textLength,
+  readingTime,
+  selectedText = null,
+  selectedLength = 0,
+  selectedReadingTime = 0,
+  unitLabel = '字'
+) {
   // 既存のポップアップを削除
   hideYomuPPopup(true);
   
@@ -618,6 +723,7 @@ function showYomuPPopup(textLength, readingTime, selectedText = null, selectedLe
     
     if (!isCurrentlyVisible) {
       // 表示
+      stopwatchOnOff = true;
       stopwatchContainer.style.setProperty('display', 'flex', 'important');
       stopwatchButtonContainer.style.setProperty('display', 'block', 'important');
       stopwatchIcon.classList.add('active');
@@ -650,6 +756,7 @@ function showYomuPPopup(textLength, readingTime, selectedText = null, selectedLe
         }
       }
       // 非表示にする（ループ回数は保持しない）
+      stopwatchOnOff = false;
       stopwatchContainer.style.setProperty('display', 'none', 'important');
       stopwatchButtonContainer.style.setProperty('display', 'none', 'important');
       stopwatchIcon.classList.remove('active');
@@ -848,13 +955,13 @@ function showYomuPPopup(textLength, readingTime, selectedText = null, selectedLe
   // 全体情報（1行目）
   const totalInfo = document.createElement('div');
   totalInfo.className = 'total-info';
-  totalInfo.textContent = `全体： ${textLength}字　${formatReadingTime(readingTime)}`;
+  totalInfo.textContent = `全体： ${textLength}${unitLabel}　${formatReadingTime(readingTime)}`;
 
   // 選択範囲情報（2-3行目）
   const selectionInfo = document.createElement('div');
   selectionInfo.className = 'selection-info';
 
-  setSelectionInfoContent(selectionInfo, selectedText, selectedLength, selectedReadingTime);
+  setSelectionInfoContent(selectionInfo, selectedText, selectedLength, selectedReadingTime, unitLabel);
 
   popup.appendChild(totalInfo);
   popup.appendChild(selectionInfo);
@@ -927,6 +1034,7 @@ function showYomuPPopup(textLength, readingTime, selectedText = null, selectedLe
     highLightOnOff = false;
     NoTextModeOnOff = false;
     subPopupOnOff = false;
+    stopwatchOnOff = false;
   }
 
   // ストップウォッチの状態を復元（ページ遷移時のみ）
@@ -945,6 +1053,7 @@ function showYomuPPopup(textLength, readingTime, selectedText = null, selectedLe
       
       // ストップウォッチが表示されていた場合
       if (stopwatchState.isVisible) {
+        stopwatchOnOff = true;
         // ストップウォッチを表示
         stopwatchContainer.style.setProperty('display', 'flex', 'important');
         stopwatchButtonContainer.style.setProperty('display', 'block', 'important');
@@ -1049,6 +1158,7 @@ function hideYomuPPopup(preserveModes = false) {
       clearInterval(stopwatchTimerID);
       stopwatchTimerID = null;
     }
+    stopwatchOnOff = false;
     // ドラッグ用リスナーも削除
     if (isDragging) {
       isDragging = false;
@@ -1125,6 +1235,18 @@ function handleMouseOut() {
   clearCurrentHighlight();
 }
 
+// === スクロール・リサイズ時（固定オーバーレイの残像防止）====================
+function handleHighlightViewportChange() {
+  if (!highLightOnOff) return;
+
+  if (mouseTimeoutForHighlight) {
+    clearTimeout(mouseTimeoutForHighlight);
+    mouseTimeoutForHighlight = null;
+  }
+
+  clearCurrentHighlight();
+}
+
 // === タグ名判定用のヘルパー関数 ============================================
 function isHighlightTargetTag(tagName) {
   return HIGHLIGHT_TARGET_TAGS.includes(tagName);
@@ -1159,73 +1281,570 @@ function isYomupUiElement(el) {
   return !!(el.closest('#' + ID_YOMUP_POPUP_CONTAINER) || el.closest('#' + ID_SUBPOPUP_CONTAINER));
 }
 
-// === 巨大な混在コンテナを、ポインタ直下のテキストに基づき狭い要素へ絞り込む =====
-function resolveNarrowHighlightTarget(element, clientX, clientY) {
-  const textLength = (element.textContent || '').trim().length;
-  const cst = getChildSiblingCounts(element);
-  if (!((cst > 0) && (textLength > MAX_TEXT_LENGTH_FOR_HIGHLIGHT))) {
-    return null;
+// === フェーズ B: 英文論理分割（DOM 非変更）====================================
+function getEnglishWordBoundaries(text) {
+  const bounds = [];
+  const re = /\S+/g;
+  let m;
+  while ((m = re.exec(text)) !== null) {
+    bounds.push({ start: m.index, end: m.index + m[0].length });
   }
-  return refineHighlightTargetFromPoint(element, clientX, clientY);
+  return bounds;
 }
 
-function refineHighlightTargetFromPoint(containerEl, clientX, clientY) {
-  try {
-    const range = caretRangeFromClientXY(clientX, clientY);
-    if (!range || !range.startContainer) return null;
+function isSentenceEndingPeriod(text, periodIndex) {
+  if (text[periodIndex] !== '.') return false;
+  if (periodIndex > 0 && periodIndex < text.length - 1) {
+    if (/\d/.test(text[periodIndex - 1]) && /\d/.test(text[periodIndex + 1])) return false;
+  }
+  const before = text.slice(Math.max(0, periodIndex - 12), periodIndex + 1);
+  if (/\b(?:Mr|Mrs|Ms|Dr|Prof|Sr|Jr|vs|etc|e\.g|i\.e)\.$/i.test(before)) return false;
+  if (/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/.test(text.slice(Math.max(0, periodIndex - 40), periodIndex + 20))) {
+    return false;
+  }
+  if (/https?:\/\/\S*/i.test(text.slice(Math.max(0, periodIndex - 8), periodIndex + 30))) {
+    return false;
+  }
+  return true;
+}
 
-    let textNode = range.startContainer;
-    if (textNode.nodeType !== Node.TEXT_NODE) return null;
-    if (!containerEl.contains(textNode)) return null;
-    if (isYomupUiElement(textNode.parentElement)) return null;
+function classifyEnglishBoundary(text, cutAfter, allowComma) {
+  if (cutAfter <= 0 || cutAfter > text.length) return null;
 
-    let el = textNode.parentElement;
-    while (el && containerEl.contains(el)) {
-      if (isYomupUiElement(el) || isEditableElement(el)) return null;
-      const len = (el.textContent || '').trim().length;
-      if (len > 0 && len <= MAX_TEXT_LENGTH_FOR_HIGHLIGHT + 5) {
-        return el;
-      }
-      el = el.parentElement;
+  const prev = text[cutAfter - 1];
+  if (prev === '!' || prev === '?') {
+    return { cutAfter, priority: 1, kind: prev };
+  }
+  if (prev === '.') {
+    if (isSentenceEndingPeriod(text, cutAfter - 1)) {
+      return { cutAfter, priority: 1, kind: '.' };
     }
-
-    const raw = textNode.textContent || '';
-    const chunkLen = raw.trim().length;
-    const parent = textNode.parentElement;
-    if (!parent || !containerEl.contains(parent)) return null;
-
-    if (chunkLen > 0 && chunkLen <= MAX_TEXT_LENGTH_FOR_HIGHLIGHT + 5) {
-      if (!parent.closest('code') && !isYomupUiElement(parent)) {
-        if (parent.tagName === 'SPAN' && parent.classList.contains(CLASS_PROCESSED_SPAN) && parent.childNodes.length === 1) {
-          return parent;
-        }
-        const span = document.createElement('span');
-        span.className = CLASS_PROCESSED_SPAN;
-        parent.insertBefore(span, textNode);
-        span.appendChild(textNode);
-        return span;
-      }
-    }
-
-    if (chunkLen > MAX_TEXT_LENGTH_FOR_HIGHLIGHT && shouldProcessTextNode(textNode)) {
-      splitTextNodeByLength(textNode, MAX_TEXT_LENGTH_FOR_HIGHLIGHT);
-      const range2 = caretRangeFromClientXY(clientX, clientY);
-      if (range2 && range2.startContainer.nodeType === Node.TEXT_NODE) {
-        let e2 = range2.startContainer.parentElement;
-        while (e2 && containerEl.contains(e2)) {
-          if (isYomupUiElement(e2)) break;
-          const slen = (e2.textContent || '').trim().length;
-          if (slen > 0 && slen <= MAX_TEXT_LENGTH_FOR_HIGHLIGHT + 5) {
-            return e2;
-          }
-          e2 = e2.parentElement;
-        }
-      }
-    }
-  } catch (err) {
-    debugError('refineHighlightTargetFromPoint:', err);
+    return null;
+  }
+  if (prev === ';') return { cutAfter, priority: 2, kind: ';' };
+  if (prev === ':') return { cutAfter, priority: 3, kind: ':' };
+  if (prev === ')' || prev === '—' || prev === '–') {
+    return { cutAfter, priority: 4, kind: prev };
+  }
+  if (allowComma && prev === ',') {
+    const tail = text.slice(cutAfter, cutAfter + 6).toLowerCase();
+    const kind = tail.startsWith(' but') ? ',but' : ',';
+    return { cutAfter, priority: 5, kind };
   }
   return null;
+}
+
+function findBestEnglishBoundary(text, wordBounds, wordStartIdx, targetEndWordIdx, maxWords) {
+  const windowStart = Math.max(wordStartIdx + 1, targetEndWordIdx - EN_BOUNDARY_SEARCH_WINDOW_WORDS);
+  const windowEnd = Math.min(wordBounds.length, targetEndWordIdx + EN_BOUNDARY_SEARCH_WINDOW_WORDS);
+  const chunkWordCount = targetEndWordIdx - wordStartIdx;
+  const allowComma = chunkWordCount > maxWords * 1.2;
+
+  let best = null;
+  let bestPriority = 999;
+
+  for (let wi = windowEnd; wi >= windowStart; wi--) {
+    const cutAfter = wordBounds[wi - 1]?.end;
+    if (cutAfter === undefined) continue;
+    const boundary = classifyEnglishBoundary(text, cutAfter, allowComma);
+    if (boundary && boundary.priority < bestPriority) {
+      best = { cutAfter: boundary.cutAfter, nextWordIdx: wi, kind: boundary.kind };
+      bestPriority = boundary.priority;
+      if (bestPriority === 1) break;
+    }
+  }
+  return best;
+}
+
+function splitEnglishTextByBoundary(text, maxWords = MAX_WORDS_FOR_HIGHLIGHT) {
+  if (!text || !text.trim()) return [];
+
+  const wordBounds = getEnglishWordBoundaries(text);
+  if (wordBounds.length === 0) return [];
+
+  const chunks = [];
+  let wordStartIdx = 0;
+
+  while (wordStartIdx < wordBounds.length) {
+    const targetEndWordIdx = Math.min(wordStartIdx + maxWords, wordBounds.length);
+    if (targetEndWordIdx >= wordBounds.length) {
+      chunks.push(text.slice(wordBounds[wordStartIdx].start));
+      break;
+    }
+
+    const boundary = findBestEnglishBoundary(text, wordBounds, wordStartIdx, targetEndWordIdx, maxWords);
+    if (boundary) {
+      chunks.push(text.slice(wordBounds[wordStartIdx].start, boundary.cutAfter));
+      wordStartIdx = boundary.nextWordIdx;
+    } else {
+      const cutAfter = wordBounds[targetEndWordIdx - 1].end;
+      chunks.push(text.slice(wordBounds[wordStartIdx].start, cutAfter));
+      wordStartIdx = targetEndWordIdx;
+    }
+  }
+
+  return chunks.filter((c) => c.trim().length > 0);
+}
+
+function buildLogicalChunks(blockText, languageMode) {
+  const maxUnits = languageMode === LANGUAGE_MODE_EN
+    ? MAX_WORDS_FOR_HIGHLIGHT
+    : MAX_TEXT_LENGTH_FOR_HIGHLIGHT;
+  const parts = languageMode === LANGUAGE_MODE_EN
+    ? splitEnglishTextByBoundary(blockText, maxUnits)
+    : splitTextByPunctuation(blockText, maxUnits);
+
+  const chunks = [];
+  let pos = 0;
+  for (const part of parts) {
+    if (!part) continue;
+    const idx = blockText.indexOf(part, pos);
+    const start = idx >= 0 ? idx : pos;
+    const end = start + part.length;
+    chunks.push({ start, end, text: blockText.slice(start, end) });
+    pos = end;
+  }
+  return coalesceLogicalChunks(chunks, languageMode, maxUnits, blockText);
+}
+
+function coalesceLogicalChunks(chunks, languageMode, maxUnits, blockText) {
+  if (chunks.length < 2) return chunks;
+
+  const last = chunks[chunks.length - 1];
+  const lastUnits = languageMode === LANGUAGE_MODE_EN
+    ? countWords(last.text)
+    : last.text.trim().length;
+  const minUnits = languageMode === LANGUAGE_MODE_EN
+    ? COALESCE_MIN_WORDS_EN
+    : COALESCE_MIN_CHARS_JA;
+  if (lastUnits >= minUnits) return chunks;
+
+  const prev = chunks[chunks.length - 2];
+  const mergedText = blockText.slice(prev.start, last.end);
+  const mergedUnits = languageMode === LANGUAGE_MODE_EN
+    ? countWords(mergedText)
+    : mergedText.trim().length;
+  const slack = languageMode === LANGUAGE_MODE_EN
+    ? HIGHLIGHT_UNIT_SLACK_EN
+    : HIGHLIGHT_UNIT_SLACK_JA;
+  if (mergedUnits <= maxUnits + slack) {
+    const merged = {
+      start: prev.start,
+      end: last.end,
+      text: mergedText
+    };
+    return chunks.slice(0, -2).concat(merged);
+  }
+  return chunks;
+}
+
+function withinHighlightLimit(text, languageMode) {
+  if (languageMode === LANGUAGE_MODE_EN) {
+    return countWords(text) <= MAX_WORDS_FOR_HIGHLIGHT + HIGHLIGHT_UNIT_SLACK_EN;
+  }
+  return text.trim().length <= MAX_TEXT_LENGTH_FOR_HIGHLIGHT + HIGHLIGHT_UNIT_SLACK_JA;
+}
+
+function findChunkContainingOffset(chunks, offset) {
+  for (const chunk of chunks) {
+    if (offset >= chunk.start && offset < chunk.end) return chunk;
+  }
+  if (chunks.length > 0) {
+    const last = chunks[chunks.length - 1];
+    if (offset === last.end) return last;
+  }
+  return chunks[0] || null;
+}
+
+// === フェーズ C: ブロック論理塊 + オーバーレイ表示 =============================
+function isBlockHighlightContainer(el) {
+  return !!(el && el.tagName && BLOCK_ANCESTOR_TAGS.has(el.tagName));
+}
+
+function findBlockAncestorFromPoint(clientX, clientY) {
+  const range = caretRangeFromClientXY(clientX, clientY);
+  let node = range ? range.startContainer : null;
+  if (node) {
+    node = node.nodeType === Node.TEXT_NODE ? node.parentElement : node;
+  }
+  if (!node) {
+    node = document.elementFromPoint(clientX, clientY);
+  }
+  while (node && node !== document.body && node !== document.documentElement) {
+    if (isYomupUiElement(node) || isEditableElement(node)) return null;
+    if (node.closest && node.closest('code')) return null;
+    if (isBlockHighlightContainer(node)) return node;
+    node = node.parentElement;
+  }
+  return null;
+}
+
+function shouldIncludeTextNodeInBlock(node) {
+  if (!node || node.nodeType !== Node.TEXT_NODE) return false;
+  const parent = node.parentElement;
+  if (!parent || isYomupUiElement(parent)) return false;
+  if (parent.closest('code,script,style,noscript')) return false;
+  if (isEditableElement(parent)) return false;
+  return true;
+}
+
+function collectBlockTextSegments(block) {
+  const segments = [];
+  let blockText = '';
+  const walker = document.createTreeWalker(block, NodeFilter.SHOW_TEXT, {
+    acceptNode(node) {
+      return shouldIncludeTextNodeInBlock(node)
+        ? NodeFilter.FILTER_ACCEPT
+        : NodeFilter.FILTER_REJECT;
+    }
+  });
+  while (walker.nextNode()) {
+    const node = walker.currentNode;
+    const text = node.textContent || '';
+    if (!text) continue;
+    const start = blockText.length;
+    blockText += text;
+    segments.push({ node, start, end: blockText.length, text });
+  }
+  return { blockText, segments };
+}
+
+// 日本語: <br> を論理行の境界としてテキストを連結（DOM は変更しない）
+function collectBlockTextSegmentLines(block) {
+  const lines = [];
+  let current = { blockText: '', segments: [] };
+
+  const flushLine = () => {
+    if (current.segments.length > 0) {
+      lines.push(current);
+    }
+    current = { blockText: '', segments: [] };
+  };
+
+  const appendTextNode = (node) => {
+    const text = node.textContent || '';
+    if (!text) return;
+    const start = current.blockText.length;
+    current.blockText += text;
+    current.segments.push({ node, start, end: current.blockText.length, text });
+  };
+
+  const walkNodes = (parent) => {
+    for (const child of parent.childNodes) {
+      if (child.nodeType === Node.ELEMENT_NODE && child.tagName === 'BR') {
+        flushLine();
+      } else if (child.nodeType === Node.TEXT_NODE) {
+        if (shouldIncludeTextNodeInBlock(child)) {
+          appendTextNode(child);
+        }
+      } else if (child.nodeType === Node.ELEMENT_NODE) {
+        if (isYomupUiElement(child) || isEditableElement(child)) continue;
+        if (child.closest('code,script,style,noscript')) continue;
+        walkNodes(child);
+      }
+    }
+  };
+
+  walkNodes(block);
+  flushLine();
+
+  if (lines.length === 0) {
+    return [collectBlockTextSegments(block)];
+  }
+  return lines;
+}
+
+function findLineIndexAtCaret(lines, clientX, clientY) {
+  const range = caretRangeFromClientXY(clientX, clientY);
+  if (range && range.startContainer) {
+    const container = range.startContainer;
+    for (let i = 0; i < lines.length; i++) {
+      if (lines[i].segments.some((seg) => seg.node === container)) {
+        return i;
+      }
+    }
+  }
+
+  let bestIdx = 0;
+  let bestDist = Infinity;
+  for (let i = 0; i < lines.length; i++) {
+    for (const seg of lines[i].segments) {
+      const r = document.createRange();
+      try {
+        r.selectNodeContents(seg.node);
+        const rects = r.getClientRects();
+        for (let j = 0; j < rects.length; j++) {
+          const rect = rects[j];
+          const cy = rect.top + rect.height / 2;
+          const d = (cy - clientY) ** 2 + (rect.left - clientX) ** 2;
+          if (d < bestDist) {
+            bestDist = d;
+            bestIdx = i;
+          }
+        }
+      } catch (_e) {
+        // ignore
+      }
+    }
+  }
+  return bestIdx;
+}
+
+function resolveHighlightTextContext(block, languageMode, clientX, clientY) {
+  if (languageMode !== LANGUAGE_MODE_JA) {
+    return collectBlockTextSegments(block);
+  }
+
+  const lines = collectBlockTextSegmentLines(block).filter(
+    (line) => line.segments.length > 0 && line.blockText.trim()
+  );
+  if (lines.length <= 1) {
+    return lines[0] || collectBlockTextSegments(block);
+  }
+
+  return lines[findLineIndexAtCaret(lines, clientX, clientY)];
+}
+
+function computeOffsetInBlockText(segments, container, offset) {
+  if (container.nodeType === Node.TEXT_NODE) {
+    for (const seg of segments) {
+      if (seg.node === container) {
+        return seg.start + Math.min(offset, seg.text.length);
+      }
+    }
+    return -1;
+  }
+  if (container.nodeType === Node.ELEMENT_NODE) {
+    const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT, {
+      acceptNode(node) {
+        return shouldIncludeTextNodeInBlock(node)
+          ? NodeFilter.FILTER_ACCEPT
+          : NodeFilter.FILTER_REJECT;
+      }
+    });
+    const first = walker.nextNode();
+    if (first) return computeOffsetInBlockText(segments, first, 0);
+  }
+  return -1;
+}
+
+function findNearestTextOffsetInBlock(block, segments, clientX, clientY) {
+  let best = null;
+  let bestDist = Infinity;
+  for (const seg of segments) {
+    const range = document.createRange();
+    try {
+      range.selectNodeContents(seg.node);
+      const rects = range.getClientRects();
+      for (let i = 0; i < rects.length; i++) {
+        const r = rects[i];
+        const cx = r.left + r.width / 2;
+        const cy = r.top + r.height / 2;
+        const d = (cx - clientX) ** 2 + (cy - clientY) ** 2;
+        if (d < bestDist) {
+          bestDist = d;
+          best = seg.start + Math.floor(seg.text.length / 2);
+        }
+      }
+    } catch (_e) {
+      // ignore
+    }
+  }
+  if (best !== null) return best;
+  return segments.length > 0 ? Math.floor((segments[segments.length - 1].end) / 2) : -1;
+}
+
+function getCaretOffsetInBlock(block, segments, clientX, clientY) {
+  const range = caretRangeFromClientXY(clientX, clientY);
+  if (range && block.contains(range.startContainer)) {
+    const off = computeOffsetInBlockText(segments, range.startContainer, range.startOffset);
+    if (off >= 0) return off;
+  }
+  const hit = document.elementFromPoint(clientX, clientY);
+  if (hit && block.contains(hit)) {
+    const off = computeOffsetInBlockText(segments, hit, 0);
+    if (off >= 0) return off;
+  }
+  return findNearestTextOffsetInBlock(block, segments, clientX, clientY);
+}
+
+function locateSegmentPosition(segments, globalOffset, isEnd) {
+  for (const seg of segments) {
+    if (isEnd) {
+      if (globalOffset > seg.start && globalOffset <= seg.end) {
+        return { node: seg.node, offset: globalOffset - seg.start };
+      }
+    } else if (globalOffset >= seg.start && globalOffset < seg.end) {
+      return { node: seg.node, offset: globalOffset - seg.start };
+    }
+  }
+  const last = segments[segments.length - 1];
+  if (last && isEnd) {
+    return { node: last.node, offset: last.text.length };
+  }
+  if (last && !isEnd) {
+    return { node: last.node, offset: 0 };
+  }
+  return null;
+}
+
+function createRangeForChunk(segments, chunkStart, chunkEnd) {
+  const startPos = locateSegmentPosition(segments, chunkStart, false);
+  let endPos = locateSegmentPosition(segments, chunkEnd, true);
+  if (!endPos && segments.length) {
+    const last = segments[segments.length - 1];
+    endPos = { node: last.node, offset: last.text.length };
+  }
+  if (!startPos || !endPos) return null;
+
+  const range = document.createRange();
+  try {
+    range.setStart(startPos.node, startPos.offset);
+    range.setEnd(endPos.node, endPos.offset);
+    return range;
+  } catch (err) {
+    debugError('createRangeForChunk:', err);
+    return null;
+  }
+}
+
+function ensureHighlightOverlayRoot() {
+  if (!highlightOverlayRoot || !highlightOverlayRoot.isConnected) {
+    highlightOverlayRoot = document.createElement('div');
+    highlightOverlayRoot.id = 'yomup-highlight-overlay-root';
+    highlightOverlayRoot.style.cssText =
+      'position:fixed;left:0;top:0;width:0;height:0;pointer-events:none;z-index:2147483646;';
+    document.documentElement.appendChild(highlightOverlayRoot);
+  }
+  return highlightOverlayRoot;
+}
+
+function clearHighlightOverlay() {
+  if (highlightOverlayRoot) {
+    highlightOverlayRoot.textContent = '';
+  }
+  currentHighlightRange = null;
+}
+
+function mergeHighlightClientRects(rectList) {
+  const raw = [];
+  for (let i = 0; i < rectList.length; i++) {
+    const r = rectList[i];
+    if (r.width > 0 && r.height > 0) raw.push(r);
+  }
+  if (raw.length <= 1) return raw;
+
+  const sorted = raw.slice().sort((a, b) => {
+    if (Math.abs(a.top - b.top) > HIGHLIGHT_RECT_MERGE_LINE_TOLERANCE_PX) {
+      return a.top - b.top;
+    }
+    return a.left - b.left;
+  });
+
+  const lineGroups = [];
+  for (const r of sorted) {
+    let placed = false;
+    for (const line of lineGroups) {
+      const ref = line[0];
+      if (Math.abs(r.top - ref.top) <= HIGHLIGHT_RECT_MERGE_LINE_TOLERANCE_PX) {
+        line.push(r);
+        placed = true;
+        break;
+      }
+    }
+    if (!placed) lineGroups.push([r]);
+  }
+
+  const merged = [];
+  for (const line of lineGroups) {
+    const sortedLine = line.slice().sort((a, b) => a.left - b.left);
+    let group = {
+      left: sortedLine[0].left,
+      top: sortedLine[0].top,
+      right: sortedLine[0].right,
+      bottom: sortedLine[0].bottom
+    };
+    for (let i = 1; i < sortedLine.length; i++) {
+      const r = sortedLine[i];
+      if (r.left <= group.right + HIGHLIGHT_RECT_MERGE_GAP_TOLERANCE_PX) {
+        group.right = Math.max(group.right, r.right);
+        group.top = Math.min(group.top, r.top);
+        group.bottom = Math.max(group.bottom, r.bottom);
+      } else {
+        merged.push(group);
+        group = { left: r.left, top: r.top, right: r.right, bottom: r.bottom };
+      }
+    }
+    merged.push(group);
+  }
+
+  return merged.map((g) => ({
+    left: g.left,
+    top: g.top,
+    width: g.right - g.left,
+    height: g.bottom - g.top
+  }));
+}
+
+function applyHighlightOverlay(range) {
+  clearHighlightOverlay();
+  const root = ensureHighlightOverlayRoot();
+  const rawRects = range.getClientRects();
+  const rects = ENABLE_HIGHLIGHT_OVERLAY_RECT_MERGE
+    ? mergeHighlightClientRects(rawRects)
+    : Array.from(rawRects).filter((rect) => rect.width > 0 && rect.height > 0);
+
+  for (let i = 0; i < rects.length; i++) {
+    const rect = rects[i];
+    if (rect.width <= 0 && rect.height <= 0) continue;
+    const box = document.createElement('div');
+    box.style.cssText =
+      `position:fixed;left:${rect.left}px;top:${rect.top}px;width:${rect.width}px;height:${rect.height}px;` +
+      'outline:2px solid red;outline-offset:-2px;box-sizing:border-box;pointer-events:none;';
+    root.appendChild(box);
+  }
+  currentHighlightRange = range;
+}
+
+function tryHighlightLogicalBlockAtPoint(clientX, clientY) {
+  try {
+    const block = findBlockAncestorFromPoint(clientX, clientY);
+    if (!block) return false;
+
+    const whole = collectBlockTextSegments(block);
+    if (!whole.blockText.trim() || whole.segments.length === 0) return false;
+
+    const languageMode = detectLanguageMode(whole.blockText, block);
+    const { blockText, segments } = resolveHighlightTextContext(
+      block,
+      languageMode,
+      clientX,
+      clientY
+    );
+    if (!blockText.trim() || segments.length === 0) return false;
+
+    let offset = getCaretOffsetInBlock(block, segments, clientX, clientY);
+    if (offset < 0) offset = Math.floor(blockText.length / 2);
+
+    const chunks = buildLogicalChunks(blockText, languageMode);
+    const chunk = findChunkContainingOffset(chunks, offset);
+    if (!chunk || !chunk.text.trim()) return false;
+    if (!withinHighlightLimit(chunk.text, languageMode)) return false;
+
+    const range = createRangeForChunk(segments, chunk.start, chunk.end);
+    if (!range) return false;
+
+    clearCurrentHighlight();
+    applyHighlightOverlay(range);
+
+    const units = countUnits(chunk.text, languageMode);
+    startCountdownSubPopup(units, languageMode);
+    debugLog('logical chunk', languageMode, chunk.start, chunk.end, units);
+    return true;
+  } catch (err) {
+    debugError('tryHighlightLogicalBlockAtPoint:', err);
+    return false;
+  }
 }
 
 // === 連続するspan要素を含む親要素を検出する関数 ============================
@@ -1322,9 +1941,8 @@ function highlightElement(element, clientX, clientY) {
     }
 
     if (typeof clientX === 'number' && typeof clientY === 'number') {
-      const narrowed = resolveNarrowHighlightTarget(element, clientX, clientY);
-      if (narrowed) {
-        element = narrowed;
+      if (tryHighlightLogicalBlockAtPoint(clientX, clientY)) {
+        return;
       }
     }
 
@@ -1397,34 +2015,8 @@ function highlightElement(element, clientX, clientY) {
       wrapBrLines(element); //br境界でspan
     }
 
-    // 一通りの前処理が終わりハイライトまで進めて良いかの判定
-    // 同一階層の子要素数(br,span,code,ruby,em,a除く)が1を超える場合かつ長文テキストは処理しない
-    if ((cstChildsiblingCounts > 0)
-      && (textLength > MAX_TEXT_LENGTH_FOR_HIGHLIGHT)) {
-      debugLog(`同一階層の子要素数(br等除く)が0を超える場合かつ長文テキストの場合: ${cstChildsiblingCounts}要素、${textLength}文字`);
-      return;
-    }
-
-    //一通りの前処理が終わりハイライトをする前に残ったテキストノードにspanを付ける
-    if (preHilightSts === 0) {
-      if (textLength > MAX_TEXT_LENGTH_FOR_HIGHLIGHT) {
-        if (!processedElementCache.has(element)) {
-          processedElementCache.add(element);
-          //長文テキストを分割
-          splitAllTextNodesByLength(element);
-          // 行頭～<br>までの要素をpadding-right:20pxのspanで囲む
-          wrapBrLineGroups(element);
-        }
-      }
-    }
-
     //ハイライトを実施（文字数制限あり(5文字余裕持たせてある)）
-    // 分割処理が実行された場合は、親要素全体をハイライト
-    if (preHilightSts === 0 && textLength > MAX_TEXT_LENGTH_FOR_HIGHLIGHT) {
-      // 分割処理が実行された場合、親要素全体をハイライト
-      //aaaaa applyHighlight(element);
-      //aaaaa startCountdownSubPopup(textLength);
-    } else if (textLength <= MAX_TEXT_LENGTH_FOR_HIGHLIGHT + 5) {
+    if (textLength <= MAX_TEXT_LENGTH_FOR_HIGHLIGHT + 5) {
       // 連続するspan要素を含む親要素を検出（span要素またはstrong要素の場合）
       let highlightTarget = element;
 
@@ -1462,9 +2054,11 @@ function highlightElement(element, clientX, clientY) {
       }
 
       // highlightTargetの文字数を使用
-      const finalTextLength = highlightTarget.textContent.trim().length;
+      const finalText = highlightTarget.textContent || '';
+      const finalLanguageMode = detectLanguageMode(finalText, highlightTarget);
+      const finalUnits = countUnits(finalText, finalLanguageMode);
       applyHighlight(highlightTarget);
-      startCountdownSubPopup(finalTextLength);
+      startCountdownSubPopup(finalUnits, finalLanguageMode);
     }
   } catch (error) {
     debugError('highlightElement処理中にエラーが発生:', error);
@@ -1475,6 +2069,8 @@ function highlightElement(element, clientX, clientY) {
 
 // === 現在のハイライトをクリアする関数 =========================================
 function clearCurrentHighlight() {
+  clearHighlightOverlay();
+
   if (currentHighlightedElement) {
     currentHighlightedElement.style.border = '';
     currentHighlightedElement.style.outline = '';
@@ -1787,16 +2383,17 @@ function isSingleLineElement(span) {
     return false; // 要素が2つ以上なら一行ではない（文字数に関係なく）
   }
 
-  // 一行と判定した上で、40文字以下なら最終的に一行と確定
-  return totalTextLength <= 40;
+  const lineText = parent.textContent || '';
+  const languageMode = detectLanguageMode(lineText, span);
+  if (languageMode === LANGUAGE_MODE_EN) {
+    return countWords(lineText) < 12;
+  }
+  return totalTextLength < 40;
 } //end isSingleLineElement
 
 
 // === テキストノードを処理すべきかチェック =====================================
 function shouldProcessTextNode(textNode) {
-  // aタグ内はスキップ
-  if (textNode.parentElement?.tagName === 'A') return false;
-
   // 既にクラス名付きspanで囲まれている場合はスキップ
   if (textNode.parentElement?.tagName === 'SPAN' &&
     textNode.parentElement.className.trim() !== '') {
@@ -2382,10 +2979,10 @@ function applyHighlight(element) {
 
 
 // === カウントダウン開始関数 ==================================================
-function startCountdownSubPopup(textLength) {
+function startCountdownSubPopup(unitCount, languageMode = LANGUAGE_MODE_JA) {
   try {
-    // カウントダウンタイマーを開始
-    const readTime = calculateReadingTime(textLength); //1分(60秒)で250文字
+    const unitLabel = getUnitLabel(languageMode);
+    const readTime = calculateReadingTime(unitCount, languageMode);
     countDownTimerForSub = readTime;
 
     // 既存のタイマーをクリア（重複防止）
@@ -2398,7 +2995,7 @@ function startCountdownSubPopup(textLength) {
     countDownIntervalForSub = setInterval(() => {
       try {
         countDownTimerForSub--;
-        updateSubPopupCharCount(textLength, readTime);
+        updateSubPopupCharCount(unitCount, readTime, unitLabel);
       } catch (error) {
         debugError('カウントダウン更新中にエラーが発生:', error);
         // タイマーを停止してエラーを防ぐ
@@ -2410,9 +3007,9 @@ function startCountdownSubPopup(textLength) {
     }, 1000);
 
     // ポップアップの文字数を更新
-    updateSubPopupCharCount(textLength, readTime);
+    updateSubPopupCharCount(unitCount, readTime, unitLabel);
 
-    debugLog(`文字数: ${textLength}, 読書: ${readTime}秒`);
+    debugLog(`単位: ${unitCount}${unitLabel}, 読書: ${readTime}秒`);
   } catch (error) {
     debugError('カウントダウン開始中にエラーが発生:', error);
   }
@@ -2557,14 +3154,14 @@ function hideSubPopup() {
 }
 
 // === サブポップアップの文字数を更新する関数 ===================================
-function updateSubPopupCharCount(textLength, readTime) {
+function updateSubPopupCharCount(unitCount, readTime, unitLabel = '字') {
   const subpopup = document.getElementById(ID_SUBPOPUP_CONTAINER);
   if (subpopup) {
     const shadow = subpopup.shadowRoot;
     if (shadow) {
       const charCount = shadow.querySelector('.char-count');
       if (charCount) {
-        charCount.textContent = `${textLength}字⇒［${countDownTimerForSub}／${readTime}秒］`;
+        charCount.textContent = `${unitCount}${unitLabel}⇒［${countDownTimerForSub}／${readTime}秒］`;
         charCount.style.display = 'block';
       }
     }
@@ -2635,7 +3232,7 @@ window.addEventListener('beforeunload', function () {
       seconds: stopwatchSeconds,
       limitMinutes: stopwatchLimitMinutes,
       loopCount: stopwatchLoopCount,
-      isVisible: popupMain !== null
+      isVisible: stopwatchOnOff
     };
     localStorage.setItem(LOCALSTRG_STOPWATCH_STATE, JSON.stringify(stopwatchState));
   }
@@ -2739,11 +3336,15 @@ function cleanupAllListeners() {
 function attachHighlightListeners() {
   document.addEventListener('mousemove', handleMouseMove);
   document.addEventListener('mouseout', handleMouseOut);
+  document.addEventListener('scroll', handleHighlightViewportChange, { capture: true, passive: true });
+  window.addEventListener('resize', handleHighlightViewportChange, { passive: true });
 }
 
 function detachHighlightListeners() {
   document.removeEventListener('mousemove', handleMouseMove);
   document.removeEventListener('mouseout', handleMouseOut);
+  document.removeEventListener('scroll', handleHighlightViewportChange, { capture: true });
+  window.removeEventListener('resize', handleHighlightViewportChange);
 }
 
 
