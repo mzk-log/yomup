@@ -59,6 +59,8 @@ const BLOCK_ANCESTOR_TAGS = new Set([
   'P', 'LI', 'DD', 'DT', 'BLOCKQUOTE', 'FIGCAPTION', 'TD', 'TH',
   'H1', 'H2', 'H3', 'H4', 'H5', 'H6'
 ]);
+// 案1: 見出し間ブロック（H2/H3 区切りの本文など、P が無い記事向け）
+const HEADING_SECTION_TAGS = new Set(['H2', 'H3']);
 let highlightOverlayRoot = null;
 let currentHighlightRange = null;
 
@@ -1461,11 +1463,23 @@ function isBlockHighlightContainer(el) {
   return !!(el && el.tagName && BLOCK_ANCESTOR_TAGS.has(el.tagName));
 }
 
-function findBlockAncestorFromPoint(clientX, clientY) {
+function getPointReferenceNode(clientX, clientY) {
   const range = caretRangeFromClientXY(clientX, clientY);
   let node = range ? range.startContainer : null;
-  if (node) {
-    node = node.nodeType === Node.TEXT_NODE ? node.parentElement : node;
+  if (node && node.nodeType === Node.TEXT_NODE) {
+    return node;
+  }
+  if (node && node.nodeType === Node.ELEMENT_NODE) {
+    return node;
+  }
+  const hit = document.elementFromPoint(clientX, clientY);
+  return hit || null;
+}
+
+function findBlockAncestorFromPoint(clientX, clientY) {
+  let node = getPointReferenceNode(clientX, clientY);
+  if (node && node.nodeType === Node.TEXT_NODE) {
+    node = node.parentElement;
   }
   if (!node) {
     node = document.elementFromPoint(clientX, clientY);
@@ -1477,6 +1491,122 @@ function findBlockAncestorFromPoint(clientX, clientY) {
     node = node.parentElement;
   }
   return null;
+}
+
+function isHeadingSectionTag(tagName) {
+  return !!(tagName && HEADING_SECTION_TAGS.has(tagName));
+}
+
+function findHeadingSectionRoot(fromNode) {
+  let el = fromNode && fromNode.nodeType === Node.TEXT_NODE ? fromNode.parentElement : fromNode;
+  while (el && el !== document.body && el !== document.documentElement) {
+    if (isYomupUiElement(el) || isEditableElement(el)) return null;
+    if (el.closest && el.closest('code')) return null;
+    const headings = el.querySelectorAll('h2,h3');
+    if (headings.length > 0) return el;
+    el = el.parentElement;
+  }
+  return null;
+}
+
+function getOrderedHeadingSections(root) {
+  const list = root.querySelectorAll('h2,h3');
+  const headings = [];
+  for (let i = 0; i < list.length; i++) {
+    const h = list[i];
+    if (!h.tagName || !isHeadingSectionTag(h.tagName)) continue;
+    if (isYomupUiElement(h) || h.closest('code,script,style,noscript')) continue;
+    headings.push(h);
+  }
+  return headings;
+}
+
+function isCaretOnHeadingElement(caretNode, headings) {
+  for (let i = 0; i < headings.length; i++) {
+    const h = headings[i];
+    if (h === caretNode || h.contains(caretNode)) return true;
+  }
+  return false;
+}
+
+function findHeadingIntervalBoundaries(headings, caretNode) {
+  if (!caretNode || headings.length === 0) return null;
+  if (isCaretOnHeadingElement(caretNode, headings)) return null;
+
+  let startHeading = null;
+  let endHeading = null;
+
+  for (let i = 0; i < headings.length; i++) {
+    const h = headings[i];
+    if (h.compareDocumentPosition(caretNode) & Node.DOCUMENT_POSITION_FOLLOWING) {
+      startHeading = h;
+    }
+  }
+  for (let i = 0; i < headings.length; i++) {
+    const h = headings[i];
+    if (caretNode.compareDocumentPosition(h) & Node.DOCUMENT_POSITION_FOLLOWING) {
+      endHeading = h;
+      break;
+    }
+  }
+
+  if (!startHeading && !endHeading) return null;
+  return { startHeading, endHeading };
+}
+
+function findHeadingIntervalBlockFromPoint(clientX, clientY) {
+  const caretNode = getPointReferenceNode(clientX, clientY);
+  if (!caretNode) return null;
+
+  const root = findHeadingSectionRoot(caretNode);
+  if (!root) return null;
+
+  const headings = getOrderedHeadingSections(root);
+  if (headings.length === 0) return null;
+
+  const bounds = findHeadingIntervalBoundaries(headings, caretNode);
+  if (!bounds) return null;
+
+  return {
+    mode: 'heading-interval',
+    root,
+    startHeading: bounds.startHeading,
+    endHeading: bounds.endHeading
+  };
+}
+
+function findHighlightBlockFromPoint(clientX, clientY) {
+  const element = findBlockAncestorFromPoint(clientX, clientY);
+  if (element) {
+    return { mode: 'element', element };
+  }
+  const interval = findHeadingIntervalBlockFromPoint(clientX, clientY);
+  if (interval) return interval;
+  return null;
+}
+
+function isNodeInHeadingInterval(node, root, startHeading, endHeading) {
+  if (!node || !root) return false;
+  if (!root.contains(node)) return false;
+
+  if (startHeading && (startHeading === node || startHeading.contains(node))) return false;
+  if (endHeading && (endHeading === node || endHeading.contains(node))) return false;
+
+  if (startHeading && !(startHeading.compareDocumentPosition(node) & Node.DOCUMENT_POSITION_FOLLOWING)) {
+    return false;
+  }
+  if (endHeading && !(node.compareDocumentPosition(endHeading) & Node.DOCUMENT_POSITION_FOLLOWING)) {
+    return false;
+  }
+  return true;
+}
+
+function highlightBlockContains(block, node) {
+  if (!block || !node) return false;
+  if (block.mode === 'element') {
+    return block.element.contains(node);
+  }
+  return isNodeInHeadingInterval(node, block.root, block.startHeading, block.endHeading);
 }
 
 function shouldIncludeTextNodeInBlock(node) {
@@ -1507,6 +1637,39 @@ function collectBlockTextSegments(block) {
     segments.push({ node, start, end: blockText.length, text });
   }
   return { blockText, segments };
+}
+
+function collectHeadingIntervalTextSegments(root, startHeading, endHeading) {
+  const segments = [];
+  let blockText = '';
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+    acceptNode(node) {
+      if (!shouldIncludeTextNodeInBlock(node)) return NodeFilter.FILTER_REJECT;
+      return isNodeInHeadingInterval(node, root, startHeading, endHeading)
+        ? NodeFilter.FILTER_ACCEPT
+        : NodeFilter.FILTER_REJECT;
+    }
+  });
+  while (walker.nextNode()) {
+    const node = walker.currentNode;
+    const text = node.textContent || '';
+    if (!text) continue;
+    const start = blockText.length;
+    blockText += text;
+    segments.push({ node, start, end: blockText.length, text });
+  }
+  return { blockText, segments };
+}
+
+function collectHighlightBlockTextSegments(highlightBlock) {
+  if (highlightBlock.mode === 'element') {
+    return collectBlockTextSegments(highlightBlock.element);
+  }
+  return collectHeadingIntervalTextSegments(
+    highlightBlock.root,
+    highlightBlock.startHeading,
+    highlightBlock.endHeading
+  );
 }
 
 // 日本語: <br> を論理行の境界としてテキストを連結（DOM は変更しない）
@@ -1554,6 +1717,69 @@ function collectBlockTextSegmentLines(block) {
   return lines;
 }
 
+function collectHeadingIntervalTextSegmentLines(root, startHeading, endHeading) {
+  const lines = [];
+  let current = { blockText: '', segments: [] };
+
+  const flushLine = () => {
+    if (current.segments.length > 0) {
+      lines.push(current);
+    }
+    current = { blockText: '', segments: [] };
+  };
+
+  const appendTextNode = (node) => {
+    const text = node.textContent || '';
+    if (!text) return;
+    const start = current.blockText.length;
+    current.blockText += text;
+    current.segments.push({ node, start, end: current.blockText.length, text });
+  };
+
+  const inInterval = (node) =>
+    isNodeInHeadingInterval(node, root, startHeading, endHeading);
+
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT, {
+    acceptNode(node) {
+      if (node.nodeType === Node.TEXT_NODE) {
+        return shouldIncludeTextNodeInBlock(node) && inInterval(node)
+          ? NodeFilter.FILTER_ACCEPT
+          : NodeFilter.FILTER_REJECT;
+      }
+      if (node.nodeType === Node.ELEMENT_NODE && node.tagName === 'BR') {
+        return inInterval(node) ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT;
+      }
+      return NodeFilter.FILTER_SKIP;
+    }
+  });
+
+  while (walker.nextNode()) {
+    const node = walker.currentNode;
+    if (node.nodeType === Node.ELEMENT_NODE && node.tagName === 'BR') {
+      flushLine();
+    } else if (node.nodeType === Node.TEXT_NODE) {
+      appendTextNode(node);
+    }
+  }
+  flushLine();
+
+  if (lines.length === 0) {
+    return [collectHeadingIntervalTextSegments(root, startHeading, endHeading)];
+  }
+  return lines;
+}
+
+function collectHighlightBlockTextSegmentLines(highlightBlock) {
+  if (highlightBlock.mode === 'element') {
+    return collectBlockTextSegmentLines(highlightBlock.element);
+  }
+  return collectHeadingIntervalTextSegmentLines(
+    highlightBlock.root,
+    highlightBlock.startHeading,
+    highlightBlock.endHeading
+  );
+}
+
 function findLineIndexAtCaret(lines, clientX, clientY) {
   const range = caretRangeFromClientXY(clientX, clientY);
   if (range && range.startContainer) {
@@ -1590,16 +1816,16 @@ function findLineIndexAtCaret(lines, clientX, clientY) {
   return bestIdx;
 }
 
-function resolveHighlightTextContext(block, languageMode, clientX, clientY) {
+function resolveHighlightTextContext(highlightBlock, languageMode, clientX, clientY) {
   if (languageMode !== LANGUAGE_MODE_JA) {
-    return collectBlockTextSegments(block);
+    return collectHighlightBlockTextSegments(highlightBlock);
   }
 
-  const lines = collectBlockTextSegmentLines(block).filter(
+  const lines = collectHighlightBlockTextSegmentLines(highlightBlock).filter(
     (line) => line.segments.length > 0 && line.blockText.trim()
   );
   if (lines.length <= 1) {
-    return lines[0] || collectBlockTextSegments(block);
+    return lines[0] || collectHighlightBlockTextSegments(highlightBlock);
   }
 
   return lines[findLineIndexAtCaret(lines, clientX, clientY)];
@@ -1628,7 +1854,7 @@ function computeOffsetInBlockText(segments, container, offset) {
   return -1;
 }
 
-function findNearestTextOffsetInBlock(block, segments, clientX, clientY) {
+function findNearestTextOffsetInBlock(highlightBlock, segments, clientX, clientY) {
   let best = null;
   let bestDist = Infinity;
   for (const seg of segments) {
@@ -1654,18 +1880,18 @@ function findNearestTextOffsetInBlock(block, segments, clientX, clientY) {
   return segments.length > 0 ? Math.floor((segments[segments.length - 1].end) / 2) : -1;
 }
 
-function getCaretOffsetInBlock(block, segments, clientX, clientY) {
+function getCaretOffsetInBlock(highlightBlock, segments, clientX, clientY) {
   const range = caretRangeFromClientXY(clientX, clientY);
-  if (range && block.contains(range.startContainer)) {
+  if (range && highlightBlockContains(highlightBlock, range.startContainer)) {
     const off = computeOffsetInBlockText(segments, range.startContainer, range.startOffset);
     if (off >= 0) return off;
   }
   const hit = document.elementFromPoint(clientX, clientY);
-  if (hit && block.contains(hit)) {
+  if (hit && highlightBlockContains(highlightBlock, hit)) {
     const off = computeOffsetInBlockText(segments, hit, 0);
     if (off >= 0) return off;
   }
-  return findNearestTextOffsetInBlock(block, segments, clientX, clientY);
+  return findNearestTextOffsetInBlock(highlightBlock, segments, clientX, clientY);
 }
 
 function locateSegmentPosition(segments, globalOffset, isEnd) {
@@ -1808,22 +2034,25 @@ function applyHighlightOverlay(range) {
 
 function tryHighlightLogicalBlockAtPoint(clientX, clientY) {
   try {
-    const block = findBlockAncestorFromPoint(clientX, clientY);
-    if (!block) return false;
+    const highlightBlock = findHighlightBlockFromPoint(clientX, clientY);
+    if (!highlightBlock) return false;
 
-    const whole = collectBlockTextSegments(block);
+    const whole = collectHighlightBlockTextSegments(highlightBlock);
     if (!whole.blockText.trim() || whole.segments.length === 0) return false;
 
-    const languageMode = detectLanguageMode(whole.blockText, block);
+    const langContextNode = highlightBlock.mode === 'element'
+      ? highlightBlock.element
+      : highlightBlock.root;
+    const languageMode = detectLanguageMode(whole.blockText, langContextNode);
     const { blockText, segments } = resolveHighlightTextContext(
-      block,
+      highlightBlock,
       languageMode,
       clientX,
       clientY
     );
     if (!blockText.trim() || segments.length === 0) return false;
 
-    let offset = getCaretOffsetInBlock(block, segments, clientX, clientY);
+    let offset = getCaretOffsetInBlock(highlightBlock, segments, clientX, clientY);
     if (offset < 0) offset = Math.floor(blockText.length / 2);
 
     const chunks = buildLogicalChunks(blockText, languageMode);
@@ -1839,7 +2068,14 @@ function tryHighlightLogicalBlockAtPoint(clientX, clientY) {
 
     const units = countUnits(chunk.text, languageMode);
     startCountdownSubPopup(units, languageMode);
-    debugLog('logical chunk', languageMode, chunk.start, chunk.end, units);
+    debugLog(
+      'logical chunk',
+      highlightBlock.mode,
+      languageMode,
+      chunk.start,
+      chunk.end,
+      units
+    );
     return true;
   } catch (err) {
     debugError('tryHighlightLogicalBlockAtPoint:', err);
