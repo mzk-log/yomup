@@ -567,22 +567,6 @@ function showYomuPPopup(
   popupIcon.innerHTML = `<img src="${chrome.runtime.getURL('icon48.png')}" alt="アイコン" style="width: 100%; height: 100%;"><div class="tooltip">読むプ<br>Version<br>${YOMUP_VERSION}</div>`;
   popup.appendChild(popupIcon);
 
-  // 保存された位置があれば適用YomuP
-  const savedPosition = localStorage.getItem(LOCALSTRG_YOMUP_XYPOS);
-  if (savedPosition) {
-    try {
-      const parsed = JSON.parse(savedPosition);
-      if (parsed && typeof parsed.x === 'string' && typeof parsed.y === 'string') {
-        popup.style.setProperty('--YomuP-popup-top', parsed.y, 'important');
-        popup.style.setProperty('--YomuP-popup-left', parsed.x, 'important');
-      }
-    } catch (error) {
-      debugError('ポップアップ位置の復元に失敗しました:', error);
-      // 不正なデータをクリア
-      localStorage.removeItem(LOCALSTRG_YOMUP_XYPOS);
-    }
-  }
-
   // アイコンを横並びで配置
   // 文字カウントボタン
   const strCntButton = document.createElement('div');
@@ -989,6 +973,14 @@ function showYomuPPopup(
   shadow.appendChild(popup);
 
   document.body.appendChild(container);
+
+  restorePopupPosition(
+    popup,
+    LOCALSTRG_YOMUP_XYPOS,
+    '--YomuP-popup-top',
+    '--YomuP-popup-left',
+    'ポップアップ位置の復元に失敗しました:'
+  );
 
   // ドラッグ移動機能を追加
   addDragFunctionality(popup);
@@ -3430,23 +3422,13 @@ function showSubPopup() {
   // ページに追加
   document.body.appendChild(container);
 
-  // サブポップアップの位置復元部分
-  // サブポップアップの位置復元部分
-  const savedPosition = localStorage.getItem(LOCALSTRG_YOMUPSUB_XYPOS);
-  if (savedPosition) {
-    try {
-      const parsed = JSON.parse(savedPosition);
-      if (parsed && typeof parsed.x === 'string' && typeof parsed.y === 'string') {
-        // CSS変数を直接設定
-        subpopup.style.setProperty('--subpopup-top', parsed.y, 'important');
-        subpopup.style.setProperty('--subpopup-left', parsed.x, 'important');
-      }
-    } catch (error) {
-      debugError('サブポップアップ位置の復元に失敗しました:', error);
-      // 不正なデータをクリア
-      localStorage.removeItem(LOCALSTRG_YOMUPSUB_XYPOS);
-    }
-  }
+  restorePopupPosition(
+    subpopup,
+    LOCALSTRG_YOMUPSUB_XYPOS,
+    '--subpopup-top',
+    '--subpopup-left',
+    'サブポップアップ位置の復元に失敗しました:'
+  );
 
   // ドラッグ移動機能を追加
   addDragFunctionality(subpopup);
@@ -3479,6 +3461,82 @@ function updateSubPopupCharCount(unitCount, readTime, unitLabel = '字') {
   }
 }
 
+
+// === ポップアップ座標: "123px" を数値に変換 ===================================
+function parsePopupPositionPx(cssValue) {
+  if (typeof cssValue !== 'string') return null;
+  const match = cssValue.trim().match(/^(-?\d+(?:\.\d+)?)px$/i);
+  if (!match) return null;
+  const value = Number(match[1]);
+  return Number.isFinite(value) ? value : null;
+}
+
+// ドラッグ時のみ: 窓の最大欄外はずれ（少なくとも 25% は画面内に残す）
+const POPUP_VIEWPORT_MAX_OFFSCREEN_RATIO = 0.50;
+
+// === ポップアップ座標をビューポートに合わせてクランプ =======================
+// allowPartialOffscreen=true: ドラッグ用（最大75%まで欄外可）
+// allowPartialOffscreen=false: 復元用（はみ出さず全体を画面内に収める）
+function clampPopupViewportPosition(leftPx, topPx, width, height, allowPartialOffscreen = true) {
+  if (!allowPartialOffscreen) {
+    const maxLeft = Math.max(0, window.innerWidth - width);
+    const maxTop = Math.max(0, window.innerHeight - height);
+    return {
+      left: Math.min(Math.max(0, leftPx), maxLeft),
+      top: Math.min(Math.max(0, topPx), maxTop),
+    };
+  }
+
+  const minVisibleRatio = 1 - POPUP_VIEWPORT_MAX_OFFSCREEN_RATIO;
+  const minLeft = -width * POPUP_VIEWPORT_MAX_OFFSCREEN_RATIO;
+  const maxLeft = window.innerWidth - width * minVisibleRatio;
+  const minTop = -height * POPUP_VIEWPORT_MAX_OFFSCREEN_RATIO;
+  const maxTop = window.innerHeight - height * minVisibleRatio;
+  return {
+    left: Math.min(Math.max(leftPx, minLeft), maxLeft),
+    top: Math.min(Math.max(topPx, minTop), maxTop),
+  };
+}
+
+// === クランプ済み座標を CSS 変数と localStorage に反映（復元用・全面内） =====
+function applyPopupPositionClamped(popup, leftPx, topPx, topVar, leftVar, storageKey) {
+  const rect = popup.getBoundingClientRect();
+  const { left, top } = clampPopupViewportPosition(
+    leftPx,
+    topPx,
+    rect.width,
+    rect.height,
+    false
+  );
+  const leftCss = left + 'px';
+  const topCss = top + 'px';
+  popup.style.setProperty(leftVar, leftCss, 'important');
+  popup.style.setProperty(topVar, topCss, 'important');
+  if (storageKey) {
+    localStorage.setItem(storageKey, JSON.stringify({ x: leftCss, y: topCss }));
+  }
+}
+
+// === localStorage からポップアップ位置を復元（画面外は全面内に補正） =========
+function restorePopupPosition(popup, storageKey, topVar, leftVar, errorMessage) {
+  const savedPosition = localStorage.getItem(storageKey);
+  if (!savedPosition) return;
+
+  try {
+    const parsed = JSON.parse(savedPosition);
+    const leftPx = parsePopupPositionPx(parsed?.x);
+    const topPx = parsePopupPositionPx(parsed?.y);
+    if (leftPx === null || topPx === null) return;
+
+    requestAnimationFrame(() => {
+      if (!popup.isConnected) return;
+      applyPopupPositionClamped(popup, leftPx, topPx, topVar, leftVar, storageKey);
+    });
+  } catch (error) {
+    debugError(errorMessage, error);
+    localStorage.removeItem(storageKey);
+  }
+}
 
 // === ポップアップをマウスでドラッグ ==========================================
 function addDragFunctionality(popup) {
@@ -3578,16 +3636,22 @@ function handleDragMouseMove(e) {
   const deltaX = e.clientX - startX;
   const deltaY = e.clientY - startY;
 
-  // 位置更新
-  popup.style.setProperty(leftVar, (startLeft + deltaX) + 'px', 'important');
-  popup.style.setProperty(topVar, (startTop + deltaY) + 'px', 'important');
+  const rect = popup.getBoundingClientRect();
+  const { left, top } = clampPopupViewportPosition(
+    startLeft + deltaX,
+    startTop + deltaY,
+    rect.width,
+    rect.height,
+    true
+  );
+  const leftCss = left + 'px';
+  const topCss = top + 'px';
 
-  // 保存キー判定（既存）
+  popup.style.setProperty(leftVar, leftCss, 'important');
+  popup.style.setProperty(topVar, topCss, 'important');
+
   const popupId = isYomuP ? LOCALSTRG_YOMUP_XYPOS : LOCALSTRG_YOMUPSUB_XYPOS;
-  localStorage.setItem(popupId, JSON.stringify({
-    x: (startLeft + deltaX) + 'px',
-    y: (startTop + deltaY) + 'px'
-  }));
+  localStorage.setItem(popupId, JSON.stringify({ x: leftCss, y: topCss }));
 }
 
 // 名前付き関数に変更（削除可能にするため）

@@ -7,11 +7,11 @@
 
 // 右クリックメニューの設定を2次元配列で一元管理
 const MENU_CONFIG = [
-  { id: 'YomuP-apl', title: '読むプDEV' }
+  { id: 'YomuP-apl', title: '読むプ' }
 ];
 
 // 読むプバージョン（機能変更.不具合修正）
-const YOMUP_VERSION = "2.5.1002DEV";
+const YOMUP_VERSION = "2.5.0";
 
 
 // デバッグログ出力の有効/無効（コンパイルスイッチ）
