@@ -56,11 +56,13 @@ const LANGUAGE_MODE_EN = 'en';
 const COALESCE_MIN_WORDS_EN = 8;
 const COALESCE_MIN_CHARS_JA = 40;
 const BLOCK_ANCESTOR_TAGS = new Set([
-  'P', 'LI', 'DD', 'DT', 'BLOCKQUOTE', 'FIGCAPTION', 'TD', 'TH',
-  'H1', 'H2', 'H3', 'H4', 'H5', 'H6'
+  'P', 'LI', 'DD', 'DT', 'BLOCKQUOTE', 'FIGCAPTION', 'TD', 'TH', 'PRE'
 ]);
-// 見出し間ブロック（H2/H3 区切りの本文など、P が無い記事向け）
-const HEADING_SECTION_TAGS = new Set(['H2', 'H3']);
+const LIST_LINE_BREAK_TAGS = new Set(['LI', 'UL', 'OL']);
+const INTERVAL_LINE_BREAK_TAGS = new Set(['HEADER', 'FOOTER', 'P', 'LI', 'UL', 'OL']);
+const INLINE_TEXT_HOST_TAGS = new Set(['TIME', 'A', 'BUTTON', 'LABEL', 'SPAN']);
+// 見出し専用 Range（ブロック祖先には含めない）。H1 もテキスト幅のみ光らせる
+const HEADING_SECTION_TAGS = new Set(['H1', 'H2', 'H3']);
 let highlightOverlayRoot = null;
 let currentHighlightRange = null;
 
@@ -1455,6 +1457,14 @@ function isBlockHighlightContainer(el) {
   return !!(el && el.tagName && BLOCK_ANCESTOR_TAGS.has(el.tagName));
 }
 
+// pre 内 code は論理塊対象。それ以外の code 配下は従来どおり除外
+function isHighlightExcludedCodeElement(el) {
+  if (!el || !el.closest) return false;
+  const codeEl = el.closest('code');
+  if (!codeEl) return false;
+  return !(codeEl.closest && codeEl.closest('pre'));
+}
+
 function getPointReferenceNode(clientX, clientY) {
   const range = caretRangeFromClientXY(clientX, clientY);
   let node = range ? range.startContainer : null;
@@ -1533,7 +1543,53 @@ function findTableCellBlockFromPoint(clientX, clientY) {
   return findNearestTableCell(table, clientX, clientY);
 }
 
+function findDeepestListItemFromPoint(clientX, clientY) {
+  const stack = document.elementsFromPoint(clientX, clientY);
+  const lis = [];
+  for (let i = 0; i < stack.length; i++) {
+    const el = stack[i];
+    if (!el || isYomupUiElement(el) || isEditableElement(el)) continue;
+    if (isHighlightExcludedCodeElement(el)) continue;
+    const li = el.tagName === 'LI' ? el : (el.closest ? el.closest('li') : null);
+    if (!li || lis.indexOf(li) >= 0) continue;
+    lis.push(li);
+  }
+  if (lis.length === 0) return null;
+  for (let i = 0; i < lis.length; i++) {
+    const li = lis[i];
+    let hasDescendantLi = false;
+    for (let j = 0; j < lis.length; j++) {
+      if (lis[j] !== li && li.contains(lis[j])) {
+        hasDescendantLi = true;
+        break;
+      }
+    }
+    if (!hasDescendantLi) return li;
+  }
+  return lis[lis.length - 1];
+}
+
 function findBlockAncestorFromPoint(clientX, clientY) {
+  const deepestLi = findDeepestListItemFromPoint(clientX, clientY);
+  if (deepestLi) return deepestLi;
+
+  let node = getPointReferenceNode(clientX, clientY);
+  if (node && node.nodeType === Node.TEXT_NODE) {
+    node = node.parentElement;
+  }
+  if (!node) {
+    node = document.elementFromPoint(clientX, clientY);
+  }
+  while (node && node !== document.body && node !== document.documentElement) {
+    if (isYomupUiElement(node) || isEditableElement(node)) return null;
+    if (isHighlightExcludedCodeElement(node)) return null;
+    if (isBlockHighlightContainer(node)) return node;
+    node = node.parentElement;
+  }
+  return null;
+}
+
+function findHeadingBlockFromPoint(clientX, clientY) {
   let node = getPointReferenceNode(clientX, clientY);
   if (node && node.nodeType === Node.TEXT_NODE) {
     node = node.parentElement;
@@ -1544,7 +1600,7 @@ function findBlockAncestorFromPoint(clientX, clientY) {
   while (node && node !== document.body && node !== document.documentElement) {
     if (isYomupUiElement(node) || isEditableElement(node)) return null;
     if (node.closest && node.closest('code')) return null;
-    if (isBlockHighlightContainer(node)) return node;
+    if (node.tagName && isHeadingSectionTag(node.tagName)) return node;
     node = node.parentElement;
   }
   return null;
@@ -1607,8 +1663,48 @@ function findHeadingIntervalBoundaries(headings, caretNode) {
     }
   }
 
-  if (!startHeading && !endHeading) return null;
+  if (!startHeading || !endHeading) return null;
   return { startHeading, endHeading };
+}
+
+function isWithinUiChromeRegion(node) {
+  const el = node && node.nodeType === Node.TEXT_NODE ? node.parentElement : node;
+  return !!(el && el.closest && el.closest('header, footer, nav'));
+}
+
+function isInlineTextHostElement(el) {
+  if (!el || !el.tagName || !INLINE_TEXT_HOST_TAGS.has(el.tagName)) return false;
+  if (isYomupUiElement(el) || isEditableElement(el)) return false;
+  if (isHighlightExcludedCodeElement(el)) return false;
+  const text = (el.textContent || '').trim();
+  if (!text) return false;
+  return text.length <= MAX_TEXT_LENGTH_FOR_HIGHLIGHT + HIGHLIGHT_UNIT_SLACK_JA;
+}
+
+function findInlineTextHostFromPoint(clientX, clientY) {
+  let node = getPointReferenceNode(clientX, clientY);
+  if (node && node.nodeType === Node.TEXT_NODE) {
+    node = node.parentElement;
+  }
+  if (!node) {
+    node = document.elementFromPoint(clientX, clientY);
+  }
+  while (node && node !== document.body && node !== document.documentElement) {
+    if (isYomupUiElement(node) || isEditableElement(node)) return null;
+    if (isHighlightExcludedCodeElement(node)) {
+      node = node.parentElement;
+      continue;
+    }
+    if (isInlineTextHostElement(node)) {
+      return node;
+    }
+    node = node.parentElement;
+  }
+  return null;
+}
+
+function isElementHighlightBlock(block) {
+  return block.mode === 'element' || block.mode === 'inline-text';
 }
 
 function findHeadingIntervalBlockFromPoint(clientX, clientY) {
@@ -1617,6 +1713,9 @@ function findHeadingIntervalBlockFromPoint(clientX, clientY) {
 
   // 表内はセル単位（findTableCellBlockFromPoint）に任せ、見出し間ブロックは使わない
   if (isNodeInsideTable(caretNode)) return null;
+
+  // UI クローム（header/footer/nav）内では heading-interval を使わない（§3.7.2）
+  if (isWithinUiChromeRegion(caretNode)) return null;
 
   const root = findHeadingSectionRoot(caretNode);
   if (!root) return null;
@@ -1645,6 +1744,17 @@ function findHighlightBlockFromPoint(clientX, clientY) {
   if (element) {
     return { mode: 'element', element };
   }
+
+  const heading = findHeadingBlockFromPoint(clientX, clientY);
+  if (heading) {
+    return { mode: 'element', element: heading };
+  }
+
+  const inlineHost = findInlineTextHostFromPoint(clientX, clientY);
+  if (inlineHost) {
+    return { mode: 'inline-text', element: inlineHost };
+  }
+
   const interval = findHeadingIntervalBlockFromPoint(clientX, clientY);
   if (interval) return interval;
   return null;
@@ -1670,18 +1780,24 @@ function isNodeInHeadingInterval(node, root, startHeading, endHeading) {
 
 function highlightBlockContains(block, node) {
   if (!block || !node) return false;
-  if (block.mode === 'element') {
+  if (isElementHighlightBlock(block)) {
     return block.element.contains(node);
   }
   return isNodeInHeadingInterval(node, block.root, block.startHeading, block.endHeading);
 }
 
-function shouldIncludeTextNodeInBlock(node) {
+function shouldIncludeTextNodeInBlock(node, blockElement) {
   if (!node || node.nodeType !== Node.TEXT_NODE) return false;
   const parent = node.parentElement;
   if (!parent || isYomupUiElement(parent)) return false;
-  if (parent.closest('code,script,style,noscript')) return false;
+  if (parent.closest('script,style,noscript')) return false;
   if (isEditableElement(parent)) return false;
+  if (parent.closest('code')) {
+    if (blockElement && blockElement.tagName === 'PRE' && blockElement.contains(parent)) {
+      return true;
+    }
+    return false;
+  }
   return true;
 }
 
@@ -1690,7 +1806,7 @@ function collectBlockTextSegments(block) {
   let blockText = '';
   const walker = document.createTreeWalker(block, NodeFilter.SHOW_TEXT, {
     acceptNode(node) {
-      return shouldIncludeTextNodeInBlock(node)
+      return shouldIncludeTextNodeInBlock(node, block)
         ? NodeFilter.FILTER_ACCEPT
         : NodeFilter.FILTER_REJECT;
     }
@@ -1729,7 +1845,7 @@ function collectHeadingIntervalTextSegments(root, startHeading, endHeading) {
 }
 
 function collectHighlightBlockTextSegments(highlightBlock) {
-  if (highlightBlock.mode === 'element') {
+  if (isElementHighlightBlock(highlightBlock)) {
     return collectBlockTextSegments(highlightBlock.element);
   }
   return collectHeadingIntervalTextSegments(
@@ -1739,10 +1855,11 @@ function collectHighlightBlockTextSegments(highlightBlock) {
   );
 }
 
-// 日本語: <br> を論理行の境界としてテキストを連結（DOM は変更しない）
+// 日本語: <br> / pre 内 \n / リスト境界を論理行としてテキストを連結（DOM は変更しない）
 function collectBlockTextSegmentLines(block) {
   const lines = [];
   let current = { blockText: '', segments: [] };
+  const isPreBlock = block.tagName === 'PRE';
 
   const flushLine = () => {
     if (current.segments.length > 0) {
@@ -1754,6 +1871,25 @@ function collectBlockTextSegmentLines(block) {
   const appendTextNode = (node) => {
     const text = node.textContent || '';
     if (!text) return;
+    if (isPreBlock && text.indexOf('\n') >= 0) {
+      const parts = text.split('\n');
+      let nodeOffset = 0;
+      for (let pi = 0; pi < parts.length; pi++) {
+        const part = parts[pi];
+        if (part) {
+          const start = current.blockText.length;
+          current.blockText += part;
+          current.segments.push({
+            node, start, end: current.blockText.length, text: part, nodeOffset
+          });
+        }
+        if (pi < parts.length - 1) {
+          flushLine();
+          nodeOffset += part.length + 1;
+        }
+      }
+      return;
+    }
     const start = current.blockText.length;
     current.blockText += text;
     current.segments.push({ node, start, end: current.blockText.length, text });
@@ -1763,13 +1899,19 @@ function collectBlockTextSegmentLines(block) {
     for (const child of parent.childNodes) {
       if (child.nodeType === Node.ELEMENT_NODE && child.tagName === 'BR') {
         flushLine();
+      } else if (child.nodeType === Node.ELEMENT_NODE && LIST_LINE_BREAK_TAGS.has(child.tagName)) {
+        walkNodes(child);
+        flushLine();
       } else if (child.nodeType === Node.TEXT_NODE) {
-        if (shouldIncludeTextNodeInBlock(child)) {
+        if (shouldIncludeTextNodeInBlock(child, block)) {
           appendTextNode(child);
         }
       } else if (child.nodeType === Node.ELEMENT_NODE) {
         if (isYomupUiElement(child) || isEditableElement(child)) continue;
-        if (child.closest('code,script,style,noscript')) continue;
+        if (child.tagName === 'SCRIPT' || child.tagName === 'STYLE' || child.tagName === 'NOSCRIPT') {
+          continue;
+        }
+        if (!isPreBlock && child.tagName === 'CODE') continue;
         walkNodes(child);
       }
     }
@@ -1806,28 +1948,30 @@ function collectHeadingIntervalTextSegmentLines(root, startHeading, endHeading) 
   const inInterval = (node) =>
     isNodeInHeadingInterval(node, root, startHeading, endHeading);
 
-  const walker = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT, {
-    acceptNode(node) {
-      if (node.nodeType === Node.TEXT_NODE) {
-        return shouldIncludeTextNodeInBlock(node) && inInterval(node)
-          ? NodeFilter.FILTER_ACCEPT
-          : NodeFilter.FILTER_REJECT;
+  const walkNodes = (parent) => {
+    for (const child of parent.childNodes) {
+      if (child.nodeType === Node.ELEMENT_NODE && child.tagName === 'BR') {
+        if (inInterval(child)) flushLine();
+      } else if (child.nodeType === Node.ELEMENT_NODE && INTERVAL_LINE_BREAK_TAGS.has(child.tagName)) {
+        if (inInterval(child)) {
+          walkNodes(child);
+          flushLine();
+        }
+      } else if (child.nodeType === Node.TEXT_NODE) {
+        if (shouldIncludeTextNodeInBlock(child) && inInterval(child)) {
+          appendTextNode(child);
+        }
+      } else if (child.nodeType === Node.ELEMENT_NODE) {
+        if (isYomupUiElement(child) || isEditableElement(child)) continue;
+        if (child.tagName === 'SCRIPT' || child.tagName === 'STYLE' || child.tagName === 'NOSCRIPT') {
+          continue;
+        }
+        walkNodes(child);
       }
-      if (node.nodeType === Node.ELEMENT_NODE && node.tagName === 'BR') {
-        return inInterval(node) ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT;
-      }
-      return NodeFilter.FILTER_SKIP;
     }
-  });
+  };
 
-  while (walker.nextNode()) {
-    const node = walker.currentNode;
-    if (node.nodeType === Node.ELEMENT_NODE && node.tagName === 'BR') {
-      flushLine();
-    } else if (node.nodeType === Node.TEXT_NODE) {
-      appendTextNode(node);
-    }
-  }
+  walkNodes(root);
   flushLine();
 
   if (lines.length === 0) {
@@ -1837,7 +1981,7 @@ function collectHeadingIntervalTextSegmentLines(root, startHeading, endHeading) 
 }
 
 function collectHighlightBlockTextSegmentLines(highlightBlock) {
-  if (highlightBlock.mode === 'element') {
+  if (isElementHighlightBlock(highlightBlock)) {
     return collectBlockTextSegmentLines(highlightBlock.element);
   }
   return collectHeadingIntervalTextSegmentLines(
@@ -1902,7 +2046,10 @@ function computeOffsetInBlockText(segments, container, offset) {
   if (container.nodeType === Node.TEXT_NODE) {
     for (const seg of segments) {
       if (seg.node === container) {
-        return seg.start + Math.min(offset, seg.text.length);
+        const rel = offset - (seg.nodeOffset || 0);
+        if (rel >= 0 && rel <= seg.text.length) {
+          return seg.start + rel;
+        }
       }
     }
     return -1;
@@ -1961,22 +2108,26 @@ function getCaretOffsetInBlock(highlightBlock, segments, clientX, clientY) {
   return findNearestTextOffsetInBlock(highlightBlock, segments, clientX, clientY);
 }
 
+function segmentDomOffset(seg, localOffset) {
+  return (seg.nodeOffset || 0) + localOffset;
+}
+
 function locateSegmentPosition(segments, globalOffset, isEnd) {
   for (const seg of segments) {
     if (isEnd) {
       if (globalOffset > seg.start && globalOffset <= seg.end) {
-        return { node: seg.node, offset: globalOffset - seg.start };
+        return { node: seg.node, offset: segmentDomOffset(seg, globalOffset - seg.start) };
       }
     } else if (globalOffset >= seg.start && globalOffset < seg.end) {
-      return { node: seg.node, offset: globalOffset - seg.start };
+      return { node: seg.node, offset: segmentDomOffset(seg, globalOffset - seg.start) };
     }
   }
   const last = segments[segments.length - 1];
   if (last && isEnd) {
-    return { node: last.node, offset: last.text.length };
+    return { node: last.node, offset: segmentDomOffset(last, last.text.length) };
   }
   if (last && !isEnd) {
-    return { node: last.node, offset: 0 };
+    return { node: last.node, offset: segmentDomOffset(last, 0) };
   }
   return null;
 }
@@ -1986,7 +2137,7 @@ function createRangeForChunk(segments, chunkStart, chunkEnd) {
   let endPos = locateSegmentPosition(segments, chunkEnd, true);
   if (!endPos && segments.length) {
     const last = segments[segments.length - 1];
-    endPos = { node: last.node, offset: last.text.length };
+    endPos = { node: last.node, offset: segmentDomOffset(last, last.text.length) };
   }
   if (!startPos || !endPos) return null;
 
@@ -2107,7 +2258,7 @@ function tryHighlightLogicalBlockAtPoint(clientX, clientY) {
     const whole = collectHighlightBlockTextSegments(highlightBlock);
     if (!whole.blockText.trim() || whole.segments.length === 0) return false;
 
-    const langContextNode = highlightBlock.mode === 'element'
+    const langContextNode = isElementHighlightBlock(highlightBlock)
       ? highlightBlock.element
       : highlightBlock.root;
     const languageMode = detectLanguageMode(whole.blockText, langContextNode);
@@ -2243,10 +2394,12 @@ function highlightElement(element, clientX, clientY) {
       return;
     }
 
+    let skipLegacyHighlight = false;
     if (typeof clientX === 'number' && typeof clientY === 'number') {
       if (tryHighlightLogicalBlockAtPoint(clientX, clientY)) {
         return;
       }
+      skipLegacyHighlight = true;
     }
 
     if (getFirstTextNodeDepth(element) === -1) {
@@ -2316,6 +2469,10 @@ function highlightElement(element, clientX, clientY) {
       removeWbrTags(element); //wbrを削除
       splitLongTextNodes(element); //単独テキストにspan
       wrapBrLines(element); //br境界でspan
+    }
+
+    if (skipLegacyHighlight) {
+      return;
     }
 
     //ハイライトを実施（文字数制限あり(5文字余裕持たせてある)）
