@@ -10,8 +10,8 @@ const MENU_CONFIG = [
   { id: 'YomuP-apl', title: '読むプ' }
 ];
 
-// 読むプバージョン（機能変更.不具合修正）
-const YOMUP_VERSION = "2.5.0";
+// 読むプバージョン（機能変更.不具合修正・改善.申請）
+const YOMUP_VERSION = "2.6.0";
 
 
 // デバッグログ出力の有効/無効（コンパイルスイッチ）

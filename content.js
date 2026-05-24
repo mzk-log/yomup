@@ -39,6 +39,7 @@ let countDownIntervalForSub = null; // カウントダウンタイマーのIDを
 let isDragging = false; // ドラッグ中かどうかのフラグ
 let startX, startY, startLeft, startTop; // ドラッグ開始時の座標
 let currentDraggingPopup = null; // 現在ドラッグ中のポップアップ要素
+let popupViewportResizeDebounceTimer = null; // resize 時のポップアップ再配置 debounce用
 
 // 読書速度設定
 let readingSpeed = 250; // 1分間で読める文字数
@@ -61,6 +62,13 @@ const BLOCK_ANCESTOR_TAGS = new Set([
 const LIST_LINE_BREAK_TAGS = new Set(['LI', 'UL', 'OL']);
 const INTERVAL_LINE_BREAK_TAGS = new Set(['HEADER', 'FOOTER', 'P', 'LI', 'UL', 'OL']);
 const INLINE_TEXT_HOST_TAGS = new Set(['TIME', 'A', 'BUTTON', 'LABEL', 'SPAN']);
+const BR_FLOW_CONTAINER_TAGS = new Set(['DIV', 'ARTICLE', 'SECTION', 'MAIN']);
+const BR_FLOW_BOUNDARY_TAGS = new Set(['H2', 'H3']);
+// dd 直下のブロック子要素を論理行境界とする（h4 + 概要 div 等の連結防止）
+const DD_CHILD_LINE_BREAK_TAGS = new Set([
+  'H1', 'H2', 'H3', 'H4', 'H5', 'H6',
+  'P', 'DIV', 'BLOCKQUOTE', 'PRE', 'FIGCAPTION', 'SECTION', 'ARTICLE'
+]);
 // 見出し専用 Range（ブロック祖先には含めない）。H1 もテキスト幅のみ光らせる
 const HEADING_SECTION_TAGS = new Set(['H1', 'H2', 'H3']);
 let highlightOverlayRoot = null;
@@ -1707,6 +1715,99 @@ function isElementHighlightBlock(block) {
   return block.mode === 'element' || block.mode === 'inline-text';
 }
 
+function getSectionBlockRoot(block) {
+  if (block.mode === 'br-flow') return block.container;
+  if (block.mode === 'heading-interval') return block.root;
+  return null;
+}
+
+function isBrFlowContainer(el) {
+  if (!el || !el.tagName || !BR_FLOW_CONTAINER_TAGS.has(el.tagName)) return false;
+  if (isYomupUiElement(el) || isEditableElement(el)) return false;
+
+  let hasDirectHeading = false;
+  let hasDirectBody = false;
+  for (let i = 0; i < el.childNodes.length; i++) {
+    const child = el.childNodes[i];
+    if (child.nodeType === Node.ELEMENT_NODE) {
+      const tag = child.tagName;
+      if (tag && BR_FLOW_BOUNDARY_TAGS.has(tag)) hasDirectHeading = true;
+      if (tag === 'BR') hasDirectBody = true;
+    } else if (child.nodeType === Node.TEXT_NODE && (child.textContent || '').trim()) {
+      hasDirectBody = true;
+    }
+  }
+  return hasDirectHeading && hasDirectBody;
+}
+
+function getDirectChildBrFlowHeadings(container) {
+  const headings = [];
+  for (let i = 0; i < container.childNodes.length; i++) {
+    const child = container.childNodes[i];
+    if (child.nodeType !== Node.ELEMENT_NODE || !child.tagName) continue;
+    if (!BR_FLOW_BOUNDARY_TAGS.has(child.tagName)) continue;
+    if (isYomupUiElement(child)) continue;
+    headings.push(child);
+  }
+  return headings;
+}
+
+function findBrFlowSectionBoundaries(headings, caretNode) {
+  if (!caretNode || headings.length === 0) return null;
+  if (isCaretOnHeadingElement(caretNode, headings)) return null;
+
+  let startHeading = null;
+  let endHeading = null;
+
+  for (let i = 0; i < headings.length; i++) {
+    const h = headings[i];
+    if (h.compareDocumentPosition(caretNode) & Node.DOCUMENT_POSITION_FOLLOWING) {
+      startHeading = h;
+    }
+  }
+  for (let i = 0; i < headings.length; i++) {
+    const h = headings[i];
+    if (caretNode.compareDocumentPosition(h) & Node.DOCUMENT_POSITION_FOLLOWING) {
+      endHeading = h;
+      break;
+    }
+  }
+
+  if (!startHeading && !endHeading) return null;
+  return { startHeading, endHeading };
+}
+
+function findBrFlowContainerFromNode(node) {
+  let el = node && node.nodeType === Node.TEXT_NODE ? node.parentElement : node;
+  while (el && el !== document.body && el !== document.documentElement) {
+    if (isBrFlowContainer(el)) return el;
+    el = el.parentElement;
+  }
+  return null;
+}
+
+function findBrFlowBlockFromPoint(clientX, clientY) {
+  const caretNode = getPointReferenceNode(clientX, clientY);
+  if (!caretNode) return null;
+
+  if (isNodeInsideTable(caretNode)) return null;
+  if (isWithinUiChromeRegion(caretNode)) return null;
+
+  const container = findBrFlowContainerFromNode(caretNode);
+  if (!container) return null;
+
+  const headings = getDirectChildBrFlowHeadings(container);
+  const bounds = findBrFlowSectionBoundaries(headings, caretNode);
+  if (!bounds) return null;
+
+  return {
+    mode: 'br-flow',
+    container,
+    startHeading: bounds.startHeading,
+    endHeading: bounds.endHeading
+  };
+}
+
 function findHeadingIntervalBlockFromPoint(clientX, clientY) {
   const caretNode = getPointReferenceNode(clientX, clientY);
   if (!caretNode) return null;
@@ -1734,7 +1835,30 @@ function findHeadingIntervalBlockFromPoint(clientX, clientY) {
   };
 }
 
+function findPreBlockFromPoint(clientX, clientY) {
+  let node = getPointReferenceNode(clientX, clientY);
+  if (node && node.nodeType === Node.TEXT_NODE) {
+    node = node.parentElement;
+  }
+  if (!node) {
+    node = document.elementFromPoint(clientX, clientY);
+  }
+  if (!node || !node.closest) return null;
+  if (isYomupUiElement(node) || isEditableElement(node)) return null;
+  if (isHighlightExcludedCodeElement(node)) return null;
+
+  const pre = node.closest('pre');
+  if (!pre || isYomupUiElement(pre) || isEditableElement(pre)) return null;
+  return pre;
+}
+
 function findHighlightBlockFromPoint(clientX, clientY) {
+  // 表セル内の pre はセル全体ではなく pre 単位で行分割する
+  const preBlock = findPreBlockFromPoint(clientX, clientY);
+  if (preBlock) {
+    return { mode: 'element', element: preBlock };
+  }
+
   const tableCell = findTableCellBlockFromPoint(clientX, clientY);
   if (tableCell) {
     return { mode: 'element', element: tableCell };
@@ -1754,6 +1878,9 @@ function findHighlightBlockFromPoint(clientX, clientY) {
   if (inlineHost) {
     return { mode: 'inline-text', element: inlineHost };
   }
+
+  const brFlow = findBrFlowBlockFromPoint(clientX, clientY);
+  if (brFlow) return brFlow;
 
   const interval = findHeadingIntervalBlockFromPoint(clientX, clientY);
   if (interval) return interval;
@@ -1783,7 +1910,11 @@ function highlightBlockContains(block, node) {
   if (isElementHighlightBlock(block)) {
     return block.element.contains(node);
   }
-  return isNodeInHeadingInterval(node, block.root, block.startHeading, block.endHeading);
+  const sectionRoot = getSectionBlockRoot(block);
+  if (sectionRoot) {
+    return isNodeInHeadingInterval(node, sectionRoot, block.startHeading, block.endHeading);
+  }
+  return false;
 }
 
 function shouldIncludeTextNodeInBlock(node, blockElement) {
@@ -1822,13 +1953,13 @@ function collectBlockTextSegments(block) {
   return { blockText, segments };
 }
 
-function collectHeadingIntervalTextSegments(root, startHeading, endHeading) {
+function collectSectionTextSegments(sectionRoot, startHeading, endHeading) {
   const segments = [];
   let blockText = '';
-  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+  const walker = document.createTreeWalker(sectionRoot, NodeFilter.SHOW_TEXT, {
     acceptNode(node) {
       if (!shouldIncludeTextNodeInBlock(node)) return NodeFilter.FILTER_REJECT;
-      return isNodeInHeadingInterval(node, root, startHeading, endHeading)
+      return isNodeInHeadingInterval(node, sectionRoot, startHeading, endHeading)
         ? NodeFilter.FILTER_ACCEPT
         : NodeFilter.FILTER_REJECT;
     }
@@ -1844,12 +1975,17 @@ function collectHeadingIntervalTextSegments(root, startHeading, endHeading) {
   return { blockText, segments };
 }
 
+function collectHeadingIntervalTextSegments(root, startHeading, endHeading) {
+  return collectSectionTextSegments(root, startHeading, endHeading);
+}
+
 function collectHighlightBlockTextSegments(highlightBlock) {
   if (isElementHighlightBlock(highlightBlock)) {
     return collectBlockTextSegments(highlightBlock.element);
   }
-  return collectHeadingIntervalTextSegments(
-    highlightBlock.root,
+  const sectionRoot = getSectionBlockRoot(highlightBlock);
+  return collectSectionTextSegments(
+    sectionRoot,
     highlightBlock.startHeading,
     highlightBlock.endHeading
   );
@@ -1860,6 +1996,7 @@ function collectBlockTextSegmentLines(block) {
   const lines = [];
   let current = { blockText: '', segments: [] };
   const isPreBlock = block.tagName === 'PRE';
+  const isDdBlock = block.tagName === 'DD';
 
   const flushLine = () => {
     if (current.segments.length > 0) {
@@ -1902,6 +2039,14 @@ function collectBlockTextSegmentLines(block) {
       } else if (child.nodeType === Node.ELEMENT_NODE && LIST_LINE_BREAK_TAGS.has(child.tagName)) {
         walkNodes(child);
         flushLine();
+      } else if (
+        child.nodeType === Node.ELEMENT_NODE &&
+        isDdBlock &&
+        parent === block &&
+        DD_CHILD_LINE_BREAK_TAGS.has(child.tagName)
+      ) {
+        walkNodes(child);
+        flushLine();
       } else if (child.nodeType === Node.TEXT_NODE) {
         if (shouldIncludeTextNodeInBlock(child, block)) {
           appendTextNode(child);
@@ -1926,7 +2071,7 @@ function collectBlockTextSegmentLines(block) {
   return lines;
 }
 
-function collectHeadingIntervalTextSegmentLines(root, startHeading, endHeading) {
+function collectSectionTextSegmentLines(sectionRoot, startHeading, endHeading) {
   const lines = [];
   let current = { blockText: '', segments: [] };
 
@@ -1945,20 +2090,20 @@ function collectHeadingIntervalTextSegmentLines(root, startHeading, endHeading) 
     current.segments.push({ node, start, end: current.blockText.length, text });
   };
 
-  const inInterval = (node) =>
-    isNodeInHeadingInterval(node, root, startHeading, endHeading);
+  const inSection = (node) =>
+    isNodeInHeadingInterval(node, sectionRoot, startHeading, endHeading);
 
   const walkNodes = (parent) => {
     for (const child of parent.childNodes) {
       if (child.nodeType === Node.ELEMENT_NODE && child.tagName === 'BR') {
-        if (inInterval(child)) flushLine();
+        if (inSection(child)) flushLine();
       } else if (child.nodeType === Node.ELEMENT_NODE && INTERVAL_LINE_BREAK_TAGS.has(child.tagName)) {
-        if (inInterval(child)) {
+        if (inSection(child)) {
           walkNodes(child);
           flushLine();
         }
       } else if (child.nodeType === Node.TEXT_NODE) {
-        if (shouldIncludeTextNodeInBlock(child) && inInterval(child)) {
+        if (shouldIncludeTextNodeInBlock(child) && inSection(child)) {
           appendTextNode(child);
         }
       } else if (child.nodeType === Node.ELEMENT_NODE) {
@@ -1971,33 +2116,84 @@ function collectHeadingIntervalTextSegmentLines(root, startHeading, endHeading) 
     }
   };
 
-  walkNodes(root);
+  walkNodes(sectionRoot);
   flushLine();
 
   if (lines.length === 0) {
-    return [collectHeadingIntervalTextSegments(root, startHeading, endHeading)];
+    return [collectSectionTextSegments(sectionRoot, startHeading, endHeading)];
   }
   return lines;
+}
+
+function collectHeadingIntervalTextSegmentLines(root, startHeading, endHeading) {
+  return collectSectionTextSegmentLines(root, startHeading, endHeading);
 }
 
 function collectHighlightBlockTextSegmentLines(highlightBlock) {
   if (isElementHighlightBlock(highlightBlock)) {
     return collectBlockTextSegmentLines(highlightBlock.element);
   }
-  return collectHeadingIntervalTextSegmentLines(
-    highlightBlock.root,
+  const sectionRoot = getSectionBlockRoot(highlightBlock);
+  return collectSectionTextSegmentLines(
+    sectionRoot,
     highlightBlock.startHeading,
     highlightBlock.endHeading
   );
+}
+
+function segmentContainsDomOffset(seg, textNode, domOffset) {
+  if (!seg || seg.node !== textNode) return false;
+  const lineStart = seg.nodeOffset || 0;
+  const lineEnd = lineStart + (seg.text || '').length;
+  return domOffset >= lineStart && domOffset <= lineEnd;
+}
+
+function getClientRectsForSegment(seg) {
+  const r = document.createRange();
+  const node = seg.node;
+  if (!node || node.nodeType !== Node.TEXT_NODE) return [];
+  const start = seg.nodeOffset || 0;
+  const end = start + (seg.text || '').length;
+  try {
+    r.setStart(node, start);
+    r.setEnd(node, end);
+    return Array.from(r.getClientRects());
+  } catch (_e) {
+    return [];
+  }
 }
 
 function findLineIndexAtCaret(lines, clientX, clientY) {
   const range = caretRangeFromClientXY(clientX, clientY);
   if (range && range.startContainer) {
     const container = range.startContainer;
-    for (let i = 0; i < lines.length; i++) {
-      if (lines[i].segments.some((seg) => seg.node === container)) {
-        return i;
+    if (container.nodeType === Node.TEXT_NODE) {
+      const domOffset = range.startOffset;
+      for (let i = 0; i < lines.length; i++) {
+        if (lines[i].segments.some((seg) => segmentContainsDomOffset(seg, container, domOffset))) {
+          return i;
+        }
+      }
+    } else if (container.nodeType === Node.ELEMENT_NODE && container.contains) {
+      for (let i = 0; i < lines.length; i++) {
+        if (lines[i].segments.some((seg) => seg.node && container.contains(seg.node))) {
+          return i;
+        }
+      }
+    }
+  }
+
+  for (let i = 0; i < lines.length; i++) {
+    for (const seg of lines[i].segments) {
+      const rects = getClientRectsForSegment(seg);
+      for (let j = 0; j < rects.length; j++) {
+        const rect = rects[j];
+        if (
+          clientX >= rect.left && clientX <= rect.right &&
+          clientY >= rect.top && clientY <= rect.bottom
+        ) {
+          return i;
+        }
       }
     }
   }
@@ -2006,10 +2202,8 @@ function findLineIndexAtCaret(lines, clientX, clientY) {
   let bestDist = Infinity;
   for (let i = 0; i < lines.length; i++) {
     for (const seg of lines[i].segments) {
-      const r = document.createRange();
       try {
-        r.selectNodeContents(seg.node);
-        const rects = r.getClientRects();
+        const rects = getClientRectsForSegment(seg);
         for (let j = 0; j < rects.length; j++) {
           const rect = rects[j];
           const cy = rect.top + rect.height / 2;
@@ -2027,8 +2221,15 @@ function findLineIndexAtCaret(lines, clientX, clientY) {
   return bestIdx;
 }
 
+function isPreHighlightBlock(highlightBlock) {
+  return isElementHighlightBlock(highlightBlock) &&
+    highlightBlock.element &&
+    highlightBlock.element.tagName === 'PRE';
+}
+
 function resolveHighlightTextContext(highlightBlock, languageMode, clientX, clientY) {
-  if (languageMode !== LANGUAGE_MODE_JA) {
+  const useLineSplit = languageMode === LANGUAGE_MODE_JA || isPreHighlightBlock(highlightBlock);
+  if (!useLineSplit) {
     return collectHighlightBlockTextSegments(highlightBlock);
   }
 
@@ -2069,13 +2270,11 @@ function computeOffsetInBlockText(segments, container, offset) {
 }
 
 function findNearestTextOffsetInBlock(highlightBlock, segments, clientX, clientY) {
-  let best = null;
+  let bestSeg = null;
   let bestDist = Infinity;
   for (const seg of segments) {
-    const range = document.createRange();
     try {
-      range.selectNodeContents(seg.node);
-      const rects = range.getClientRects();
+      const rects = getClientRectsForSegment(seg);
       for (let i = 0; i < rects.length; i++) {
         const r = rects[i];
         const cx = r.left + r.width / 2;
@@ -2083,14 +2282,16 @@ function findNearestTextOffsetInBlock(highlightBlock, segments, clientX, clientY
         const d = (cx - clientX) ** 2 + (cy - clientY) ** 2;
         if (d < bestDist) {
           bestDist = d;
-          best = seg.start + Math.floor(seg.text.length / 2);
+          bestSeg = seg;
         }
       }
     } catch (_e) {
       // ignore
     }
   }
-  if (best !== null) return best;
+  if (bestSeg !== null) {
+    return bestSeg.start + Math.floor((bestSeg.text || '').length / 2);
+  }
   return segments.length > 0 ? Math.floor((segments[segments.length - 1].end) / 2) : -1;
 }
 
@@ -2260,7 +2461,7 @@ function tryHighlightLogicalBlockAtPoint(clientX, clientY) {
 
     const langContextNode = isElementHighlightBlock(highlightBlock)
       ? highlightBlock.element
-      : highlightBlock.root;
+      : getSectionBlockRoot(highlightBlock);
     const languageMode = detectLanguageMode(whole.blockText, langContextNode);
     const { blockText, segments } = resolveHighlightTextContext(
       highlightBlock,
@@ -2273,7 +2474,9 @@ function tryHighlightLogicalBlockAtPoint(clientX, clientY) {
     let offset = getCaretOffsetInBlock(highlightBlock, segments, clientX, clientY);
     if (offset < 0) offset = Math.floor(blockText.length / 2);
 
-    const chunks = buildLogicalChunks(blockText, languageMode);
+    const chunks = isPreHighlightBlock(highlightBlock)
+      ? [{ start: 0, end: blockText.length, text: blockText }]
+      : buildLogicalChunks(blockText, languageMode);
     const chunk = findChunkContainingOffset(chunks, offset);
     if (!chunk || !chunk.text.trim()) return false;
     if (!withinHighlightLimit(chunk.text, languageMode)) return false;
@@ -3630,6 +3833,7 @@ function parsePopupPositionPx(cssValue) {
 
 // ドラッグ時のみ: 窓の最大欄外はずれ（少なくとも 25% は画面内に残す）
 const POPUP_VIEWPORT_MAX_OFFSCREEN_RATIO = 0.50;
+const POPUP_VIEWPORT_RESIZE_DEBOUNCE_MS = 150;
 
 // === ポップアップ座標をビューポートに合わせてクランプ =======================
 // allowPartialOffscreen=true: ドラッグ用（最大75%まで欄外可）
@@ -3672,6 +3876,52 @@ function applyPopupPositionClamped(popup, leftPx, topPx, topVar, leftVar, storag
   if (storageKey) {
     localStorage.setItem(storageKey, JSON.stringify({ x: leftCss, y: topCss }));
   }
+}
+
+function reclampPopupFromCurrentRect(popup, topVar, leftVar, storageKey) {
+  if (!popup || !popup.isConnected) return;
+  const rect = popup.getBoundingClientRect();
+  applyPopupPositionClamped(popup, rect.left, rect.top, topVar, leftVar, storageKey);
+}
+
+function reclampAllVisiblePopups() {
+  const mainContainer = document.getElementById(ID_YOMUP_POPUP_CONTAINER);
+  if (mainContainer && mainContainer.shadowRoot) {
+    const mainPopup = mainContainer.shadowRoot.querySelector('.' + CLASS_YOMUP_POPUP);
+    if (mainPopup) {
+      reclampPopupFromCurrentRect(
+        mainPopup,
+        '--YomuP-popup-top',
+        '--YomuP-popup-left',
+        LOCALSTRG_YOMUP_XYPOS
+      );
+    }
+  }
+
+  const subContainer = document.getElementById(ID_SUBPOPUP_CONTAINER);
+  if (subContainer && subContainer.shadowRoot) {
+    const subPopup = subContainer.shadowRoot.querySelector('.' + CLASS_SUBPOPUP);
+    if (subPopup) {
+      reclampPopupFromCurrentRect(
+        subPopup,
+        '--subpopup-top',
+        '--subpopup-left',
+        LOCALSTRG_YOMUPSUB_XYPOS
+      );
+    }
+  }
+}
+
+function handlePopupViewportResize() {
+  if (isDragging) return;
+
+  if (popupViewportResizeDebounceTimer) {
+    clearTimeout(popupViewportResizeDebounceTimer);
+  }
+  popupViewportResizeDebounceTimer = setTimeout(() => {
+    popupViewportResizeDebounceTimer = null;
+    reclampAllVisiblePopups();
+  }, POPUP_VIEWPORT_RESIZE_DEBOUNCE_MS);
 }
 
 // === localStorage からポップアップ位置を復元（画面外は全面内に補正） =========
@@ -3821,6 +4071,7 @@ function handleDragMouseUp() {
 // リスナーを追加
 document.addEventListener('mousemove', handleDragMouseMove);
 document.addEventListener('mouseup', handleDragMouseUp);
+window.addEventListener('resize', handlePopupViewportResize, { passive: true });
 
 
 
@@ -3833,6 +4084,7 @@ function cleanupAllListeners() {
     // ドラッグ用リスナーを削除
     document.removeEventListener('mousemove', handleDragMouseMove);
     document.removeEventListener('mouseup', handleDragMouseUp);
+    window.removeEventListener('resize', handlePopupViewportResize);
 
     // タイマーをクリア
     if (mouseTimeoutForHighlight) {
@@ -3846,6 +4098,10 @@ function cleanupAllListeners() {
     if (countDownIntervalForSub) {
       clearInterval(countDownIntervalForSub);
       countDownIntervalForSub = null;
+    }
+    if (popupViewportResizeDebounceTimer) {
+      clearTimeout(popupViewportResizeDebounceTimer);
+      popupViewportResizeDebounceTimer = null;
     }
 
     // タイマー変数をリセット
