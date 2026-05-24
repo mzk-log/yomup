@@ -61,6 +61,8 @@ const BLOCK_ANCESTOR_TAGS = new Set([
 const LIST_LINE_BREAK_TAGS = new Set(['LI', 'UL', 'OL']);
 const INTERVAL_LINE_BREAK_TAGS = new Set(['HEADER', 'FOOTER', 'P', 'LI', 'UL', 'OL']);
 const INLINE_TEXT_HOST_TAGS = new Set(['TIME', 'A', 'BUTTON', 'LABEL', 'SPAN']);
+const BR_FLOW_CONTAINER_TAGS = new Set(['DIV', 'ARTICLE', 'SECTION', 'MAIN']);
+const BR_FLOW_BOUNDARY_TAGS = new Set(['H2', 'H3']);
 // 見出し専用 Range（ブロック祖先には含めない）。H1 もテキスト幅のみ光らせる
 const HEADING_SECTION_TAGS = new Set(['H1', 'H2', 'H3']);
 let highlightOverlayRoot = null;
@@ -1707,6 +1709,99 @@ function isElementHighlightBlock(block) {
   return block.mode === 'element' || block.mode === 'inline-text';
 }
 
+function getSectionBlockRoot(block) {
+  if (block.mode === 'br-flow') return block.container;
+  if (block.mode === 'heading-interval') return block.root;
+  return null;
+}
+
+function isBrFlowContainer(el) {
+  if (!el || !el.tagName || !BR_FLOW_CONTAINER_TAGS.has(el.tagName)) return false;
+  if (isYomupUiElement(el) || isEditableElement(el)) return false;
+
+  let hasDirectHeading = false;
+  let hasDirectBody = false;
+  for (let i = 0; i < el.childNodes.length; i++) {
+    const child = el.childNodes[i];
+    if (child.nodeType === Node.ELEMENT_NODE) {
+      const tag = child.tagName;
+      if (tag && BR_FLOW_BOUNDARY_TAGS.has(tag)) hasDirectHeading = true;
+      if (tag === 'BR') hasDirectBody = true;
+    } else if (child.nodeType === Node.TEXT_NODE && (child.textContent || '').trim()) {
+      hasDirectBody = true;
+    }
+  }
+  return hasDirectHeading && hasDirectBody;
+}
+
+function getDirectChildBrFlowHeadings(container) {
+  const headings = [];
+  for (let i = 0; i < container.childNodes.length; i++) {
+    const child = container.childNodes[i];
+    if (child.nodeType !== Node.ELEMENT_NODE || !child.tagName) continue;
+    if (!BR_FLOW_BOUNDARY_TAGS.has(child.tagName)) continue;
+    if (isYomupUiElement(child)) continue;
+    headings.push(child);
+  }
+  return headings;
+}
+
+function findBrFlowSectionBoundaries(headings, caretNode) {
+  if (!caretNode || headings.length === 0) return null;
+  if (isCaretOnHeadingElement(caretNode, headings)) return null;
+
+  let startHeading = null;
+  let endHeading = null;
+
+  for (let i = 0; i < headings.length; i++) {
+    const h = headings[i];
+    if (h.compareDocumentPosition(caretNode) & Node.DOCUMENT_POSITION_FOLLOWING) {
+      startHeading = h;
+    }
+  }
+  for (let i = 0; i < headings.length; i++) {
+    const h = headings[i];
+    if (caretNode.compareDocumentPosition(h) & Node.DOCUMENT_POSITION_FOLLOWING) {
+      endHeading = h;
+      break;
+    }
+  }
+
+  if (!startHeading && !endHeading) return null;
+  return { startHeading, endHeading };
+}
+
+function findBrFlowContainerFromNode(node) {
+  let el = node && node.nodeType === Node.TEXT_NODE ? node.parentElement : node;
+  while (el && el !== document.body && el !== document.documentElement) {
+    if (isBrFlowContainer(el)) return el;
+    el = el.parentElement;
+  }
+  return null;
+}
+
+function findBrFlowBlockFromPoint(clientX, clientY) {
+  const caretNode = getPointReferenceNode(clientX, clientY);
+  if (!caretNode) return null;
+
+  if (isNodeInsideTable(caretNode)) return null;
+  if (isWithinUiChromeRegion(caretNode)) return null;
+
+  const container = findBrFlowContainerFromNode(caretNode);
+  if (!container) return null;
+
+  const headings = getDirectChildBrFlowHeadings(container);
+  const bounds = findBrFlowSectionBoundaries(headings, caretNode);
+  if (!bounds) return null;
+
+  return {
+    mode: 'br-flow',
+    container,
+    startHeading: bounds.startHeading,
+    endHeading: bounds.endHeading
+  };
+}
+
 function findHeadingIntervalBlockFromPoint(clientX, clientY) {
   const caretNode = getPointReferenceNode(clientX, clientY);
   if (!caretNode) return null;
@@ -1755,6 +1850,9 @@ function findHighlightBlockFromPoint(clientX, clientY) {
     return { mode: 'inline-text', element: inlineHost };
   }
 
+  const brFlow = findBrFlowBlockFromPoint(clientX, clientY);
+  if (brFlow) return brFlow;
+
   const interval = findHeadingIntervalBlockFromPoint(clientX, clientY);
   if (interval) return interval;
   return null;
@@ -1783,7 +1881,11 @@ function highlightBlockContains(block, node) {
   if (isElementHighlightBlock(block)) {
     return block.element.contains(node);
   }
-  return isNodeInHeadingInterval(node, block.root, block.startHeading, block.endHeading);
+  const sectionRoot = getSectionBlockRoot(block);
+  if (sectionRoot) {
+    return isNodeInHeadingInterval(node, sectionRoot, block.startHeading, block.endHeading);
+  }
+  return false;
 }
 
 function shouldIncludeTextNodeInBlock(node, blockElement) {
@@ -1822,13 +1924,13 @@ function collectBlockTextSegments(block) {
   return { blockText, segments };
 }
 
-function collectHeadingIntervalTextSegments(root, startHeading, endHeading) {
+function collectSectionTextSegments(sectionRoot, startHeading, endHeading) {
   const segments = [];
   let blockText = '';
-  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+  const walker = document.createTreeWalker(sectionRoot, NodeFilter.SHOW_TEXT, {
     acceptNode(node) {
       if (!shouldIncludeTextNodeInBlock(node)) return NodeFilter.FILTER_REJECT;
-      return isNodeInHeadingInterval(node, root, startHeading, endHeading)
+      return isNodeInHeadingInterval(node, sectionRoot, startHeading, endHeading)
         ? NodeFilter.FILTER_ACCEPT
         : NodeFilter.FILTER_REJECT;
     }
@@ -1844,12 +1946,17 @@ function collectHeadingIntervalTextSegments(root, startHeading, endHeading) {
   return { blockText, segments };
 }
 
+function collectHeadingIntervalTextSegments(root, startHeading, endHeading) {
+  return collectSectionTextSegments(root, startHeading, endHeading);
+}
+
 function collectHighlightBlockTextSegments(highlightBlock) {
   if (isElementHighlightBlock(highlightBlock)) {
     return collectBlockTextSegments(highlightBlock.element);
   }
-  return collectHeadingIntervalTextSegments(
-    highlightBlock.root,
+  const sectionRoot = getSectionBlockRoot(highlightBlock);
+  return collectSectionTextSegments(
+    sectionRoot,
     highlightBlock.startHeading,
     highlightBlock.endHeading
   );
@@ -1926,7 +2033,7 @@ function collectBlockTextSegmentLines(block) {
   return lines;
 }
 
-function collectHeadingIntervalTextSegmentLines(root, startHeading, endHeading) {
+function collectSectionTextSegmentLines(sectionRoot, startHeading, endHeading) {
   const lines = [];
   let current = { blockText: '', segments: [] };
 
@@ -1945,20 +2052,20 @@ function collectHeadingIntervalTextSegmentLines(root, startHeading, endHeading) 
     current.segments.push({ node, start, end: current.blockText.length, text });
   };
 
-  const inInterval = (node) =>
-    isNodeInHeadingInterval(node, root, startHeading, endHeading);
+  const inSection = (node) =>
+    isNodeInHeadingInterval(node, sectionRoot, startHeading, endHeading);
 
   const walkNodes = (parent) => {
     for (const child of parent.childNodes) {
       if (child.nodeType === Node.ELEMENT_NODE && child.tagName === 'BR') {
-        if (inInterval(child)) flushLine();
+        if (inSection(child)) flushLine();
       } else if (child.nodeType === Node.ELEMENT_NODE && INTERVAL_LINE_BREAK_TAGS.has(child.tagName)) {
-        if (inInterval(child)) {
+        if (inSection(child)) {
           walkNodes(child);
           flushLine();
         }
       } else if (child.nodeType === Node.TEXT_NODE) {
-        if (shouldIncludeTextNodeInBlock(child) && inInterval(child)) {
+        if (shouldIncludeTextNodeInBlock(child) && inSection(child)) {
           appendTextNode(child);
         }
       } else if (child.nodeType === Node.ELEMENT_NODE) {
@@ -1971,21 +2078,26 @@ function collectHeadingIntervalTextSegmentLines(root, startHeading, endHeading) 
     }
   };
 
-  walkNodes(root);
+  walkNodes(sectionRoot);
   flushLine();
 
   if (lines.length === 0) {
-    return [collectHeadingIntervalTextSegments(root, startHeading, endHeading)];
+    return [collectSectionTextSegments(sectionRoot, startHeading, endHeading)];
   }
   return lines;
+}
+
+function collectHeadingIntervalTextSegmentLines(root, startHeading, endHeading) {
+  return collectSectionTextSegmentLines(root, startHeading, endHeading);
 }
 
 function collectHighlightBlockTextSegmentLines(highlightBlock) {
   if (isElementHighlightBlock(highlightBlock)) {
     return collectBlockTextSegmentLines(highlightBlock.element);
   }
-  return collectHeadingIntervalTextSegmentLines(
-    highlightBlock.root,
+  const sectionRoot = getSectionBlockRoot(highlightBlock);
+  return collectSectionTextSegmentLines(
+    sectionRoot,
     highlightBlock.startHeading,
     highlightBlock.endHeading
   );
@@ -2260,7 +2372,7 @@ function tryHighlightLogicalBlockAtPoint(clientX, clientY) {
 
     const langContextNode = isElementHighlightBlock(highlightBlock)
       ? highlightBlock.element
-      : highlightBlock.root;
+      : getSectionBlockRoot(highlightBlock);
     const languageMode = detectLanguageMode(whole.blockText, langContextNode);
     const { blockText, segments } = resolveHighlightTextContext(
       highlightBlock,
