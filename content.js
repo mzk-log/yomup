@@ -64,6 +64,10 @@ const INTERVAL_LINE_BREAK_TAGS = new Set(['HEADER', 'FOOTER', 'P', 'LI', 'UL', '
 const INLINE_TEXT_HOST_TAGS = new Set(['TIME', 'A', 'BUTTON', 'LABEL', 'SPAN']);
 const BR_FLOW_CONTAINER_TAGS = new Set(['DIV', 'ARTICLE', 'SECTION', 'MAIN']);
 const BR_FLOW_BOUNDARY_TAGS = new Set(['H2', 'H3']);
+// Tailwind 等の div カード（grid 内セル）: 親は構造判定、ブロックは直下テキスト div
+const CARD_CELL_MIN_TEXT_DIVS = 2;
+const CARD_CELL_MAX_DIRECT_CHILDREN = 8;
+const CARD_CELL_MIN_SIBLING_DIVS = 3;
 // dd 直下のブロック子要素を論理行境界とする（h4 + 概要 div 等の連結防止）
 const DD_CHILD_LINE_BREAK_TAGS = new Set([
   'H1', 'H2', 'H3', 'H4', 'H5', 'H6',
@@ -1711,6 +1715,178 @@ function findInlineTextHostFromPoint(clientX, clientY) {
   return null;
 }
 
+function countDirectTextDivChildren(el) {
+  let count = 0;
+  for (let i = 0; i < el.childNodes.length; i++) {
+    const child = el.childNodes[i];
+    if (child.nodeType !== Node.ELEMENT_NODE || child.tagName !== 'DIV') continue;
+    if ((child.textContent || '').trim()) count++;
+  }
+  return count;
+}
+
+function countSiblingDivsWithText(el) {
+  const parent = el.parentElement;
+  if (!parent) return 0;
+  let count = 0;
+  for (let i = 0; i < parent.children.length; i++) {
+    const sib = parent.children[i];
+    if (sib.tagName === 'DIV' && (sib.textContent || '').trim()) count++;
+  }
+  return count;
+}
+
+function hasDirectHeadingChild(el) {
+  for (let i = 0; i < el.children.length; i++) {
+    const child = el.children[i];
+    if (child.nodeType !== Node.ELEMENT_NODE || !child.tagName) continue;
+    if (HEADING_SECTION_TAGS.has(child.tagName)) return true;
+  }
+  return false;
+}
+
+function getDirectTextDivChildren(el) {
+  const list = [];
+  for (let i = 0; i < el.children.length; i++) {
+    const child = el.children[i];
+    if (child.tagName === 'DIV' && (child.textContent || '').trim()) {
+      list.push(child);
+    }
+  }
+  return list;
+}
+
+function isCardCellTextUnit(el) {
+  if (!el || el.tagName !== 'DIV') return false;
+  if (isYomupUiElement(el) || isEditableElement(el)) return false;
+  if (isHighlightExcludedCodeElement(el)) return false;
+  const text = (el.textContent || '').trim();
+  if (!text) return false;
+  if (text.length > MAX_TEXT_LENGTH_FOR_HIGHLIGHT + HIGHLIGHT_UNIT_SLACK_JA) return false;
+  if (countWords(text) > MAX_WORDS_FOR_HIGHLIGHT + HIGHLIGHT_UNIT_SLACK_EN) return false;
+  return true;
+}
+
+// grid 内カード親: 構造のみ（全文の字数上限は子 div で判定）
+function isCardCellStructure(el) {
+  if (!el || el.tagName !== 'DIV') return false;
+  if (isYomupUiElement(el) || isEditableElement(el)) return false;
+  if (isHighlightExcludedCodeElement(el)) return false;
+  if (hasDirectHeadingChild(el)) return false;
+  if (countDirectTextDivChildren(el) < CARD_CELL_MIN_TEXT_DIVS) return false;
+  if (el.children.length > CARD_CELL_MAX_DIRECT_CHILDREN) return false;
+  return countSiblingDivsWithText(el) >= CARD_CELL_MIN_SIBLING_DIVS;
+}
+
+function pickNearestCardTextUnit(textDivs, clientX, clientY) {
+  if (textDivs.length === 0) return null;
+  if (textDivs.length === 1) return textDivs[0];
+  if (typeof clientX !== 'number' || typeof clientY !== 'number') {
+    return textDivs[0];
+  }
+
+  for (let i = 0; i < textDivs.length; i++) {
+    const rect = textDivs[i].getBoundingClientRect();
+    if (
+      clientX >= rect.left && clientX <= rect.right &&
+      clientY >= rect.top && clientY <= rect.bottom
+    ) {
+      return textDivs[i];
+    }
+  }
+
+  let best = textDivs[0];
+  let bestDist = Infinity;
+  for (let i = 0; i < textDivs.length; i++) {
+    const rect = textDivs[i].getBoundingClientRect();
+    const cx = rect.left + rect.width / 2;
+    const cy = rect.top + rect.height / 2;
+    const d = (cx - clientX) ** 2 + (cy - clientY) ** 2;
+    if (d < bestDist) {
+      bestDist = d;
+      best = textDivs[i];
+    }
+  }
+  return best;
+}
+
+function resolveCardCellTextUnit(cardEl, caretNode, clientX, clientY) {
+  const textDivs = getDirectTextDivChildren(cardEl).filter(isCardCellTextUnit);
+  if (textDivs.length === 0) return null;
+
+  let ref = caretNode;
+  if (ref && ref.nodeType === Node.TEXT_NODE) {
+    ref = ref.parentElement;
+  }
+  if (!ref) {
+    ref = document.elementFromPoint(clientX, clientY);
+  }
+
+  if (ref) {
+    for (let i = 0; i < textDivs.length; i++) {
+      const div = textDivs[i];
+      if (div === ref || div.contains(ref)) {
+        return div;
+      }
+    }
+  }
+
+  return pickNearestCardTextUnit(textDivs, clientX, clientY);
+}
+
+function findCardCellBlockFromPoint(clientX, clientY) {
+  const caretNode = getPointReferenceNode(clientX, clientY);
+  let node = caretNode;
+  if (node && node.nodeType === Node.TEXT_NODE) {
+    node = node.parentElement;
+  }
+  if (!node) {
+    node = document.elementFromPoint(clientX, clientY);
+  }
+  if (isNodeInsideTable(node)) return null;
+
+  while (node && node !== document.body && node !== document.documentElement) {
+    if (isYomupUiElement(node) || isEditableElement(node)) return null;
+    if (isCardCellStructure(node)) {
+      const unit = resolveCardCellTextUnit(node, caretNode || node, clientX, clientY);
+      if (unit) {
+        return { mode: 'element', element: unit };
+      }
+    }
+    node = node.parentElement;
+  }
+  return null;
+}
+
+function findFaqAnswerBlockFromPoint(clientX, clientY) {
+  let node = getPointReferenceNode(clientX, clientY);
+  if (node && node.nodeType === Node.TEXT_NODE) {
+    node = node.parentElement;
+  }
+  if (!node) {
+    node = document.elementFromPoint(clientX, clientY);
+  }
+  if (!node || isNodeInsideTable(node)) return null;
+
+  const answer = node.closest && node.closest('.faq-answer');
+  if (!answer || isYomupUiElement(answer) || isEditableElement(answer)) return null;
+
+  let block = null;
+  for (let i = 0; i < answer.children.length; i++) {
+    const child = answer.children[i];
+    if (child.tagName !== 'DIV') continue;
+    if (child === node || child.contains(node)) {
+      block = child;
+      break;
+    }
+  }
+  if (!block || isYomupUiElement(block) || isEditableElement(block)) return null;
+  if (isHighlightExcludedCodeElement(block)) return null;
+  if (!(block.textContent || '').trim()) return null;
+
+  return { mode: 'element', element: block };
+}
+
 function isElementHighlightBlock(block) {
   return block.mode === 'element' || block.mode === 'inline-text';
 }
@@ -1878,6 +2054,12 @@ function findHighlightBlockFromPoint(clientX, clientY) {
   if (inlineHost) {
     return { mode: 'inline-text', element: inlineHost };
   }
+
+  const cardCell = findCardCellBlockFromPoint(clientX, clientY);
+  if (cardCell) return cardCell;
+
+  const faqAnswer = findFaqAnswerBlockFromPoint(clientX, clientY);
+  if (faqAnswer) return faqAnswer;
 
   const brFlow = findBrFlowBlockFromPoint(clientX, clientY);
   if (brFlow) return brFlow;
