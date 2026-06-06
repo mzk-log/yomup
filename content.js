@@ -2724,6 +2724,42 @@ function applyHighlightOverlay(range) {
   currentHighlightRange = range;
 }
 
+function isSingleFullBlockLogicalChunk(chunks, blockText, chunk) {
+  if (!chunk || !blockText || chunks.length !== 1) return false;
+  return chunk.start === 0 && chunk.end === blockText.length;
+}
+
+function countValidRangeClientRects(range) {
+  if (!range) return 0;
+  const rectList = range.getClientRects();
+  let count = 0;
+  for (let i = 0; i < rectList.length; i++) {
+    const r = rectList[i];
+    if (r.width > 0 && r.height > 0) count++;
+  }
+  return count;
+}
+
+// 1チャンク全文かつ折り返し複数行のときだけ外接1矩形（表セル等の二重枠防止）
+function shouldUseSingleBlockUnionOverlay(chunks, blockText, chunk, range) {
+  if (!isSingleFullBlockLogicalChunk(chunks, blockText, chunk)) return false;
+  return countValidRangeClientRects(range) > 1;
+}
+
+function applyHighlightOverlayUnion(range) {
+  clearHighlightOverlay();
+  const root = ensureHighlightOverlayRoot();
+  const rect = range.getBoundingClientRect();
+  if (rect.width > 0 || rect.height > 0) {
+    const box = document.createElement('div');
+    box.style.cssText =
+      `position:fixed;left:${rect.left}px;top:${rect.top}px;width:${rect.width}px;height:${rect.height}px;` +
+      'outline:2px solid red;outline-offset:-2px;box-sizing:border-box;pointer-events:none;';
+    root.appendChild(box);
+  }
+  currentHighlightRange = range;
+}
+
 function tryHighlightLogicalBlockAtPoint(clientX, clientY) {
   try {
     const highlightBlock = findHighlightBlockFromPoint(clientX, clientY);
@@ -2758,7 +2794,11 @@ function tryHighlightLogicalBlockAtPoint(clientX, clientY) {
     if (!range) return false;
 
     clearCurrentHighlight();
-    applyHighlightOverlay(range);
+    if (shouldUseSingleBlockUnionOverlay(chunks, blockText, chunk, range)) {
+      applyHighlightOverlayUnion(range);
+    } else {
+      applyHighlightOverlay(range);
+    }
 
     const units = countUnits(chunk.text, languageMode);
     startCountdownSubPopup(units, languageMode);
