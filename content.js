@@ -64,6 +64,11 @@ const INTERVAL_LINE_BREAK_TAGS = new Set([
   'HEADER', 'FOOTER', 'P', 'LI', 'UL', 'OL', 'H4', 'H5', 'H6', 'PRE'
 ]);
 const INLINE_TEXT_HOST_TAGS = new Set(['TIME', 'A', 'BUTTON', 'LABEL', 'SPAN', 'CODE']);
+// Gemini sequence（タイムライン）のタイトル・サブタイトル行
+const GEMINI_SEQUENCE_TEXT_UNIT_CLASSES = new Set([
+  'sequence-event-title',
+  'sequence-event-subtitle'
+]);
 const BR_FLOW_CONTAINER_TAGS = new Set(['DIV', 'ARTICLE', 'SECTION', 'MAIN']);
 const BR_FLOW_BOUNDARY_TAGS = new Set(['H2', 'H3']);
 // Tailwind 等の div カード（grid 内セル）: 親は構造判定、ブロックは直下テキスト div
@@ -1804,6 +1809,49 @@ function findInlineTextHostFromPoint(clientX, clientY) {
   return null;
 }
 
+function isGeminiSequenceTextUnit(el) {
+  if (!el || el.tagName !== 'DIV' || !el.classList) return false;
+  if (isYomupUiElement(el) || isEditableElement(el)) return false;
+  if (isHighlightExcludedCodeElement(el)) return false;
+  let matched = false;
+  for (const cls of GEMINI_SEQUENCE_TEXT_UNIT_CLASSES) {
+    if (el.classList.contains(cls)) {
+      matched = true;
+      break;
+    }
+  }
+  if (!matched) return false;
+  const text = (el.textContent || '').trim();
+  if (!text) return false;
+  return text.length <= MAX_TEXT_LENGTH_FOR_HIGHLIGHT + HIGHLIGHT_UNIT_SLACK_JA;
+}
+
+function findGeminiSequenceTextUnitFromPoint(clientX, clientY) {
+  const stack = document.elementsFromPoint(clientX, clientY);
+  for (let i = 0; i < stack.length; i++) {
+    const el = stack[i];
+    if (isGeminiSequenceTextUnit(el)) {
+      return el;
+    }
+  }
+
+  let node = getPointReferenceNode(clientX, clientY);
+  if (node && node.nodeType === Node.TEXT_NODE) {
+    node = node.parentElement;
+  }
+  if (!node) {
+    node = document.elementFromPoint(clientX, clientY);
+  }
+  while (node && node !== document.body && node !== document.documentElement) {
+    if (isYomupUiElement(node) || isEditableElement(node)) return null;
+    if (isGeminiSequenceTextUnit(node)) {
+      return node;
+    }
+    node = node.parentElement;
+  }
+  return null;
+}
+
 function countDirectTextDivChildren(el) {
   let count = 0;
   for (let i = 0; i < el.childNodes.length; i++) {
@@ -2136,6 +2184,11 @@ function findHighlightBlockFromPoint(clientX, clientY) {
     if (chromeInlineHost) {
       return { mode: 'inline-text', element: chromeInlineHost };
     }
+  }
+
+  const geminiSequenceUnit = findGeminiSequenceTextUnitFromPoint(clientX, clientY);
+  if (geminiSequenceUnit) {
+    return { mode: 'inline-text', element: geminiSequenceUnit };
   }
 
   const element = findBlockAncestorFromPoint(clientX, clientY);
