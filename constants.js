@@ -7,11 +7,11 @@
 
 // 右クリックメニューの設定を2次元配列で一元管理
 const MENU_CONFIG = [
-  { id: 'YomuP-apl', title: '読むプ' }
+  { id: 'YomuP-apl', title: '読むプDEV' }
 ];
 
 // 読むプバージョン（機能変更.不具合修正・改善.申請）
-const YOMUP_VERSION = "2.7.0";
+const YOMUP_VERSION = "2.8.DEV";
 
 
 // デバッグログ出力の有効/無効（コンパイルスイッチ）
@@ -38,6 +38,9 @@ const CJK_RATIO_THRESHOLD = 0.15;
 
 // 英文分割: 目標位置から前後に探す語数窓
 const EN_BOUNDARY_SEARCH_WINDOW_WORDS = 15;
+
+// 日本語分割: 目標位置から前方に許容する文字数（句読点が maxLength を少し超える場合）
+const JA_BOUNDARY_SEARCH_WINDOW_FORWARD = 10;
 
 // ハイライト対象となるタグ名（findParentWithConsecutiveSpansの引数として受け入れるタグ）
 const HIGHLIGHT_TARGET_TAGS = ['SPAN', 'STRONG'];

@@ -1394,13 +1394,84 @@ function splitEnglishTextByBoundary(text, maxWords = MAX_WORDS_FOR_HIGHLIGHT) {
   return chunks.filter((c) => c.trim().length > 0);
 }
 
+function classifyJapaneseBoundary(text, cutAfter, allowComma) {
+  if (cutAfter <= 0 || cutAfter > text.length) return null;
+
+  const prev = text[cutAfter - 1];
+  if (prev === '。' || prev === '！' || prev === '？' || prev === '．') {
+    return { cutAfter, priority: 1, kind: prev };
+  }
+  if (prev === '」' || prev === '』' || prev === '）' || prev === ')' || prev === ']') {
+    return { cutAfter, priority: 2, kind: prev };
+  }
+  if (allowComma && (prev === '、' || prev === '，')) {
+    return { cutAfter, priority: 3, kind: prev };
+  }
+  return null;
+}
+
+function findBestJapaneseBoundary(text, start, targetEnd, maxLength) {
+  const searchStart = start + 1;
+  const searchEnd = Math.min(text.length, targetEnd + JA_BOUNDARY_SEARCH_WINDOW_FORWARD);
+  const chunkLength = targetEnd - start;
+  const allowComma = chunkLength > maxLength * 1.2;
+  const maxChunkEnd = start + maxLength + HIGHLIGHT_UNIT_SLACK_JA;
+
+  let best = null;
+  let bestPriority = 999;
+  let bestDistance = Infinity;
+
+  for (let i = searchEnd; i >= searchStart; i--) {
+    const boundary = classifyJapaneseBoundary(text, i, allowComma);
+    if (!boundary || boundary.cutAfter > maxChunkEnd) continue;
+    const distance = Math.abs(i - targetEnd);
+    if (
+      boundary.priority < bestPriority ||
+      (boundary.priority === bestPriority && distance < bestDistance)
+    ) {
+      best = { cutAfter: boundary.cutAfter, kind: boundary.kind };
+      bestPriority = boundary.priority;
+      bestDistance = distance;
+    }
+  }
+  return best;
+}
+
+function splitJapaneseTextByBoundary(text, maxLength = MAX_TEXT_LENGTH_FOR_HIGHLIGHT) {
+  if (!text || !text.trim()) return [];
+  if (text.length <= maxLength) return [text];
+
+  const chunks = [];
+  let start = 0;
+
+  while (start < text.length) {
+    const remaining = text.length - start;
+    if (remaining <= maxLength) {
+      chunks.push(text.slice(start));
+      break;
+    }
+
+    const targetEnd = start + maxLength;
+    const boundary = findBestJapaneseBoundary(text, start, targetEnd, maxLength);
+    if (boundary) {
+      chunks.push(text.slice(start, boundary.cutAfter));
+      start = boundary.cutAfter;
+    } else {
+      chunks.push(text.slice(start, targetEnd));
+      start = targetEnd;
+    }
+  }
+
+  return chunks.filter((c) => c.trim().length > 0);
+}
+
 function buildLogicalChunks(blockText, languageMode) {
   const maxUnits = languageMode === LANGUAGE_MODE_EN
     ? MAX_WORDS_FOR_HIGHLIGHT
     : MAX_TEXT_LENGTH_FOR_HIGHLIGHT;
   const parts = languageMode === LANGUAGE_MODE_EN
     ? splitEnglishTextByBoundary(blockText, maxUnits)
-    : splitTextByPunctuation(blockText, maxUnits);
+    : splitJapaneseTextByBoundary(blockText, maxUnits);
 
   const chunks = [];
   let pos = 0;
@@ -3125,33 +3196,7 @@ function getFirstTextNodeDepth(element, maxDepth = 10) {
 
 // === rubyでnを削除後に長文テキストを分割(句読点を考慮して分割) =================
 function splitTextByPunctuation(text, maxLength) {
-  const chunks = [];
-  let start = 0;
-
-  while (start < text.length) {
-    const quotient = Math.floor(text.length / maxLength);
-    const segmentLength = Math.floor(text.length / (quotient + 1));
-    let end = start + segmentLength;
-
-    // 句読点・閉じ括弧の直後で分割位置を調整（『…』列挙など）
-    if (end < text.length) {
-      const punctuation = /[。、！？．，』」）)]/;
-      const searchStart = Math.max(start, end - 10);
-      const searchEnd = Math.min(text.length, end + 10);
-
-      for (let i = searchEnd; i >= searchStart; i--) {
-        if (punctuation.test(text[i])) {
-          end = i + 1;
-          break;
-        }
-      }
-    }
-
-    chunks.push(text.slice(start, end));
-    start = end;
-  }
-
-  return chunks;
+  return splitJapaneseTextByBoundary(text, maxLength);
 } //end splitTextByPunctuation
 
 
@@ -3279,7 +3324,7 @@ function splitTextNodeByLength(textNode, maxLength) {
     if (text.length <= maxLength) {
       wrapTextNodeWithSpan(textNode, text);
     } else {
-      const chunks = splitTextByPunctuation(text, maxLength);
+      const chunks = splitJapaneseTextByBoundary(text, maxLength);
       chunks.forEach(chunk => {
         const span = document.createElement('span');
         span.textContent = chunk;
