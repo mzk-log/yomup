@@ -82,6 +82,12 @@ const DD_CHILD_LINE_BREAK_TAGS = new Set([
 ]);
 // li 直下の p を論理行境界とする（1 li 内に複数 p がある場合の連結防止）
 const LI_CHILD_LINE_BREAK_TAGS = new Set(['P']);
+// td/th 直下の h1–h3 を論理行境界とする（目次型セル内の見出し+本文連結防止）
+const TD_CHILD_LINE_BREAK_TAGS = new Set(['H1', 'H2', 'H3']);
+// レイアウト目次型表セル（Arduino リファレンス左列等）の構造判定
+const LAYOUT_TABLE_CELL_MIN_HEADINGS = 2;
+const LAYOUT_TABLE_CELL_MIN_LINKS = 3;
+const LAYOUT_TABLE_CELL_MIN_BRS = 3;
 // 見出し専用 Range（ブロック祖先には含めない）。H1 もテキスト幅のみ光らせる
 const HEADING_SECTION_TAGS = new Set(['H1', 'H2', 'H3']);
 let highlightOverlayRoot = null;
@@ -1635,6 +1641,32 @@ function findTableCellBlockFromPoint(clientX, clientY) {
   return findNearestTableCell(table, clientX, clientY);
 }
 
+// 表レイアウトの目次型セル（見出し+リンク列）。通常のデータ表は除外する
+function isLayoutTableCell(cell) {
+  if (!cell || (cell.tagName !== 'TD' && cell.tagName !== 'TH')) return false;
+  if (isYomupUiElement(cell) || isEditableElement(cell)) return false;
+  if (cell.querySelectorAll('h1,h2,h3').length < LAYOUT_TABLE_CELL_MIN_HEADINGS) return false;
+  if (cell.querySelectorAll('a[href]').length < LAYOUT_TABLE_CELL_MIN_LINKS) return false;
+  if (cell.querySelectorAll('br').length < LAYOUT_TABLE_CELL_MIN_BRS) return false;
+  return true;
+}
+
+function findLayoutTableCellInnerBlockFromPoint(clientX, clientY, tableCell) {
+  if (!tableCell || !isLayoutTableCell(tableCell)) return null;
+
+  const heading = findHeadingBlockFromPoint(clientX, clientY);
+  if (heading && tableCell.contains(heading)) {
+    return { mode: 'element', element: heading };
+  }
+
+  const inlineHost = findInlineTextHostFromPoint(clientX, clientY);
+  if (inlineHost && tableCell.contains(inlineHost)) {
+    return { mode: 'inline-text', element: inlineHost };
+  }
+
+  return null;
+}
+
 function findDeepestListItemFromPoint(clientX, clientY) {
   const stack = document.elementsFromPoint(clientX, clientY);
   const lis = [];
@@ -2174,6 +2206,8 @@ function findHighlightBlockFromPoint(clientX, clientY) {
 
   const tableCell = findTableCellBlockFromPoint(clientX, clientY);
   if (tableCell) {
+    const layoutInner = findLayoutTableCellInnerBlockFromPoint(clientX, clientY, tableCell);
+    if (layoutInner) return layoutInner;
     return { mode: 'element', element: tableCell };
   }
 
@@ -2335,6 +2369,7 @@ function collectBlockTextSegmentLines(block) {
   const isPreBlock = block.tagName === 'PRE';
   const isDdBlock = block.tagName === 'DD';
   const isLiBlock = block.tagName === 'LI';
+  const isTableCellBlock = block.tagName === 'TD' || block.tagName === 'TH';
 
   const flushLine = () => {
     if (current.segments.length > 0) {
@@ -2392,6 +2427,14 @@ function collectBlockTextSegmentLines(block) {
         isLiBlock &&
         parent === block &&
         LI_CHILD_LINE_BREAK_TAGS.has(child.tagName)
+      ) {
+        walkNodes(child);
+        flushLine();
+      } else if (
+        child.nodeType === Node.ELEMENT_NODE &&
+        isTableCellBlock &&
+        parent === block &&
+        TD_CHILD_LINE_BREAK_TAGS.has(child.tagName)
       ) {
         walkNodes(child);
         flushLine();
