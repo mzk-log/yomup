@@ -63,7 +63,7 @@ const LIST_LINE_BREAK_TAGS = new Set(['LI', 'UL', 'OL']);
 const INTERVAL_LINE_BREAK_TAGS = new Set([
   'HEADER', 'FOOTER', 'P', 'LI', 'UL', 'OL', 'H4', 'H5', 'H6', 'PRE'
 ]);
-const INLINE_TEXT_HOST_TAGS = new Set(['TIME', 'A', 'BUTTON', 'LABEL', 'SPAN']);
+const INLINE_TEXT_HOST_TAGS = new Set(['TIME', 'A', 'BUTTON', 'LABEL', 'SPAN', 'CODE']);
 const BR_FLOW_CONTAINER_TAGS = new Set(['DIV', 'ARTICLE', 'SECTION', 'MAIN']);
 const BR_FLOW_BOUNDARY_TAGS = new Set(['H2', 'H3']);
 // Tailwind 等の div カード（grid 内セル）: 親は構造判定、ブロックは直下テキスト div
@@ -1762,13 +1762,27 @@ function isWithinUiChromeRegion(node) {
 function isInlineTextHostElement(el) {
   if (!el || !el.tagName || !INLINE_TEXT_HOST_TAGS.has(el.tagName)) return false;
   if (isYomupUiElement(el) || isEditableElement(el)) return false;
-  if (isHighlightExcludedCodeElement(el)) return false;
+  // pre 外の短文 code のみ inline-text 対象（pre 内は findPreBlockFromPoint に任せる）
+  if (el.tagName === 'CODE') {
+    if (el.closest && el.closest('pre')) return false;
+  } else if (isHighlightExcludedCodeElement(el)) {
+    return false;
+  }
   const text = (el.textContent || '').trim();
   if (!text) return false;
   return text.length <= MAX_TEXT_LENGTH_FOR_HIGHLIGHT + HIGHLIGHT_UNIT_SLACK_JA;
 }
 
 function findInlineTextHostFromPoint(clientX, clientY) {
+  const stack = document.elementsFromPoint(clientX, clientY);
+  for (let i = 0; i < stack.length; i++) {
+    const el = stack[i];
+    if (isYomupUiElement(el) || isEditableElement(el)) continue;
+    if (isInlineTextHostElement(el)) {
+      return el;
+    }
+  }
+
   let node = getPointReferenceNode(clientX, clientY);
   if (node && node.nodeType === Node.TEXT_NODE) {
     node = node.parentElement;
@@ -1778,12 +1792,12 @@ function findInlineTextHostFromPoint(clientX, clientY) {
   }
   while (node && node !== document.body && node !== document.documentElement) {
     if (isYomupUiElement(node) || isEditableElement(node)) return null;
+    if (isInlineTextHostElement(node)) {
+      return node;
+    }
     if (isHighlightExcludedCodeElement(node)) {
       node = node.parentElement;
       continue;
-    }
-    if (isInlineTextHostElement(node)) {
-      return node;
     }
     node = node.parentElement;
   }
@@ -2190,7 +2204,11 @@ function shouldIncludeTextNodeInBlock(node, blockElement) {
   if (parent.closest('script,style,noscript')) return false;
   if (isEditableElement(parent)) return false;
   if (parent.closest('code')) {
+    const codeEl = parent.closest('code');
     if (blockElement && blockElement.tagName === 'PRE' && blockElement.contains(parent)) {
+      return true;
+    }
+    if (blockElement && blockElement.tagName === 'CODE' && blockElement === codeEl) {
       return true;
     }
     return false;
