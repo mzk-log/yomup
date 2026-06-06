@@ -60,7 +60,9 @@ const BLOCK_ANCESTOR_TAGS = new Set([
   'P', 'LI', 'DD', 'DT', 'BLOCKQUOTE', 'FIGCAPTION', 'TD', 'TH', 'PRE'
 ]);
 const LIST_LINE_BREAK_TAGS = new Set(['LI', 'UL', 'OL']);
-const INTERVAL_LINE_BREAK_TAGS = new Set(['HEADER', 'FOOTER', 'P', 'LI', 'UL', 'OL']);
+const INTERVAL_LINE_BREAK_TAGS = new Set([
+  'HEADER', 'FOOTER', 'P', 'LI', 'UL', 'OL', 'H4', 'H5', 'H6', 'PRE'
+]);
 const INLINE_TEXT_HOST_TAGS = new Set(['TIME', 'A', 'BUTTON', 'LABEL', 'SPAN']);
 const BR_FLOW_CONTAINER_TAGS = new Set(['DIV', 'ARTICLE', 'SECTION', 'MAIN']);
 const BR_FLOW_BOUNDARY_TAGS = new Set(['H2', 'H3']);
@@ -2357,17 +2359,23 @@ function collectSectionTextSegmentLines(sectionRoot, startHeading, endHeading) {
   const inSection = (node) =>
     isNodeInHeadingInterval(node, sectionRoot, startHeading, endHeading);
 
-  const walkNodes = (parent) => {
+  const walkNodes = (parent, preBlock) => {
     for (const child of parent.childNodes) {
       if (child.nodeType === Node.ELEMENT_NODE && child.tagName === 'BR') {
         if (inSection(child)) flushLine();
       } else if (child.nodeType === Node.ELEMENT_NODE && INTERVAL_LINE_BREAK_TAGS.has(child.tagName)) {
         if (inSection(child)) {
-          walkNodes(child);
-          flushLine();
+          if (child.tagName === 'PRE') {
+            flushLine();
+            walkNodes(child, child);
+            flushLine();
+          } else {
+            walkNodes(child, preBlock);
+            flushLine();
+          }
         }
       } else if (child.nodeType === Node.TEXT_NODE) {
-        if (shouldIncludeTextNodeInBlock(child) && inSection(child)) {
+        if (shouldIncludeTextNodeInBlock(child, preBlock) && inSection(child)) {
           appendTextNode(child);
         }
       } else if (child.nodeType === Node.ELEMENT_NODE) {
@@ -2375,12 +2383,13 @@ function collectSectionTextSegmentLines(sectionRoot, startHeading, endHeading) {
         if (child.tagName === 'SCRIPT' || child.tagName === 'STYLE' || child.tagName === 'NOSCRIPT') {
           continue;
         }
-        walkNodes(child);
+        if (!preBlock && child.tagName === 'CODE') continue;
+        walkNodes(child, preBlock);
       }
     }
   };
 
-  walkNodes(sectionRoot);
+  walkNodes(sectionRoot, null);
   flushLine();
 
   if (lines.length === 0) {
