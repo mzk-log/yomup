@@ -2115,6 +2115,15 @@ function findHighlightBlockFromPoint(clientX, clientY) {
     return { mode: 'element', element: tableCell };
   }
 
+  // header/footer/nav 内では LI よりインライン短文を優先（§3.7.2）
+  const pointNode = getPointReferenceNode(clientX, clientY) || document.elementFromPoint(clientX, clientY);
+  if (isWithinUiChromeRegion(pointNode)) {
+    const chromeInlineHost = findInlineTextHostFromPoint(clientX, clientY);
+    if (chromeInlineHost) {
+      return { mode: 'inline-text', element: chromeInlineHost };
+    }
+  }
+
   const element = findBlockAncestorFromPoint(clientX, clientY);
   if (element) {
     return { mode: 'element', element };
