@@ -73,6 +73,8 @@ const DD_CHILD_LINE_BREAK_TAGS = new Set([
   'H1', 'H2', 'H3', 'H4', 'H5', 'H6',
   'P', 'DIV', 'BLOCKQUOTE', 'PRE', 'FIGCAPTION', 'SECTION', 'ARTICLE'
 ]);
+// li 直下の p を論理行境界とする（1 li 内に複数 p がある場合の連結防止）
+const LI_CHILD_LINE_BREAK_TAGS = new Set(['P']);
 // 見出し専用 Range（ブロック祖先には含めない）。H1 もテキスト幅のみ光らせる
 const HEADING_SECTION_TAGS = new Set(['H1', 'H2', 'H3']);
 let highlightOverlayRoot = null;
@@ -2250,6 +2252,7 @@ function collectBlockTextSegmentLines(block) {
   let current = { blockText: '', segments: [] };
   const isPreBlock = block.tagName === 'PRE';
   const isDdBlock = block.tagName === 'DD';
+  const isLiBlock = block.tagName === 'LI';
 
   const flushLine = () => {
     if (current.segments.length > 0) {
@@ -2297,6 +2300,14 @@ function collectBlockTextSegmentLines(block) {
         isDdBlock &&
         parent === block &&
         DD_CHILD_LINE_BREAK_TAGS.has(child.tagName)
+      ) {
+        walkNodes(child);
+        flushLine();
+      } else if (
+        child.nodeType === Node.ELEMENT_NODE &&
+        isLiBlock &&
+        parent === block &&
+        LI_CHILD_LINE_BREAK_TAGS.has(child.tagName)
       ) {
         walkNodes(child);
         flushLine();
