@@ -2375,6 +2375,8 @@ function collectBlockTextSegmentLines(block) {
       if (child.nodeType === Node.ELEMENT_NODE && child.tagName === 'BR') {
         flushLine();
       } else if (child.nodeType === Node.ELEMENT_NODE && LIST_LINE_BREAK_TAGS.has(child.tagName)) {
+        // li 直下テキストと子 ul/ol 内 li の連結防止（入れ子リスト）
+        flushLine();
         walkNodes(child);
         flushLine();
       } else if (
