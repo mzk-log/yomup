@@ -2362,11 +2362,12 @@ function collectHighlightBlockTextSegments(highlightBlock) {
   );
 }
 
-// 日本語: <br> / pre 内 \n / リスト境界を論理行としてテキストを連結（DOM は変更しない）
+// 日本語: <br> / pre 内 \n / p 内 \n\n+ / リスト境界を論理行としてテキストを連結（DOM は変更しない）
 function collectBlockTextSegmentLines(block) {
   const lines = [];
   let current = { blockText: '', segments: [] };
   const isPreBlock = block.tagName === 'PRE';
+  const isPBlock = block.tagName === 'P';
   const isDdBlock = block.tagName === 'DD';
   const isLiBlock = block.tagName === 'LI';
   const isTableCellBlock = block.tagName === 'TD' || block.tagName === 'TH';
@@ -2397,6 +2398,33 @@ function collectBlockTextSegmentLines(block) {
           flushLine();
           nodeOffset += part.length + 1;
         }
+      }
+      return;
+    }
+    // p 内は空行（\n\n 以上）のみ論理行境界（ソース折り返しの単独 \n は連結）
+    if (isPBlock && /\n{2,}/.test(text)) {
+      const re = /\n{2,}/g;
+      let lastIndex = 0;
+      let match;
+      while ((match = re.exec(text)) !== null) {
+        const part = text.slice(lastIndex, match.index);
+        if (part) {
+          const start = current.blockText.length;
+          current.blockText += part;
+          current.segments.push({
+            node, start, end: current.blockText.length, text: part, nodeOffset: lastIndex
+          });
+        }
+        flushLine();
+        lastIndex = match.index + match[0].length;
+      }
+      const rest = text.slice(lastIndex);
+      if (rest) {
+        const start = current.blockText.length;
+        current.blockText += rest;
+        current.segments.push({
+          node, start, end: current.blockText.length, text: rest, nodeOffset: lastIndex
+        });
       }
       return;
     }
