@@ -10,8 +10,13 @@ const MENU_CONFIG = [
   { id: 'YomuP-apl', title: '読むプDEV' }
 ];
 
-// PDF: Chrome 内蔵 PDF ビューアの拡張 ID（固定）
+// PDF: Chromium 内蔵 PDF ビューアの拡張 ID（Chrome / Edge 共通）
 const CHROME_BUILTIN_PDF_VIEWER_ID = 'mhjfbmdgcfjbbpaeojofohoefgiehjai';
+
+// PDF: 内蔵ビューア ID 一覧（将来別 ID があれば追加）
+const BUILTIN_PDF_VIEWER_IDS = [
+  CHROME_BUILTIN_PDF_VIEWER_ID
+];
 
 // PDF: リンク右クリック用メニュー
 const PDF_LINK_MENU = {
@@ -93,6 +98,7 @@ const ENABLE_BUTTON_STATE_RESTORE = true; // true: 有効, false: 無効
 if (typeof self !== 'undefined') {
   self.MENU_CONFIG = MENU_CONFIG;
   self.CHROME_BUILTIN_PDF_VIEWER_ID = CHROME_BUILTIN_PDF_VIEWER_ID;
+  self.BUILTIN_PDF_VIEWER_IDS = BUILTIN_PDF_VIEWER_IDS;
   self.PDF_LINK_MENU = PDF_LINK_MENU;
   self.MAX_TEXT_LENGTH_FOR_HIGHLIGHT = MAX_TEXT_LENGTH_FOR_HIGHLIGHT;
   self.MAX_WORDS_FOR_HIGHLIGHT = MAX_WORDS_FOR_HIGHLIGHT;

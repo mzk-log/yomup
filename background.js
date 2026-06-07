@@ -16,17 +16,67 @@ function isPdfUrl(url) {
   return /\.pdf(\?|#|$)/i.test(url);
 }
 
+function isKnownPdfViewerExtensionId(extensionId) {
+  return BUILTIN_PDF_VIEWER_IDS.includes(extensionId);
+}
+
+function decodeUriComponentSafe(value) {
+  try {
+    return decodeURIComponent(value);
+  } catch (_e) {
+    return value;
+  }
+}
+
+function extractPdfUrlFromViewerQueryString(queryString) {
+  if (!queryString) return null;
+  const normalized = queryString.startsWith('?') ? queryString.slice(1) : queryString;
+  if (!normalized) return null;
+
+  try {
+    const params = new URLSearchParams(normalized);
+    for (const key of ['file', 'src', 'url']) {
+      const val = params.get(key);
+      if (!val) continue;
+      const decoded = decodeUriComponentSafe(val);
+      if (isPdfUrl(decoded) || decoded.startsWith('http://') || decoded.startsWith('https://') || decoded.startsWith('file://')) {
+        return decoded;
+      }
+    }
+  } catch (_e) {
+    return null;
+  }
+  return null;
+}
+
+function extractUrlFromBuiltinPdfViewerTab(tabUrl) {
+  // Chrome: chrome-extension://ID/https://...pdf
+  // Edge:   extension://ID/https://...pdf （同一 ID）
+  const match = tabUrl.match(/^(?:chrome-extension|extension):\/\/([^/]+)\/(.+)$/i);
+  if (!match) return null;
+
+  const extensionId = match[1];
+  if (!isKnownPdfViewerExtensionId(extensionId)) return null;
+
+  let remainder = decodeUriComponentSafe(match[2]);
+
+  const queryIndex = remainder.indexOf('?');
+  if (queryIndex >= 0) {
+    const fromQuery = extractPdfUrlFromViewerQueryString(remainder.slice(queryIndex));
+    if (fromQuery) return fromQuery;
+    remainder = remainder.slice(0, queryIndex);
+  }
+
+  if (isPdfUrl(remainder)) return remainder;
+  if (/^https?:\/\//i.test(remainder) || remainder.startsWith('file://')) return remainder;
+  return null;
+}
+
 function resolvePdfSourceUrl(tabUrl) {
   if (!tabUrl || typeof tabUrl !== 'string') return null;
 
-  const viewerPrefix = `chrome-extension://${CHROME_BUILTIN_PDF_VIEWER_ID}/`;
-  if (tabUrl.startsWith(viewerPrefix)) {
-    try {
-      return decodeURIComponent(tabUrl.slice(viewerPrefix.length));
-    } catch (_e) {
-      return tabUrl.slice(viewerPrefix.length);
-    }
-  }
+  const fromViewer = extractUrlFromBuiltinPdfViewerTab(tabUrl);
+  if (fromViewer) return fromViewer;
 
   if (isPdfUrl(tabUrl)) return tabUrl;
   return null;
