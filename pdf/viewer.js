@@ -4,11 +4,10 @@ import {
   findChunkContainingOffset,
   detectLanguageMode,
   countUnits,
-  getUnitLabel,
-  calculateReadingTime,
   withinHighlightLimit,
   LANGUAGE_MODE_JA
 } from './highlight-core.js';
+import { initTimerPanel, startHighlightTimer, clearHighlightTimer } from './timer-panel.js';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = chrome.runtime.getURL('vendor/pdf.worker.mjs');
 
@@ -415,19 +414,23 @@ function getChunkClientRectsFromPage(pageModel, chunkStart, chunkEnd) {
   return rects;
 }
 
+function clearHighlightState() {
+  clearHighlightOverlay();
+  clearHighlightTimer();
+  setStatus(defaultStatusText);
+}
+
 function tryHighlightAtPoint(clientX, clientY) {
   const pageModel = findPageModelAtPoint(clientX, clientY);
   if (!pageModel || !pageModel.blockText.trim()) {
-    clearHighlightOverlay();
-    setStatus(defaultStatusText);
+    clearHighlightState();
     return;
   }
 
   const languageMode = detectLanguageMode(pageModel.blockText);
   const ctx = resolveHighlightContext(pageModel, languageMode, clientX, clientY);
   if (!ctx || !ctx.blockText.trim()) {
-    clearHighlightOverlay();
-    setStatus(defaultStatusText);
+    clearHighlightState();
     return;
   }
 
@@ -437,23 +440,18 @@ function tryHighlightAtPoint(clientX, clientY) {
   const chunks = buildLogicalChunks(ctx.blockText, languageMode);
   const chunk = findChunkContainingOffset(chunks, offset);
   if (!chunk || !chunk.text.trim() || !withinHighlightLimit(chunk.text, languageMode)) {
-    clearHighlightOverlay();
-    setStatus(defaultStatusText);
+    clearHighlightState();
     return;
   }
 
   const rects = ctx.getRects(chunk.start, chunk.end);
   if (rects.length === 0) {
-    clearHighlightOverlay();
-    setStatus(defaultStatusText);
+    clearHighlightState();
     return;
   }
 
   applyHighlightOverlayRects(rects);
-
-  const units = countUnits(chunk.text, languageMode);
-  const seconds = calculateReadingTime(units, languageMode);
-  setStatus(`${units}${getUnitLabel(languageMode)} · 約${seconds}秒 — ${defaultStatusText}`);
+  startHighlightTimer(countUnits(chunk.text, languageMode), languageMode);
 }
 
 function handleMouseMove(event) {
@@ -476,8 +474,7 @@ function handleMouseLeave() {
     clearTimeout(mouseTimeoutForHighlight);
     mouseTimeoutForHighlight = null;
   }
-  clearHighlightOverlay();
-  setStatus(defaultStatusText);
+  clearHighlightState();
 }
 
 function handleViewportChange() {
@@ -486,8 +483,7 @@ function handleViewportChange() {
     clearTimeout(mouseTimeoutForHighlight);
     mouseTimeoutForHighlight = null;
   }
-  clearHighlightOverlay();
-  setStatus(defaultStatusText);
+  clearHighlightState();
 }
 
 function attachHighlightListeners() {
@@ -504,7 +500,7 @@ async function renderPdf(pdfBytes, sourceUrl) {
   hideError();
   pagesEl.replaceChildren('');
   pageModels.length = 0;
-  clearHighlightOverlay();
+  clearHighlightState();
 
   const fileName = (() => {
     try {
@@ -533,6 +529,7 @@ async function renderPdf(pdfBytes, sourceUrl) {
 
   defaultStatusText = `${pdf.numPages} ページ — ${fileName}`;
   setStatus(`${defaultStatusText}（ハイライト ON）`);
+  initTimerPanel();
   attachHighlightListeners();
 }
 
