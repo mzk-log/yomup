@@ -7,7 +7,8 @@ import {
   withinHighlightLimit,
   LANGUAGE_MODE_JA
 } from './highlight-core.js';
-import { initTimerPanel, startHighlightTimer, clearHighlightTimer } from './timer-panel.js';
+import { initTimerPanel, startHighlightTimer, clearHighlightTimer, bindTimerToolbarToggle } from './timer-panel.js';
+import { initStopwatchPanel, bindStopwatchToolbarToggle } from './stopwatch-panel.js';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = chrome.runtime.getURL('vendor/pdf.worker.mjs');
 
@@ -616,6 +617,9 @@ async function renderPdf(pdfBytes, sourceUrl) {
   initHighlightToggle();
   setStatus(formatStatusWithHighlightMode());
   initTimerPanel();
+  bindTimerToolbarToggle();
+  initStopwatchPanel();
+  bindStopwatchToolbarToggle();
 }
 
 async function main() {

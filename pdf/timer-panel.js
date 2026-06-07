@@ -1,13 +1,15 @@
 import { calculateReadingTime, getUnitLabel } from './highlight-core.js';
 
 const PANEL_ID = 'yomup-pdf-timer-panel';
-const STORAGE_KEY = 'subPopupPosition';
+const POSITION_KEY = 'subPopupPosition';
+const VISIBILITY_KEY = 'subPopupOnOff';
 
 let countDownInterval = null;
 let countDownRemaining = 0;
 let panelEl = null;
 let charCountEl = null;
 let dragState = null;
+let enabled = false;
 
 function parsePopupPositionPx(cssValue) {
   if (typeof cssValue !== 'string') return null;
@@ -35,12 +37,12 @@ function applyPanelPosition(leftPx, topPx, persist) {
   panelEl.style.setProperty('--subpopup-top', topCss);
   panelEl.style.setProperty('--subpopup-left', leftCss);
   if (persist) {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify({ x: leftCss, y: topCss }));
+    localStorage.setItem(POSITION_KEY, JSON.stringify({ x: leftCss, y: topCss }));
   }
 }
 
 function restorePanelPosition() {
-  const saved = localStorage.getItem(STORAGE_KEY);
+  const saved = localStorage.getItem(POSITION_KEY);
   if (!saved || !panelEl) return;
   try {
     const parsed = JSON.parse(saved);
@@ -92,7 +94,24 @@ function updateCharCountDisplay(unitCount, readTime, unitLabel) {
   charCountEl.style.display = 'block';
 }
 
-export function initTimerPanel() {
+function loadVisibilityFromStorage() {
+  const saved = localStorage.getItem(VISIBILITY_KEY);
+  if (saved === 'true') return true;
+  if (saved === 'false') return false;
+  return false;
+}
+
+function updateToolbarToggleUi() {
+  const btn = document.getElementById('yomup-pdf-timer-toggle');
+  if (!btn) return;
+  btn.classList.toggle('is-on', enabled);
+  btn.setAttribute('aria-pressed', String(enabled));
+  btn.title = enabled
+    ? '部分タイマー ON（クリックで OFF）'
+    : '部分タイマー OFF（クリックで ON）';
+}
+
+function buildPanelIfNeeded() {
   if (panelEl?.isConnected) return;
 
   panelEl = document.createElement('div');
@@ -121,8 +140,36 @@ export function initTimerPanel() {
   }, { passive: true });
 }
 
+export function setTimerPanelVisible(nextVisible) {
+  buildPanelIfNeeded();
+  enabled = nextVisible;
+  panelEl.hidden = !enabled;
+  localStorage.setItem(VISIBILITY_KEY, enabled.toString());
+  if (!enabled) clearHighlightTimer();
+  updateToolbarToggleUi();
+}
+
+export function toggleTimerPanel() {
+  setTimerPanelVisible(!enabled);
+}
+
+export function initTimerPanel() {
+  buildPanelIfNeeded();
+  enabled = loadVisibilityFromStorage();
+  panelEl.hidden = !enabled;
+  updateToolbarToggleUi();
+}
+
+export function bindTimerToolbarToggle() {
+  const btn = document.getElementById('yomup-pdf-timer-toggle');
+  if (!btn || btn.dataset.bound === '1') return;
+  btn.dataset.bound = '1';
+  btn.addEventListener('click', toggleTimerPanel);
+}
+
 export function startHighlightTimer(unitCount, languageMode) {
-  initTimerPanel();
+  if (!enabled) return;
+  buildPanelIfNeeded();
 
   const unitLabel = getUnitLabel(languageMode);
   const readTime = calculateReadingTime(unitCount, languageMode);
