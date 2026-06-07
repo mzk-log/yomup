@@ -72,8 +72,29 @@ function extractUrlFromBuiltinPdfViewerTab(tabUrl) {
   return null;
 }
 
+function resolvePdfSourceFromContext(info, tab) {
+  const candidates = [
+    info?.pageUrl,
+    info?.frameUrl,
+    tab?.url,
+    info?.linkUrl,
+    info?.srcUrl
+  ];
+  for (const url of candidates) {
+    const resolved = resolvePdfSourceUrl(url || '');
+    if (resolved) return resolved;
+  }
+  return null;
+}
+
+function isYomupPdfViewerTabUrl(tabUrl) {
+  if (!tabUrl || typeof tabUrl !== 'string') return false;
+  return tabUrl.startsWith(chrome.runtime.getURL('pdf/'));
+}
+
 function resolvePdfSourceUrl(tabUrl) {
   if (!tabUrl || typeof tabUrl !== 'string') return null;
+  if (isYomupPdfViewerTabUrl(tabUrl)) return null;
 
   const fromViewer = extractUrlFromBuiltinPdfViewerTab(tabUrl);
   if (fromViewer) return fromViewer;
@@ -158,27 +179,98 @@ async function openPdfViewerInNewTab(pdfSourceUrl) {
   await openPdfViewer(tab.id, pdfSourceUrl);
 }
 
-// 拡張機能がインストールされた時の処理
-chrome.runtime.onInstalled.addListener(() => {
-  MENU_CONFIG.forEach(menuItem => {
+function isLikelyBuiltinPdfViewerTab(tabUrl) {
+  if (!tabUrl || typeof tabUrl !== 'string') return false;
+  return BUILTIN_PDF_VIEWER_IDS.some((id) =>
+    tabUrl.startsWith(`chrome-extension://${id}/`) ||
+    tabUrl.startsWith(`extension://${id}/`) ||
+    tabUrl === `chrome-extension://${id}/`
+  );
+}
+
+function isPdfTabUrl(tabUrl) {
+  return !!resolvePdfSourceUrl(tabUrl || '') || isLikelyBuiltinPdfViewerTab(tabUrl || '');
+}
+
+async function resolveTabForContextClick(tab) {
+  if (tab?.id != null && tab.id >= 0) return tab;
+  try {
+    const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    return activeTab || tab;
+  } catch (_e) {
+    return tab;
+  }
+}
+
+async function syncPdfPageMenuForTab(tabId) {
+  if (tabId == null || tabId < 0) return;
+  let visible = false;
+  try {
+    const tab = await chrome.tabs.get(tabId);
+    visible = isPdfTabUrl(tab.url || '');
+  } catch (_e) {
+    return;
+  }
+  try {
+    await chrome.contextMenus.update(PDF_PAGE_MENU.id, { visible });
+  } catch (_e) {
+    // メニュー未登録時は無視
+  }
+}
+
+async function syncPdfPageMenuForActiveTab() {
+  try {
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    if (tab?.id != null) await syncPdfPageMenuForTab(tab.id);
+  } catch (_e) {
+    // ignore
+  }
+}
+
+function registerContextMenus() {
+  chrome.contextMenus.removeAll(() => {
+    MENU_CONFIG.forEach(menuItem => {
+      chrome.contextMenus.create({
+        id: menuItem.id,
+        title: menuItem.title,
+        contexts: ['page', 'selection']
+      });
+    });
+
     chrome.contextMenus.create({
-      id: menuItem.id,
-      title: menuItem.title,
-      contexts: ['page', 'selection']
+      id: PDF_LINK_MENU.id,
+      title: PDF_LINK_MENU.title,
+      contexts: ['link'],
+      targetUrlPatterns: ['*://*/*', 'file:///*']
+    });
+
+    // PDF タブ用（深いパス *.pdf は isPdfTabUrl で判定。iframe 対策で all）
+    chrome.contextMenus.create({
+      id: PDF_PAGE_MENU.id,
+      title: PDF_PAGE_MENU.title,
+      contexts: ['all'],
+      visible: false
+    }, () => {
+      syncPdfPageMenuForActiveTab();
     });
   });
+}
 
-  chrome.contextMenus.create({
-    id: PDF_LINK_MENU.id,
-    title: PDF_LINK_MENU.title,
-    contexts: ['link'],
-    targetUrlPatterns: [
-      '*://*/*.pdf',
-      '*://*/*.pdf?*',
-      '*://*/*.pdf#*',
-      'file://*/*.pdf'
-    ]
-  });
+// 拡張機能がインストールされた時の処理
+chrome.runtime.onInstalled.addListener(registerContextMenus);
+
+chrome.runtime.onStartup.addListener(() => {
+  syncPdfPageMenuForActiveTab();
+});
+
+chrome.tabs.onActivated.addListener(({ tabId }) => {
+  syncPdfPageMenuForTab(tabId);
+});
+
+chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
+  if (changeInfo.url || changeInfo.status === 'complete') {
+    syncPdfPageMenuForTab(tabId);
+  }
 });
 
 // Content Scriptを動的に注入する関数
@@ -232,6 +324,19 @@ async function executeYomuPOnTab(tabId) {
 
 // 右クリックメニューがクリックされた時の処理
 chrome.contextMenus.onClicked.addListener(async (info, tab) => {
+  if (info.menuItemId === PDF_PAGE_MENU.id) {
+    const resolvedTab = await resolveTabForContextClick(tab);
+    if (!resolvedTab?.id || resolvedTab.id < 0) return;
+    const pdfSourceUrl = resolvePdfSourceFromContext(info, resolvedTab);
+    if (!pdfSourceUrl) return;
+    try {
+      await openPdfViewer(resolvedTab.id, pdfSourceUrl);
+    } catch (error) {
+      debugError('PDFページメニュー処理中にエラーが発生しました:', error);
+    }
+    return;
+  }
+
   if (info.menuItemId === PDF_LINK_MENU.id) {
     const linkUrl = info.linkUrl;
     if (!linkUrl || !isPdfUrl(linkUrl)) return;

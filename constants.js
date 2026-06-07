@@ -24,6 +24,12 @@ const PDF_LINK_MENU = {
   title: '読むプでPDFを開く'
 };
 
+// PDF: 内蔵ビューア表示中タブのページ右クリック用メニュー
+const PDF_PAGE_MENU = {
+  id: 'YomuP-pdf-page',
+  title: '読むプでPDFを開く'
+};
+
 // 読むプバージョン（機能変更.不具合修正・改善.申請）
 const YOMUP_VERSION = "3.0.DEV";
 
@@ -100,6 +106,7 @@ if (typeof self !== 'undefined') {
   self.CHROME_BUILTIN_PDF_VIEWER_ID = CHROME_BUILTIN_PDF_VIEWER_ID;
   self.BUILTIN_PDF_VIEWER_IDS = BUILTIN_PDF_VIEWER_IDS;
   self.PDF_LINK_MENU = PDF_LINK_MENU;
+  self.PDF_PAGE_MENU = PDF_PAGE_MENU;
   self.MAX_TEXT_LENGTH_FOR_HIGHLIGHT = MAX_TEXT_LENGTH_FOR_HIGHLIGHT;
   self.MAX_WORDS_FOR_HIGHLIGHT = MAX_WORDS_FOR_HIGHLIGHT;
   self.HIGHLIGHT_UNIT_SLACK_JA = HIGHLIGHT_UNIT_SLACK_JA;
