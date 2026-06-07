@@ -8,6 +8,9 @@
 // 共通定数ファイルの読み込み
 importScripts('constants.js');
 
+/** @type {Map<string, { bytes: number[], url: string }>} */
+const pdfFileCache = new Map();
+
 function isPdfUrl(url) {
   if (!url || typeof url !== 'string') return false;
   return /\.pdf(\?|#|$)/i.test(url);
@@ -33,10 +36,36 @@ function arrayBufferToByteArray(buffer) {
   return Array.from(new Uint8Array(buffer));
 }
 
+function isFilePdfUrl(url) {
+  return typeof url === 'string' && url.startsWith('file://') && isPdfUrl(url);
+}
+
+function fileFetchErrorMessage(cause) {
+  const detail = cause instanceof Error ? cause.message : String(cause);
+  return (
+    'ローカル PDF を読めませんでした。' +
+    ' chrome://extensions で読むプの「ファイルの URL へのアクセスを許可」をオンにし、' +
+    ' PDF タブで拡張アイコンをもう一度押してください。' +
+    (detail ? `（${detail}）` : '')
+  );
+}
+
 async function fetchPdfArrayBuffer(pdfSourceUrl) {
-  const response = await fetch(pdfSourceUrl);
+  let response;
+  try {
+    response = await fetch(pdfSourceUrl);
+  } catch (error) {
+    if (isFilePdfUrl(pdfSourceUrl)) {
+      throw new Error(fileFetchErrorMessage(error));
+    }
+    throw error;
+  }
   if (!response.ok) {
-    throw new Error(`PDF の取得に失敗しました (${response.status})`);
+    const err = new Error(`PDF の取得に失敗しました (${response.status})`);
+    if (isFilePdfUrl(pdfSourceUrl)) {
+      throw new Error(fileFetchErrorMessage(err));
+    }
+    throw err;
   }
   const contentType = response.headers.get('content-type') || '';
   if (contentType && !contentType.includes('pdf') && !isPdfUrl(pdfSourceUrl)) {
@@ -45,10 +74,32 @@ async function fetchPdfArrayBuffer(pdfSourceUrl) {
   return response.arrayBuffer();
 }
 
+async function prefetchFilePdfToCache(pdfSourceUrl) {
+  const buffer = await fetchPdfArrayBuffer(pdfSourceUrl);
+  const id = crypto.randomUUID();
+  pdfFileCache.set(id, { bytes: arrayBufferToByteArray(buffer), url: pdfSourceUrl });
+  return id;
+}
+
 async function openPdfViewer(tabId, pdfSourceUrl) {
-  const viewerUrl = chrome.runtime.getURL(
-    `pdf/viewer.html?src=${encodeURIComponent(pdfSourceUrl)}`
-  );
+  let viewerUrl;
+  if (isFilePdfUrl(pdfSourceUrl)) {
+    try {
+      const cacheId = await prefetchFilePdfToCache(pdfSourceUrl);
+      viewerUrl = chrome.runtime.getURL(
+        `pdf/viewer.html?fid=${encodeURIComponent(cacheId)}`
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      viewerUrl = chrome.runtime.getURL(
+        `pdf/viewer.html?error=${encodeURIComponent(message)}`
+      );
+    }
+  } else {
+    viewerUrl = chrome.runtime.getURL(
+      `pdf/viewer.html?src=${encodeURIComponent(pdfSourceUrl)}`
+    );
+  }
   await chrome.tabs.update(tabId, { url: viewerUrl });
 }
 
@@ -190,14 +241,23 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         const buffer = await fetchPdfArrayBuffer(url);
         sendResponse({ bytes: arrayBufferToByteArray(buffer), url });
       } catch (error) {
-        let msg = error instanceof Error ? error.message : String(error);
-        if (url.startsWith('file://')) {
-          msg += ' ローカル PDF の場合は、chrome://extensions で読むプの「ファイルの URL へのアクセスを許可」をオンにしてください。';
-        }
+        const msg = error instanceof Error ? error.message : String(error);
         sendResponse({ error: msg });
       }
     })();
     return true;
+  }
+  if (message?.action === 'getFilePdfCache') {
+    const entry = pdfFileCache.get(message.id);
+    if (!entry) {
+      sendResponse({
+        error: 'ローカル PDF データが見つかりません。PDF タブで拡張アイコンから開き直してください。'
+      });
+      return false;
+    }
+    pdfFileCache.delete(message.id);
+    sendResponse({ bytes: entry.bytes, url: entry.url });
+    return false;
   }
   return false;
 });

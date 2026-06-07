@@ -46,6 +46,22 @@ function hideError() {
 
 async function loadPdfBytes() {
   const params = new URLSearchParams(location.search);
+  const fileCacheId = params.get('fid');
+  if (fileCacheId) {
+    setStatus('ローカル PDF を読み込み中…');
+    const response = await chrome.runtime.sendMessage({
+      action: 'getFilePdfCache',
+      id: fileCacheId
+    });
+    if (!response || response.error) {
+      throw new Error(response?.error || 'ローカル PDF データを取得できませんでした。');
+    }
+    if (!response.bytes || !response.bytes.length) {
+      throw new Error('PDF データが空です。');
+    }
+    return { bytes: response.bytes, url: response.url || 'file://local.pdf' };
+  }
+
   const src = params.get('src');
   if (!src) {
     throw new Error('PDF URL がありません。拡張アイコンから PDF を開き直してください。');
