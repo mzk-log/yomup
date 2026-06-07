@@ -12,6 +12,7 @@ import { initTimerPanel, startHighlightTimer, clearHighlightTimer } from './time
 pdfjsLib.GlobalWorkerOptions.workerSrc = chrome.runtime.getURL('vendor/pdf.worker.mjs');
 
 const HIGHLIGHT_DELAY_MS = 250;
+const HIGHLIGHT_STORAGE_KEY = 'highLightOnOff';
 const LINE_Y_TOLERANCE_PX = 5;
 const RECT_MERGE_LINE_TOLERANCE_PX = 6;
 const RECT_MERGE_GAP_TOLERANCE_PX = 12;
@@ -27,7 +28,58 @@ let mouseTimeoutForHighlight = null;
 let lastHighlightClientX = 0;
 let lastHighlightClientY = 0;
 let defaultStatusText = '';
-let highlightEnabled = false;
+let highLightOnOff = false;
+let highlightListenersAttached = false;
+let highlightToggleInitialized = false;
+
+function loadHighlightModeFromStorage() {
+  const saved = localStorage.getItem(HIGHLIGHT_STORAGE_KEY);
+  if (saved === 'false') return false;
+  if (saved === 'true') return true;
+  return true;
+}
+
+function formatStatusWithHighlightMode() {
+  const modeLabel = highLightOnOff ? 'ハイライト ON' : 'ハイライト OFF';
+  return defaultStatusText ? `${defaultStatusText}（${modeLabel}）` : modeLabel;
+}
+
+function updateHighlightToggleUi() {
+  const btn = document.getElementById('yomup-pdf-highlight-toggle');
+  if (!btn) return;
+  btn.classList.toggle('is-on', highLightOnOff);
+  btn.setAttribute('aria-pressed', String(highLightOnOff));
+  btn.title = highLightOnOff
+    ? 'ハイライト ON（クリックで OFF）'
+    : 'ハイライト OFF（クリックで ON・テキスト選択向け）';
+}
+
+function toggleHighlightMode() {
+  highLightOnOff = !highLightOnOff;
+  localStorage.setItem(HIGHLIGHT_STORAGE_KEY, highLightOnOff.toString());
+  if (highLightOnOff) {
+    attachHighlightListeners();
+  } else {
+    clearHighlightState();
+    detachHighlightListeners();
+  }
+  updateHighlightToggleUi();
+  setStatus(formatStatusWithHighlightMode());
+}
+
+function initHighlightToggle() {
+  const btn = document.getElementById('yomup-pdf-highlight-toggle');
+  if (!btn) return;
+  if (!highlightToggleInitialized) {
+    btn.addEventListener('click', toggleHighlightMode);
+    highlightToggleInitialized = true;
+  }
+  highLightOnOff = loadHighlightModeFromStorage();
+  updateHighlightToggleUi();
+  if (highLightOnOff) {
+    attachHighlightListeners();
+  }
+}
 
 function setStatus(text) {
   statusEl.textContent = text;
@@ -433,7 +485,9 @@ function getChunkClientRectsFromPage(pageModel, chunkStart, chunkEnd) {
 function clearHighlightState() {
   clearHighlightOverlay();
   clearHighlightTimer();
-  setStatus(defaultStatusText);
+  if (defaultStatusText) {
+    setStatus(formatStatusWithHighlightMode());
+  }
 }
 
 function tryHighlightAtPoint(clientX, clientY) {
@@ -471,7 +525,7 @@ function tryHighlightAtPoint(clientX, clientY) {
 }
 
 function handleMouseMove(event) {
-  if (!highlightEnabled) return;
+  if (!highLightOnOff || !highlightListenersAttached) return;
   lastHighlightClientX = event.clientX;
   lastHighlightClientY = event.clientY;
 
@@ -485,7 +539,7 @@ function handleMouseMove(event) {
 }
 
 function handleMouseLeave() {
-  if (!highlightEnabled) return;
+  if (!highLightOnOff || !highlightListenersAttached) return;
   if (mouseTimeoutForHighlight) {
     clearTimeout(mouseTimeoutForHighlight);
     mouseTimeoutForHighlight = null;
@@ -494,7 +548,7 @@ function handleMouseLeave() {
 }
 
 function handleViewportChange() {
-  if (!highlightEnabled) return;
+  if (!highLightOnOff || !highlightListenersAttached) return;
   if (mouseTimeoutForHighlight) {
     clearTimeout(mouseTimeoutForHighlight);
     mouseTimeoutForHighlight = null;
@@ -503,8 +557,8 @@ function handleViewportChange() {
 }
 
 function attachHighlightListeners() {
-  if (highlightEnabled) return;
-  highlightEnabled = true;
+  if (highlightListenersAttached) return;
+  highlightListenersAttached = true;
   const container = document.getElementById('yomup-pdf-container');
   container.addEventListener('mousemove', handleMouseMove);
   container.addEventListener('mouseleave', handleMouseLeave);
@@ -512,8 +566,23 @@ function attachHighlightListeners() {
   window.addEventListener('resize', handleViewportChange);
 }
 
+function detachHighlightListeners() {
+  if (!highlightListenersAttached) return;
+  highlightListenersAttached = false;
+  const container = document.getElementById('yomup-pdf-container');
+  container.removeEventListener('mousemove', handleMouseMove);
+  container.removeEventListener('mouseleave', handleMouseLeave);
+  window.removeEventListener('scroll', handleViewportChange, true);
+  window.removeEventListener('resize', handleViewportChange);
+  if (mouseTimeoutForHighlight) {
+    clearTimeout(mouseTimeoutForHighlight);
+    mouseTimeoutForHighlight = null;
+  }
+}
+
 async function renderPdf(pdfBytes, sourceUrl) {
   hideError();
+  detachHighlightListeners();
   pagesEl.replaceChildren('');
   pageModels.length = 0;
   clearHighlightState();
@@ -544,9 +613,9 @@ async function renderPdf(pdfBytes, sourceUrl) {
   }
 
   defaultStatusText = `${pdf.numPages} ページ — ${fileName}`;
-  setStatus(`${defaultStatusText}（ハイライト ON）`);
+  initHighlightToggle();
+  setStatus(formatStatusWithHighlightMode());
   initTimerPanel();
-  attachHighlightListeners();
 }
 
 async function main() {

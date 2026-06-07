@@ -8,7 +8,16 @@
 </head>
 <body>
   <header id="yomup-pdf-toolbar">
-    <span id="yomup-pdf-title">読むプ PDF</span>
+    <div class="yomup-pdf-toolbar-left">
+      <span id="yomup-pdf-title">読むプ PDF</span>
+      <button
+        type="button"
+        id="yomup-pdf-highlight-toggle"
+        class="yomup-pdf-highlight-toggle is-on"
+        aria-pressed="true"
+        title="ハイライト ON（クリックで OFF）"
+      >ハイライト</button>
+    </div>
     <span id="yomup-pdf-status" aria-live="polite">読み込み中…</span>
   </header>
   <main id="yomup-pdf-container">
