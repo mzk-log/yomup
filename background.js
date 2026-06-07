@@ -8,22 +8,81 @@
 // 共通定数ファイルの読み込み
 importScripts('constants.js');
 
+function isPdfUrl(url) {
+  if (!url || typeof url !== 'string') return false;
+  return /\.pdf(\?|#|$)/i.test(url);
+}
+
+function resolvePdfSourceUrl(tabUrl) {
+  if (!tabUrl || typeof tabUrl !== 'string') return null;
+
+  const viewerPrefix = `chrome-extension://${CHROME_BUILTIN_PDF_VIEWER_ID}/`;
+  if (tabUrl.startsWith(viewerPrefix)) {
+    try {
+      return decodeURIComponent(tabUrl.slice(viewerPrefix.length));
+    } catch (_e) {
+      return tabUrl.slice(viewerPrefix.length);
+    }
+  }
+
+  if (isPdfUrl(tabUrl)) return tabUrl;
+  return null;
+}
+
+function arrayBufferToByteArray(buffer) {
+  return Array.from(new Uint8Array(buffer));
+}
+
+async function fetchPdfArrayBuffer(pdfSourceUrl) {
+  const response = await fetch(pdfSourceUrl);
+  if (!response.ok) {
+    throw new Error(`PDF の取得に失敗しました (${response.status})`);
+  }
+  const contentType = response.headers.get('content-type') || '';
+  if (contentType && !contentType.includes('pdf') && !isPdfUrl(pdfSourceUrl)) {
+    throw new Error('PDF ではない応答でした');
+  }
+  return response.arrayBuffer();
+}
+
+async function openPdfViewer(tabId, pdfSourceUrl) {
+  const viewerUrl = chrome.runtime.getURL(
+    `pdf/viewer.html?src=${encodeURIComponent(pdfSourceUrl)}`
+  );
+  await chrome.tabs.update(tabId, { url: viewerUrl });
+}
+
+async function openPdfViewerInNewTab(pdfSourceUrl) {
+  const tab = await chrome.tabs.create({ url: 'about:blank', active: true });
+  await openPdfViewer(tab.id, pdfSourceUrl);
+}
+
 // 拡張機能がインストールされた時の処理
 chrome.runtime.onInstalled.addListener(() => {
-  // MENU_CONFIG配列から右クリックメニューを動的に作成
   MENU_CONFIG.forEach(menuItem => {
     chrome.contextMenus.create({
       id: menuItem.id,
       title: menuItem.title,
-      contexts: ["page", "selection"]  // すべてのコンテキストで表示
+      contexts: ['page', 'selection']
     });
+  });
+
+  chrome.contextMenus.create({
+    id: PDF_LINK_MENU.id,
+    title: PDF_LINK_MENU.title,
+    contexts: ['link'],
+    targetUrlPatterns: [
+      '*://*/*.pdf',
+      '*://*/*.pdf?*',
+      '*://*/*.pdf#*',
+      'file://*/*.pdf'
+    ]
   });
 });
 
 // Content Scriptを動的に注入する関数
 async function injectContentScript(tabId) {
   try {
-    // 既にconstants.jsが注入されているかチェック
     const isConstantsInjected = await chrome.scripting.executeScript({
       target: { tabId: tabId },
       func: () => {
@@ -33,7 +92,6 @@ async function injectContentScript(tabId) {
       return results && results[0] && results[0].result === true;
     }).catch(() => false);
 
-    // constants.jsが未注入の場合のみ注入
     if (!isConstantsInjected) {
       await chrome.scripting.executeScript({
         target: { tabId: tabId },
@@ -41,7 +99,6 @@ async function injectContentScript(tabId) {
       });
     }
 
-    // content.jsが既に注入されているかチェック
     const isContentInjected = await chrome.scripting.executeScript({
       target: { tabId: tabId },
       func: () => {
@@ -51,7 +108,6 @@ async function injectContentScript(tabId) {
       return results && results[0] && results[0].result === true;
     }).catch(() => false);
 
-    // content.jsが未注入の場合のみ注入
     if (!isContentInjected) {
       await chrome.scripting.executeScript({
         target: { tabId: tabId },
@@ -64,51 +120,87 @@ async function injectContentScript(tabId) {
   }
 }
 
+async function executeYomuPOnTab(tabId) {
+  await injectContentScript(tabId);
+  await new Promise(resolve => setTimeout(resolve, 100));
+  chrome.tabs.sendMessage(tabId, { action: 'executeYomuP' })
+    .catch(error => {
+      debugError('メッセージ送信に失敗しました:', error);
+    });
+}
 
 // 右クリックメニューがクリックされた時の処理
 chrome.contextMenus.onClicked.addListener(async (info, tab) => {
-  // MENU_CONFIG配列から該当するメニュー項目を検索
-  const selectedMenu = MENU_CONFIG.find(menuItem => menuItem.id === info.menuItemId);
-
-  if (selectedMenu) {
+  if (info.menuItemId === PDF_LINK_MENU.id) {
+    const linkUrl = info.linkUrl;
+    if (!linkUrl || !isPdfUrl(linkUrl)) return;
     try {
-      // Content Scriptを動的に注入
-      await injectContentScript(tab.id);
-
-      // 少し待ってからメッセージを送信（Content Scriptの初期化を待つ）
-      await new Promise(resolve => setTimeout(resolve, 100));
-
-      // Content Scriptにメッセージを送信してトグル機能を実行
-      chrome.tabs.sendMessage(tab.id, { action: 'executeYomuP' })
-        .catch(error => {
-          debugError('メッセージ送信に失敗しました:', error);
-        });
+      const targetTabId = tab?.id;
+      if (targetTabId) {
+        await openPdfViewer(targetTabId, linkUrl);
+      } else {
+        await openPdfViewerInNewTab(linkUrl);
+      }
     } catch (error) {
-      debugError('右クリックメニュー処理中にエラーが発生しました:', error);
+      debugError('PDFリンクメニュー処理中にエラーが発生しました:', error);
     }
+    return;
+  }
+
+  const selectedMenu = MENU_CONFIG.find(menuItem => menuItem.id === info.menuItemId);
+  if (!selectedMenu || !tab?.id) return;
+
+  try {
+    await executeYomuPOnTab(tab.id);
+  } catch (error) {
+    debugError('右クリックメニュー処理中にエラーが発生しました:', error);
   }
 });
 
-
 // 拡張機能アイコンがクリックされた時の処理
 chrome.action.onClicked.addListener(async (tab) => {
+  if (!tab?.id) return;
+
+  const pdfSourceUrl = resolvePdfSourceUrl(tab.url || '');
+  if (pdfSourceUrl) {
+    try {
+      await openPdfViewer(tab.id, pdfSourceUrl);
+    } catch (error) {
+      debugError('PDFビューア起動中にエラーが発生しました:', error);
+    }
+    return;
+  }
+
   try {
-    // Content Scriptを動的に注入
-    await injectContentScript(tab.id);
-
-    // 少し待ってからメッセージを送信（Content Scriptの初期化を待つ）
-    await new Promise(resolve => setTimeout(resolve, 100));
-
-    // Content Scriptにメッセージを送信
-    chrome.tabs.sendMessage(tab.id, { action: 'executeYomuP' })
-      .catch(error => {
-        debugError('メッセージ送信に失敗しました:', error);
-      });
+    await executeYomuPOnTab(tab.id);
   } catch (error) {
     debugError('拡張機能アイコンクリック処理中にエラーが発生しました:', error);
   }
 });
 
+chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+  if (message?.action === 'fetchPdf') {
+    (async () => {
+      const url = message.url;
+      if (!url || !isPdfUrl(url)) {
+        sendResponse({ error: 'PDF URL が不正です。' });
+        return;
+      }
+      try {
+        const buffer = await fetchPdfArrayBuffer(url);
+        sendResponse({ bytes: arrayBufferToByteArray(buffer), url });
+      } catch (error) {
+        let msg = error instanceof Error ? error.message : String(error);
+        if (url.startsWith('file://')) {
+          msg += ' ローカル PDF の場合は、chrome://extensions で読むプの「ファイルの URL へのアクセスを許可」をオンにしてください。';
+        }
+        sendResponse({ error: msg });
+      }
+    })();
+    return true;
+  }
+  return false;
+});
 
 // === デバッグログ出力用のラッパー関数 =========================================
 function debugError(...args) {

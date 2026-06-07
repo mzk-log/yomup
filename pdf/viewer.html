@@ -1,0 +1,21 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>読むプ — PDF</title>
+  <link rel="stylesheet" href="viewer.css">
+</head>
+<body>
+  <header id="yomup-pdf-toolbar">
+    <span id="yomup-pdf-title">読むプ PDF</span>
+    <span id="yomup-pdf-status" aria-live="polite">読み込み中…</span>
+  </header>
+  <main id="yomup-pdf-container">
+    <p id="yomup-pdf-message" class="hidden" role="alert"></p>
+    <div id="yomup-pdf-pages"></div>
+  </main>
+  <script src="../constants.js"></script>
+  <script type="module" src="viewer.js"></script>
+</body>
+</html>

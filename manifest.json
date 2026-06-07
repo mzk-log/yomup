@@ -1,12 +1,16 @@
 {
   "manifest_version": 3,
   "name": "読むプ ： ハイライト・タイマーで集中Web読書",
-  "version": "2.8.0",
-"description": "ハイライトで読みやすさを、タイマーでWeb読書への集中を支援します。",
+  "version": "3.0.255",
+  "description": "ハイライトで読みやすさを、タイマーでWeb読書への集中を支援します。",
   "permissions": [
     "contextMenus",
     "activeTab",
     "scripting"
+  ],
+  "host_permissions": [
+    "https://*/*",
+    "http://*/*"
   ],
   "background": {
     "service_worker": "background.js"
@@ -28,8 +32,8 @@
   },
   "web_accessible_resources": [
     {
-      "resources": ["images/*", "icon48.png"],
-      "matches": ["http://*/*","https://*/*"]
+      "resources": ["images/*", "icon48.png", "vendor/*", "pdf/*"],
+      "matches": ["<all_urls>"]
     }
   ]
 }

@@ -1,0 +1,26 @@
+{
+  "name": "_release_yomup",
+  "version": "1.0.0",
+  "description": "Web 読書向けの Chrome 拡張機能です。マウスオーバーによるハイライト、文字数(日本文)／語数(英文)カウント、読了時間の目安、ストップウォッチ・ハイライト読了タイマーなどで Web 読書を支援します。",
+  "main": "background.js",
+  "directories": {
+    "doc": "docs"
+  },
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mzk-log/yomup.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/mzk-log/yomup/issues"
+  },
+  "homepage": "https://github.com/mzk-log/yomup#readme",
+  "dependencies": {
+    "pdfjs-dist": "^4.10.38"
+  }
+}

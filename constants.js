@@ -7,11 +7,20 @@
 
 // 右クリックメニューの設定を2次元配列で一元管理
 const MENU_CONFIG = [
-  { id: 'YomuP-apl', title: '読むプ' }
+  { id: 'YomuP-apl', title: '読むプDEV' }
 ];
 
+// PDF: Chrome 内蔵 PDF ビューアの拡張 ID（固定）
+const CHROME_BUILTIN_PDF_VIEWER_ID = 'mhjfbmdgcfjbbpaeojofohoefgiehjai';
+
+// PDF: リンク右クリック用メニュー
+const PDF_LINK_MENU = {
+  id: 'YomuP-pdf-link',
+  title: '読むプでPDFを開く'
+};
+
 // 読むプバージョン（機能変更.不具合修正・改善.申請）
-const YOMUP_VERSION = "2.8.0";
+const YOMUP_VERSION = "3.0.DEV";
 
 
 // デバッグログ出力の有効/無効（コンパイルスイッチ）
@@ -83,6 +92,8 @@ const ENABLE_BUTTON_STATE_RESTORE = true; // true: 有効, false: 無効
 // グローバルスコープに公開（Service Worker用）
 if (typeof self !== 'undefined') {
   self.MENU_CONFIG = MENU_CONFIG;
+  self.CHROME_BUILTIN_PDF_VIEWER_ID = CHROME_BUILTIN_PDF_VIEWER_ID;
+  self.PDF_LINK_MENU = PDF_LINK_MENU;
   self.MAX_TEXT_LENGTH_FOR_HIGHLIGHT = MAX_TEXT_LENGTH_FOR_HIGHLIGHT;
   self.MAX_WORDS_FOR_HIGHLIGHT = MAX_WORDS_FOR_HIGHLIGHT;
   self.HIGHLIGHT_UNIT_SLACK_JA = HIGHLIGHT_UNIT_SLACK_JA;
@@ -101,6 +112,9 @@ if (typeof window !== 'undefined') {
   window.HIGHLIGHT_UNIT_SLACK_EN = HIGHLIGHT_UNIT_SLACK_EN;
   window.WORDS_PER_MINUTE = WORDS_PER_MINUTE;
   window.READING_SPEED_CHARS_PER_MIN = READING_SPEED_CHARS_PER_MIN;
+  window.CJK_RATIO_THRESHOLD = CJK_RATIO_THRESHOLD;
+  window.EN_BOUNDARY_SEARCH_WINDOW_WORDS = EN_BOUNDARY_SEARCH_WINDOW_WORDS;
+  window.JA_BOUNDARY_SEARCH_WINDOW_FORWARD = JA_BOUNDARY_SEARCH_WINDOW_FORWARD;
   window.HIGHLIGHT_TARGET_TAGS = HIGHLIGHT_TARGET_TAGS;
   window.CONSECUTIVE_GROUP_TAGS = CONSECUTIVE_GROUP_TAGS;
 }

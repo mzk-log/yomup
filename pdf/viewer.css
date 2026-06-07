@@ -1,0 +1,111 @@
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  background: #525659;
+  color: #222;
+}
+
+#yomup-pdf-toolbar {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.5rem 1rem;
+  background: #323639;
+  color: #f1f1f1;
+  font-size: 0.9rem;
+  border-bottom: 1px solid #1a1a1a;
+}
+
+#yomup-pdf-title {
+  font-weight: 600;
+}
+
+#yomup-pdf-status {
+  opacity: 0.85;
+  text-align: right;
+  word-break: break-all;
+}
+
+#yomup-pdf-container {
+  padding: 1rem 0 2rem;
+}
+
+#yomup-pdf-message {
+  max-width: 40rem;
+  margin: 2rem auto;
+  padding: 1rem 1.25rem;
+  background: #fff3cd;
+  border: 1px solid #ffecb5;
+  border-radius: 6px;
+  color: #664d03;
+  line-height: 1.5;
+}
+
+#yomup-pdf-message.hidden {
+  display: none;
+}
+
+.yomup-pdf-page {
+  position: relative;
+  margin: 0 auto 1rem;
+  background: #fff;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.35);
+}
+
+.yomup-pdf-page canvas {
+  display: block;
+  vertical-align: top;
+}
+
+/* PDF.js 公式テキスト層（選択可能） */
+.textLayer {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  line-height: 1;
+  text-size-adjust: none;
+  forced-color-adjust: none;
+  transform-origin: 0 0;
+  z-index: 2;
+}
+
+.textLayer span,
+.textLayer br {
+  color: transparent;
+  position: absolute;
+  white-space: pre;
+  cursor: text;
+  transform-origin: 0 0;
+}
+
+.textLayer span.markedContent {
+  top: 0;
+  height: 0;
+}
+
+.textLayer ::selection {
+  background: rgba(0, 100, 255, 0.35);
+}
+
+.textLayer br::selection {
+  background: transparent;
+}
+
+.yomup-pdf-highlight-box {
+  outline: 2px solid red;
+  outline-offset: -2px;
+  box-sizing: border-box;
+  pointer-events: none;
+}
+
+#yomup-pdf-highlight-overlay-root {
+  z-index: 5;
+}
