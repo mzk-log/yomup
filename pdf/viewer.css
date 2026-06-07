@@ -61,6 +61,16 @@ body {
   font-weight: 600;
 }
 
+.yomup-pdf-total-info {
+  font-size: 0.8rem;
+  color: #fcd34d;
+  white-space: nowrap;
+}
+
+.yomup-pdf-total-info[hidden] {
+  display: none;
+}
+
 #yomup-pdf-status {
   opacity: 0.85;
   text-align: right;

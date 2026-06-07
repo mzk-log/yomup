@@ -4,6 +4,8 @@ import {
   findChunkContainingOffset,
   detectLanguageMode,
   countUnits,
+  calculateReadingTime,
+  getUnitLabel,
   withinHighlightLimit,
   LANGUAGE_MODE_JA
 } from './highlight-core.js';
@@ -96,6 +98,35 @@ function showError(message) {
 function hideError() {
   messageEl.classList.add('hidden');
   messageEl.textContent = '';
+}
+
+function formatReadingTime(seconds) {
+  if (seconds < 60) return `${seconds}秒`;
+  const minutes = Math.floor(seconds / 60);
+  const remainingSeconds = seconds % 60;
+  if (minutes >= 60) return `${minutes}分`;
+  return `${minutes}分${remainingSeconds}秒`;
+}
+
+function collectDocumentText(models) {
+  return models.map((m) => m.blockText).filter(Boolean).join('\n');
+}
+
+function updateDocumentStatsDisplay(models) {
+  const el = document.getElementById('yomup-pdf-total-info');
+  if (!el) return;
+  const fullText = collectDocumentText(models).trim();
+  if (!fullText) {
+    el.hidden = true;
+    el.textContent = '';
+    return;
+  }
+  const languageMode = detectLanguageMode(fullText);
+  const unitCount = countUnits(fullText, languageMode);
+  const readingTime = calculateReadingTime(unitCount, languageMode);
+  const unitLabel = getUnitLabel(languageMode);
+  el.textContent = `全体：${unitCount}${unitLabel} ${formatReadingTime(readingTime)}`;
+  el.hidden = false;
 }
 
 async function loadPdfBytes() {
@@ -647,6 +678,7 @@ async function renderPdf(pdfBytes, sourceUrl) {
   }
 
   defaultStatusText = `${pdf.numPages} ページ — ${fileName}`;
+  updateDocumentStatsDisplay(pageModels);
   initHighlightToggle();
   setStatus(formatStatusWithHighlightMode());
   initTimerPanel();
