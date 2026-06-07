@@ -15,6 +15,7 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = chrome.runtime.getURL('vendor/pdf.worke
 const HIGHLIGHT_DELAY_MS = 250;
 const HIGHLIGHT_STORAGE_KEY = 'highLightOnOff';
 const LINE_Y_TOLERANCE_PX = 5;
+const COLUMN_GAP_MIN_PX = 40;
 const RECT_MERGE_LINE_TOLERANCE_PX = 6;
 const RECT_MERGE_GAP_TOLERANCE_PX = 12;
 
@@ -149,34 +150,66 @@ function buildSegmentMetrics(span) {
   };
 }
 
-function clusterSegmentsIntoLines(segments) {
-  const sorted = segments.slice().sort((a, b) => a.top - b.top || a.left - b.left);
-  const lines = [];
+function segmentRight(seg) {
+  return seg.left + Math.max(seg.width || 0, 0);
+}
+
+function splitSegmentsByColumnGap(segments) {
+  const sorted = segments.slice().sort((a, b) => a.left - b.left);
+  const groups = [];
+  let group = [];
 
   for (const seg of sorted) {
     if (!seg.text.trim()) continue;
-    let line = lines.find((l) => Math.abs(l.baselineY - seg.top) <= LINE_Y_TOLERANCE_PX);
+    if (group.length > 0) {
+      const prev = group[group.length - 1];
+      if (seg.left - segmentRight(prev) >= COLUMN_GAP_MIN_PX) {
+        groups.push(group);
+        group = [];
+      }
+    }
+    group.push(seg);
+  }
+
+  if (group.length) groups.push(group);
+  return groups;
+}
+
+function buildLineFromSegments(segments, baselineY) {
+  let blockText = '';
+  const mapped = [];
+  for (const seg of segments) {
+    const lineStart = blockText.length;
+    blockText += seg.text;
+    mapped.push({ ...seg, lineStart, lineEnd: blockText.length });
+  }
+  return { baselineY, blockText, segments: mapped };
+}
+
+function clusterSegmentsIntoLines(segments) {
+  const sorted = segments.slice().sort((a, b) => a.top - b.top || a.left - b.left);
+  const yLines = [];
+
+  for (const seg of sorted) {
+    if (!seg.text.trim()) continue;
+    let line = yLines.find((l) => Math.abs(l.baselineY - seg.top) <= LINE_Y_TOLERANCE_PX);
     if (!line) {
       line = { baselineY: seg.top, segments: [] };
-      lines.push(line);
+      yLines.push(line);
     }
     line.segments.push(seg);
   }
 
-  for (const line of lines) {
-    line.segments.sort((a, b) => a.left - b.left);
-    let blockText = '';
-    const mapped = [];
-    for (const seg of line.segments) {
-      const lineStart = blockText.length;
-      blockText += seg.text;
-      mapped.push({ ...seg, lineStart, lineEnd: blockText.length });
+  const lines = [];
+  for (const yLine of yLines) {
+    const columnGroups = splitSegmentsByColumnGap(yLine.segments);
+    for (const group of columnGroups) {
+      const built = buildLineFromSegments(group, yLine.baselineY);
+      if (built.blockText.trim()) lines.push(built);
     }
-    line.blockText = blockText;
-    line.segments = mapped;
   }
 
-  return lines.filter((line) => line.blockText.trim());
+  return lines;
 }
 
 async function buildPageTextModel(textContent, viewport, textLayerDiv) {
