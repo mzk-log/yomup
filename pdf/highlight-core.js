@@ -255,9 +255,12 @@ function detectLanguageByHeuristic(text) {
 }
 
 export function detectLanguageMode(text) {
+  if ((text || '').trim()) {
+    return detectLanguageByHeuristic(text);
+  }
   const docLang = normalizeLangTag(document.documentElement.getAttribute('lang'));
   if (docLang) return docLang;
-  return detectLanguageByHeuristic(text);
+  return LANGUAGE_MODE_JA;
 }
 
 export function countUnits(text, languageMode) {

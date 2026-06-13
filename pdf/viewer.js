@@ -7,7 +7,8 @@ import {
   calculateReadingTime,
   getUnitLabel,
   withinHighlightLimit,
-  LANGUAGE_MODE_JA
+  LANGUAGE_MODE_JA,
+  LANGUAGE_MODE_EN
 } from './highlight-core.js';
 import { initTimerPanel, startHighlightTimer, clearHighlightTimer, bindTimerToolbarToggle } from './timer-panel.js';
 import { initStopwatchPanel, bindStopwatchToolbarToggle } from './stopwatch-panel.js';
@@ -168,6 +169,28 @@ function isNodeInTextLayer(node) {
   return !!(el && el.closest && el.closest('.textLayer'));
 }
 
+function getDocumentLanguageMode() {
+  return detectLanguageMode(collectDocumentText(pageModels).trim());
+}
+
+function resolveSelectionLanguageMode(selectedText) {
+  const modeFromSelection = detectLanguageMode(selectedText);
+  if (modeFromSelection === LANGUAGE_MODE_EN) return LANGUAGE_MODE_EN;
+
+  const docMode = getDocumentLanguageMode();
+  if (docMode !== LANGUAGE_MODE_EN) return modeFromSelection;
+
+  const sample = selectedText.trim();
+  const cjk = (sample.match(/[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]/g) || []).length;
+  const letters = (sample.match(/[A-Za-z]/g) || []).length;
+  const denom = cjk + letters;
+  const cjkThreshold = window.CJK_RATIO_THRESHOLD ?? 0.15;
+  if (denom > 0 && cjk / denom < cjkThreshold) {
+    return LANGUAGE_MODE_EN;
+  }
+  return modeFromSelection;
+}
+
 function getPdfSelectionStats() {
   const selection = window.getSelection();
   if (!selection || selection.rangeCount === 0 || selection.isCollapsed) {
@@ -180,7 +203,7 @@ function getPdfSelectionStats() {
   const selectedText = selection.toString().trim();
   if (!selectedText) return null;
 
-  const languageMode = detectLanguageMode(selectedText, selection.anchorNode);
+  const languageMode = resolveSelectionLanguageMode(selectedText);
   const unitCount = countUnits(selectedText, languageMode);
   const readingTime = calculateReadingTime(unitCount, languageMode);
   return {
