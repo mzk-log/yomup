@@ -7,7 +7,7 @@
 
 // 右クリックメニューの設定を2次元配列で一元管理
 const MENU_CONFIG = [
-  { id: 'YomuP-apl', title: '読むプDEV' }
+  { id: 'YomuP-apl', title: '読むプ' }
 ];
 
 // PDF: Chromium 内蔵 PDF ビューアの拡張 ID（Chrome / Edge 共通）
@@ -31,7 +31,7 @@ const PDF_PAGE_MENU = {
 };
 
 // 読むプバージョン（機能変更.不具合修正・改善.申請）
-const YOMUP_VERSION = "3.0.DEV";
+const YOMUP_VERSION = "3.0.0";
 
 
 // デバッグログ出力の有効/無効（コンパイルスイッチ）
