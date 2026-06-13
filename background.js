@@ -202,74 +202,117 @@ async function resolveTabForContextClick(tab) {
   }
 }
 
-async function syncPdfPageMenuForTab(tabId) {
-  if (tabId == null || tabId < 0) return;
-  let visible = false;
-  try {
-    const tab = await chrome.tabs.get(tabId);
-    visible = isPdfTabUrl(tab.url || '');
-  } catch (_e) {
-    return;
+const PDF_LINK_TARGET_URL_PATTERNS = [
+  '*://*/*.pdf',
+  '*://*/*.pdf?*',
+  '*://*/*.pdf#*',
+  '*://*/*/*.pdf',
+  '*://*/*/*.pdf?*',
+  '*://*/*/*.pdf#*',
+  'file:///*'
+];
+
+let contextMenuSyncSeq = 0;
+
+function removeAllContextMenusAsync() {
+  return new Promise((resolve) => {
+    chrome.contextMenus.removeAll(() => resolve());
+  });
+}
+
+function createContextMenuAsync(createProperties) {
+  return new Promise((resolve, reject) => {
+    chrome.contextMenus.create(createProperties, () => {
+      const err = chrome.runtime.lastError;
+      if (err) reject(new Error(err.message));
+      else resolve();
+    });
+  });
+}
+
+async function resolveActiveTabUrl(tabId) {
+  if (tabId != null && tabId >= 0) {
+    try {
+      const tab = await chrome.tabs.get(tabId);
+      return tab?.url || '';
+    } catch (_e) {
+      // fall through
+    }
   }
   try {
-    await chrome.contextMenus.update(PDF_PAGE_MENU.id, { visible });
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    return tab?.url || '';
   } catch (_e) {
-    // メニュー未登録時は無視
+    return '';
   }
 }
 
-async function syncPdfPageMenuForActiveTab() {
+async function syncContextMenusForTab(tabId) {
+  const seq = ++contextMenuSyncSeq;
+  const tabUrl = await resolveActiveTabUrl(tabId);
+  if (seq !== contextMenuSyncSeq) return;
+
+  const pdfTab = isPdfTabUrl(tabUrl);
+
+  await removeAllContextMenusAsync();
+  if (seq !== contextMenuSyncSeq) return;
+
+  try {
+    if (pdfTab) {
+      await createContextMenuAsync({
+        id: PDF_PAGE_MENU.id,
+        title: PDF_PAGE_MENU.title,
+        contexts: ['all']
+      });
+      return;
+    }
+
+    for (const menuItem of MENU_CONFIG) {
+      await createContextMenuAsync({
+        id: menuItem.id,
+        title: menuItem.title,
+        contexts: ['page', 'selection']
+      });
+    }
+
+    await createContextMenuAsync({
+      id: PDF_LINK_MENU.id,
+      title: PDF_LINK_MENU.title,
+      contexts: ['link'],
+      targetUrlPatterns: PDF_LINK_TARGET_URL_PATTERNS
+    });
+  } catch (error) {
+    debugError('右クリックメニューの同期に失敗しました:', error);
+  }
+}
+
+async function syncContextMenusForActiveTab() {
   try {
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-    if (tab?.id != null) await syncPdfPageMenuForTab(tab.id);
+    await syncContextMenusForTab(tab?.id);
   } catch (_e) {
     // ignore
   }
 }
 
 function registerContextMenus() {
-  chrome.contextMenus.removeAll(() => {
-    MENU_CONFIG.forEach(menuItem => {
-      chrome.contextMenus.create({
-        id: menuItem.id,
-        title: menuItem.title,
-        contexts: ['page', 'selection']
-      });
-    });
-
-    chrome.contextMenus.create({
-      id: PDF_LINK_MENU.id,
-      title: PDF_LINK_MENU.title,
-      contexts: ['link'],
-      targetUrlPatterns: ['*://*/*', 'file:///*']
-    });
-
-    // PDF タブ用（深いパス *.pdf は isPdfTabUrl で判定。iframe 対策で all）
-    chrome.contextMenus.create({
-      id: PDF_PAGE_MENU.id,
-      title: PDF_PAGE_MENU.title,
-      contexts: ['all'],
-      visible: false
-    }, () => {
-      syncPdfPageMenuForActiveTab();
-    });
-  });
+  syncContextMenusForActiveTab();
 }
 
 // 拡張機能がインストールされた時の処理
 chrome.runtime.onInstalled.addListener(registerContextMenus);
 
 chrome.runtime.onStartup.addListener(() => {
-  syncPdfPageMenuForActiveTab();
+  syncContextMenusForActiveTab();
 });
 
 chrome.tabs.onActivated.addListener(({ tabId }) => {
-  syncPdfPageMenuForTab(tabId);
+  syncContextMenusForTab(tabId);
 });
 
 chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
   if (changeInfo.url || changeInfo.status === 'complete') {
-    syncPdfPageMenuForTab(tabId);
+    syncContextMenusForTab(tabId);
   }
 });
 
