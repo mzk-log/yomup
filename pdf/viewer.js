@@ -625,9 +625,9 @@ function getChunkClientRects(line, chunkStart, chunkEnd) {
   return rects;
 }
 
-function resolveHighlightContext(pageModel, languageMode, clientX, clientY) {
-  const useLineSplit = languageMode === LANGUAGE_MODE_JA;
-  if (!useLineSplit || pageModel.lines.length <= 1) {
+function resolveHighlightContext(pageModel, clientX, clientY) {
+  // 日本文・英文とも、複数行あるページではホバー行を blockText にする（PDF のみ）
+  if (pageModel.lines.length <= 1) {
     return {
       blockText: pageModel.blockText,
       getOffset: () => findOffsetInWholePage(pageModel, clientX, clientY),
@@ -683,7 +683,7 @@ function tryHighlightAtPoint(clientX, clientY) {
   }
 
   const languageMode = detectLanguageMode(pageModel.blockText);
-  const ctx = resolveHighlightContext(pageModel, languageMode, clientX, clientY);
+  const ctx = resolveHighlightContext(pageModel, clientX, clientY);
   if (!ctx || !ctx.blockText.trim()) {
     clearHighlightState();
     return;
