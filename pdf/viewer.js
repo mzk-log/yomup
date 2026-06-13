@@ -47,6 +47,7 @@ let defaultStatusText = '';
 let highLightOnOff = false;
 let highlightListenersAttached = false;
 let highlightToggleInitialized = false;
+let selectionStatsListenerInitialized = false;
 
 function loadHighlightModeFromStorage() {
   const saved = localStorage.getItem(HIGHLIGHT_STORAGE_KEY);
@@ -159,6 +160,70 @@ function updateDocumentStatsDisplay(models) {
   const unitLabel = getUnitLabel(languageMode);
   el.textContent = `全体：${unitCount}${unitLabel} ${formatReadingTime(readingTime)}`;
   el.hidden = false;
+}
+
+function isNodeInTextLayer(node) {
+  let el = node;
+  if (el && el.nodeType === Node.TEXT_NODE) el = el.parentElement;
+  return !!(el && el.closest && el.closest('.textLayer'));
+}
+
+function getPdfSelectionStats() {
+  const selection = window.getSelection();
+  if (!selection || selection.rangeCount === 0 || selection.isCollapsed) {
+    return null;
+  }
+  if (!isNodeInTextLayer(selection.anchorNode) || !isNodeInTextLayer(selection.focusNode)) {
+    return null;
+  }
+
+  const selectedText = selection.toString().trim();
+  if (!selectedText) return null;
+
+  const languageMode = detectLanguageMode(selectedText, selection.anchorNode);
+  const unitCount = countUnits(selectedText, languageMode);
+  const readingTime = calculateReadingTime(unitCount, languageMode);
+  return {
+    selectedText,
+    unitCount,
+    readingTime,
+    unitLabel: getUnitLabel(languageMode)
+  };
+}
+
+function updateSelectionStatsDisplay() {
+  const el = document.getElementById('yomup-pdf-selection-info');
+  if (!el) return;
+
+  el.replaceChildren('');
+  const stats = getPdfSelectionStats();
+  if (!stats) {
+    el.textContent = '選択：選択範囲がありません';
+    el.title = '';
+    return;
+  }
+
+  const startText = stats.selectedText.substring(0, 3);
+  const endText = stats.selectedText.substring(stats.selectedText.length - 3);
+  const line1 = document.createElement('div');
+  line1.textContent = `選択：${startText} ～ ${endText}`;
+  const line2 = document.createElement('div');
+  line2.textContent = `${stats.unitCount}${stats.unitLabel} ${formatReadingTime(stats.readingTime)}`;
+  el.appendChild(line1);
+  el.appendChild(line2);
+  el.title = `${line1.textContent}\n${line2.textContent}`;
+}
+
+function initSelectionStatsListener() {
+  if (selectionStatsListenerInitialized) return;
+  selectionStatsListenerInitialized = true;
+  document.addEventListener('selectionchange', updateSelectionStatsDisplay);
+  const container = document.getElementById('yomup-pdf-container');
+  if (container) {
+    container.addEventListener('mouseup', () => {
+      requestAnimationFrame(updateSelectionStatsDisplay);
+    });
+  }
 }
 
 async function loadPdfBytes() {
@@ -703,6 +768,8 @@ async function renderPdf(pdfBytes, sourceUrl) {
 
   defaultStatusText = `${pdf.numPages} ページ — ${fileName}`;
   updateDocumentStatsDisplay(pageModels);
+  initSelectionStatsListener();
+  updateSelectionStatsDisplay();
   initHighlightToggle();
   applyStatusWithHighlightMode();
   initTimerPanel();

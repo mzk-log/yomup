@@ -71,6 +71,26 @@ body {
   display: none;
 }
 
+.yomup-pdf-selection-info {
+  font-size: 0.75rem;
+  color: #fcd34d;
+  line-height: 1.2;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  flex-shrink: 1;
+  min-width: 0;
+  max-width: 12rem;
+  overflow: hidden;
+}
+
+.yomup-pdf-selection-info div {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 100%;
+}
+
 #yomup-pdf-status {
   flex: 1 1 auto;
   min-width: 0;
