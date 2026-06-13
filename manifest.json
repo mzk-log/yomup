@@ -34,7 +34,14 @@
   },
   "web_accessible_resources": [
     {
-      "resources": ["images/*", "icon48.png", "vendor/*", "pdf/*"],
+      "resources": [
+        "images/*",
+        "icon48.png",
+        "vendor/*",
+        "vendor/cmaps/*",
+        "vendor/standard_fonts/*",
+        "pdf/*"
+      ],
       "matches": ["<all_urls>"]
     }
   ]

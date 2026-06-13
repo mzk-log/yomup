@@ -14,6 +14,18 @@ import { initStopwatchPanel, bindStopwatchToolbarToggle } from './stopwatch-pane
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = chrome.runtime.getURL('vendor/pdf.worker.mjs');
 
+const PDFJS_CMAP_URL = chrome.runtime.getURL('vendor/cmaps/');
+const PDFJS_STANDARD_FONT_URL = chrome.runtime.getURL('vendor/standard_fonts/');
+
+function createPdfDocumentTask(pdfBytes) {
+  return pdfjsLib.getDocument({
+    data: toUint8Array(pdfBytes),
+    cMapUrl: PDFJS_CMAP_URL,
+    cMapPacked: true,
+    standardFontDataUrl: PDFJS_STANDARD_FONT_URL
+  });
+}
+
 const HIGHLIGHT_DELAY_MS = 250;
 const HIGHLIGHT_STORAGE_KEY = 'highLightOnOff';
 const LINE_Y_TOLERANCE_PX = 5;
@@ -48,6 +60,25 @@ function formatStatusWithHighlightMode() {
   return defaultStatusText ? `${defaultStatusText}（${modeLabel}）` : modeLabel;
 }
 
+function decodeFileNameFromUrl(sourceUrl) {
+  try {
+    const base = new URL(sourceUrl).pathname.split('/').filter(Boolean).pop() || '';
+    if (!base) return sourceUrl;
+    try {
+      return decodeURIComponent(base);
+    } catch (_e) {
+      return base;
+    }
+  } catch (_e) {
+    return sourceUrl;
+  }
+}
+
+function applyStatusWithHighlightMode() {
+  const text = formatStatusWithHighlightMode();
+  setStatus(text, text);
+}
+
 function updateHighlightToggleUi() {
   const btn = document.getElementById('yomup-pdf-highlight-toggle');
   if (!btn) return;
@@ -68,7 +99,7 @@ function toggleHighlightMode() {
     detachHighlightListeners();
   }
   updateHighlightToggleUi();
-  setStatus(formatStatusWithHighlightMode());
+  applyStatusWithHighlightMode();
 }
 
 function initHighlightToggle() {
@@ -85,8 +116,9 @@ function initHighlightToggle() {
   }
 }
 
-function setStatus(text) {
+function setStatus(text, title = text) {
   statusEl.textContent = text;
+  statusEl.title = title || '';
 }
 
 function showError(message) {
@@ -652,19 +684,11 @@ async function renderPdf(pdfBytes, sourceUrl) {
   pageModels.length = 0;
   clearHighlightState();
 
-  const fileName = (() => {
-    try {
-      const path = new URL(sourceUrl).pathname;
-      const base = path.split('/').pop();
-      return base || sourceUrl;
-    } catch (_e) {
-      return sourceUrl;
-    }
-  })();
+  const fileName = decodeFileNameFromUrl(sourceUrl);
 
-  setStatus(`読み込み中… (${fileName})`);
+  setStatus(`読み込み中… (${fileName})`, fileName);
 
-  const loadingTask = pdfjsLib.getDocument({ data: toUint8Array(pdfBytes) });
+  const loadingTask = createPdfDocumentTask(pdfBytes);
   const pdf = await loadingTask.promise;
 
   const containerWidth = Math.min(
@@ -680,7 +704,7 @@ async function renderPdf(pdfBytes, sourceUrl) {
   defaultStatusText = `${pdf.numPages} ページ — ${fileName}`;
   updateDocumentStatsDisplay(pageModels);
   initHighlightToggle();
-  setStatus(formatStatusWithHighlightMode());
+  applyStatusWithHighlightMode();
   initTimerPanel();
   bindTimerToolbarToggle();
   initStopwatchPanel();
