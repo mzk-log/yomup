@@ -91,7 +91,10 @@ const HEADING_SECTION_TAGS = new Set(['H1', 'H2', 'H3', 'H4']);
 const BLOCK_LABEL_TAGS = new Set(['B', 'STRONG']);
 const BLOCK_LABEL_PARENT_TAGS = new Set(['P', 'LI', 'DD']);
 const BLOCK_LABEL_MIN_FOLLOWING_CHARS = 10;
+// 構造ラベル上限（コロン付き / ol・ul>li>p 先頭見出し / p 先頭 b）
 const BLOCK_LABEL_MAX_COLON_CHARS = 40;
+// p 先頭 b の直前に許容するプレフィックス（💡 等）の最大字数
+const BLOCK_LABEL_MAX_LEADING_PREFIX_CHARS = 4;
 let highlightOverlayRoot = null;
 let currentHighlightRange = null;
 
@@ -1812,6 +1815,29 @@ function getFollowingSiblingTextLength(parent, afterNode) {
   return length;
 }
 
+function isLeadingBlockLabelPosition(parent, el) {
+  if (!parent || !el) return false;
+  if (getFirstSignificantChild(parent) === el) return true;
+  if (!el.tagName || !BLOCK_LABEL_TAGS.has(el.tagName)) return false;
+
+  let prefixChars = 0;
+  for (let i = 0; i < parent.childNodes.length; i++) {
+    const child = parent.childNodes[i];
+    if (child === el) {
+      return prefixChars <= BLOCK_LABEL_MAX_LEADING_PREFIX_CHARS;
+    }
+    if (child.nodeType === Node.TEXT_NODE) {
+      const trimmed = (child.textContent || '').trim();
+      if (!trimmed) continue;
+      prefixChars += trimmed.length;
+      if (prefixChars > BLOCK_LABEL_MAX_LEADING_PREFIX_CHARS) return false;
+    } else if (child.nodeType === Node.ELEMENT_NODE) {
+      return false;
+    }
+  }
+  return false;
+}
+
 function isColonEndingBlockLabelText(text) {
   if (!text || text.length > BLOCK_LABEL_MAX_COLON_CHARS) return false;
   return text.endsWith('：') || text.endsWith(':');
@@ -1831,6 +1857,19 @@ function isStructuralColonBlockLabel(el, parent, text) {
   if (isListItemParagraphBlockLabel(el)) return true;
   if (parent.tagName === 'P' || parent.tagName === 'LI' || parent.tagName === 'DD') return true;
   return false;
+}
+
+function isStructuralListItemParagraphBlockLabel(el, text) {
+  if (!isListItemParagraphBlockLabel(el)) return false;
+  if (!text || text.length > BLOCK_LABEL_MAX_COLON_CHARS) return false;
+  return true;
+}
+
+function isStructuralParagraphLeadingBlockLabel(el, parent, text) {
+  if (!parent || parent.tagName !== 'P') return false;
+  if (!isLeadingBlockLabelPosition(parent, el)) return false;
+  if (!text || text.length > BLOCK_LABEL_MAX_COLON_CHARS) return false;
+  return true;
 }
 
 function isBlockDisplayLabel(el) {
@@ -1890,7 +1929,7 @@ function isBlockLabelElement(el) {
   const parent = el.parentElement;
   if (!parent || !BLOCK_LABEL_PARENT_TAGS.has(parent.tagName)) return false;
 
-  if (getFirstSignificantChild(parent) !== el) return false;
+  if (!isLeadingBlockLabelPosition(parent, el)) return false;
 
   const text = (el.textContent || '').trim();
   if (!text) return false;
@@ -1899,6 +1938,16 @@ function isBlockLabelElement(el) {
 
   // Gemini ul>li>p>b「仕組み：」型 — コロン付き先頭ラベルは構造のみで採用（layout 不要）
   if (isStructuralColonBlockLabel(el, parent, text)) {
+    return true;
+  }
+
+  // Gemini ol/ul>li>p 先頭 b — コロンなし短文見出し（layout 不要）
+  if (isStructuralListItemParagraphBlockLabel(el, text)) {
+    return true;
+  }
+
+  // blockquote 等 p 先頭 b（💡 プレフィックス可）— コロンなし短文（layout 不要）
+  if (isStructuralParagraphLeadingBlockLabel(el, parent, text)) {
     return true;
   }
 
@@ -2338,6 +2387,24 @@ function isGeminiSequenceTextUnit(el) {
   const text = (el.textContent || '').trim();
   if (!text) return false;
   return text.length <= MAX_TEXT_LENGTH_FOR_HIGHLIGHT + HIGHLIGHT_UNIT_SLACK_JA;
+}
+
+function inlineTextHostAcceptsHoverPoint(el, clientX, clientY) {
+  if (getContainingTextRectsForPoint(el, clientX, clientY).length > 0) {
+    return true;
+  }
+  // Gemini sequence: 行幅 div 内のテキスト右空白（NK-4 相当・領域限定）
+  if (isGeminiSequenceTextUnit(el)) {
+    const rect = el.getBoundingClientRect();
+    if (
+      rect.width > 0 && rect.height > 0 &&
+      clientX >= rect.left && clientX <= rect.right &&
+      clientY >= rect.top && clientY <= rect.bottom
+    ) {
+      return true;
+    }
+  }
+  return false;
 }
 
 function findGeminiSequenceTextUnitFromPoint(clientX, clientY) {
@@ -3513,7 +3580,7 @@ function tryHighlightLogicalBlockAtPoint(clientX, clientY) {
 
     if (
       isInlineTextHighlightBlock(highlightBlock) &&
-      getContainingTextRectsForPoint(highlightBlock.element, clientX, clientY).length === 0
+      !inlineTextHostAcceptsHoverPoint(highlightBlock.element, clientX, clientY)
     ) {
       return false;
     }
