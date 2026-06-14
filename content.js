@@ -77,8 +77,8 @@ const DD_CHILD_LINE_BREAK_TAGS = new Set([
   'H1', 'H2', 'H3', 'H4', 'H5', 'H6',
   'P', 'DIV', 'BLOCKQUOTE', 'PRE', 'FIGCAPTION', 'SECTION', 'ARTICLE'
 ]);
-// li 直下の p を論理行境界とする（1 li 内に複数 p がある場合の連結防止）
-const LI_CHILD_LINE_BREAK_TAGS = new Set(['P']);
+// li 直下の h1–h4 / p を論理行境界とする（見出し+本文・複数 p の連結防止）
+const LI_CHILD_LINE_BREAK_TAGS = new Set(['H1', 'H2', 'H3', 'H4', 'P']);
 // td/th 直下の h1–h3 を論理行境界とする（目次型セル内の見出し+本文連結防止）
 const TD_CHILD_LINE_BREAK_TAGS = new Set(['H1', 'H2', 'H3']);
 // レイアウト目次型表セル（Arduino リファレンス左列等）の構造判定
@@ -87,6 +87,11 @@ const LAYOUT_TABLE_CELL_MIN_LINKS = 3;
 const LAYOUT_TABLE_CELL_MIN_BRS = 3;
 // 見出し専用 Range（ブロック祖先には含めない）。H1–H4 をテキスト幅のみ光らせる
 const HEADING_SECTION_TAGS = new Set(['H1', 'H2', 'H3', 'H4']);
+// p/li/dd 先頭の b/strong ラベル（Gemini「結果：」型）。§3.7 inline 経路でテキスト幅のみ光らせる
+const BLOCK_LABEL_TAGS = new Set(['B', 'STRONG']);
+const BLOCK_LABEL_PARENT_TAGS = new Set(['P', 'LI', 'DD']);
+const BLOCK_LABEL_MIN_FOLLOWING_CHARS = 10;
+const BLOCK_LABEL_MAX_COLON_CHARS = 40;
 let highlightOverlayRoot = null;
 let currentHighlightRange = null;
 
@@ -1778,6 +1783,159 @@ function isHeadingSectionTag(tagName) {
   return !!(tagName && HEADING_SECTION_TAGS.has(tagName));
 }
 
+function getFirstSignificantChild(parent) {
+  if (!parent) return null;
+  for (let i = 0; i < parent.childNodes.length; i++) {
+    const child = parent.childNodes[i];
+    if (child.nodeType === Node.TEXT_NODE) {
+      if ((child.textContent || '').trim()) return child;
+    } else if (child.nodeType === Node.ELEMENT_NODE) {
+      return child;
+    }
+  }
+  return null;
+}
+
+function getFollowingSiblingTextLength(parent, afterNode) {
+  if (!parent || !afterNode) return 0;
+  let found = false;
+  let length = 0;
+  for (let i = 0; i < parent.childNodes.length; i++) {
+    const child = parent.childNodes[i];
+    if (child === afterNode) {
+      found = true;
+      continue;
+    }
+    if (!found) continue;
+    length += (child.textContent || '').trim().length;
+  }
+  return length;
+}
+
+function isColonEndingBlockLabelText(text) {
+  if (!text || text.length > BLOCK_LABEL_MAX_COLON_CHARS) return false;
+  return text.endsWith('：') || text.endsWith(':');
+}
+
+function isListItemParagraphBlockLabel(el) {
+  const parent = el.parentElement;
+  if (!parent || parent.tagName !== 'P') return false;
+  const li = parent.parentElement;
+  if (!li || li.tagName !== 'LI') return false;
+  const list = li.parentElement;
+  return !!(list && (list.tagName === 'UL' || list.tagName === 'OL'));
+}
+
+function isStructuralColonBlockLabel(el, parent, text) {
+  if (!isColonEndingBlockLabelText(text)) return false;
+  if (isListItemParagraphBlockLabel(el)) return true;
+  if (parent.tagName === 'P' || parent.tagName === 'LI' || parent.tagName === 'DD') return true;
+  return false;
+}
+
+function isBlockDisplayLabel(el) {
+  const display = window.getComputedStyle(el).display;
+  return display === 'block' || display === 'flex' || display === 'list-item' || display === 'grid';
+}
+
+function isLabelVisuallySeparatedFromFollowing(labelEl, parent) {
+  const labelRects = collectTextClientRects(labelEl);
+  if (labelRects.length === 0) return false;
+
+  let labelBottom = -Infinity;
+  for (let i = 0; i < labelRects.length; i++) {
+    labelBottom = Math.max(labelBottom, labelRects[i].bottom);
+  }
+
+  let found = false;
+  for (let i = 0; i < parent.childNodes.length; i++) {
+    const child = parent.childNodes[i];
+    if (child === labelEl) {
+      found = true;
+      continue;
+    }
+    if (!found) continue;
+
+    let rects = [];
+    if (child.nodeType === Node.TEXT_NODE) {
+      if (!(child.textContent || '').trim()) continue;
+      const range = document.createRange();
+      try {
+        range.selectNodeContents(child);
+        rects = Array.from(range.getClientRects()).filter((r) => r.width > 0 && r.height > 0);
+      } catch (_e) {
+        // ignore
+      }
+    } else if (child.nodeType === Node.ELEMENT_NODE) {
+      rects = collectTextClientRects(child);
+    }
+    if (rects.length === 0) continue;
+
+    let followingTop = Infinity;
+    for (let j = 0; j < rects.length; j++) {
+      followingTop = Math.min(followingTop, rects[j].top);
+    }
+    return followingTop > labelBottom + HIGHLIGHT_RECT_MERGE_LINE_TOLERANCE_PX;
+  }
+  return false;
+}
+
+function isBlockLabelElement(el) {
+  if (!el || !el.tagName || !BLOCK_LABEL_TAGS.has(el.tagName)) return false;
+  if (isYomupUiElement(el) || isEditableElement(el)) return false;
+  if (isHighlightExcludedCodeElement(el)) return false;
+  if (el.closest && el.closest('pre')) return false;
+  if (isNodeInsideTable(el)) return false;
+
+  const parent = el.parentElement;
+  if (!parent || !BLOCK_LABEL_PARENT_TAGS.has(parent.tagName)) return false;
+
+  if (getFirstSignificantChild(parent) !== el) return false;
+
+  const text = (el.textContent || '').trim();
+  if (!text) return false;
+
+  if (getFollowingSiblingTextLength(parent, el) < BLOCK_LABEL_MIN_FOLLOWING_CHARS) return false;
+
+  // Gemini ul>li>p>b「仕組み：」型 — コロン付き先頭ラベルは構造のみで採用（layout 不要）
+  if (isStructuralColonBlockLabel(el, parent, text)) {
+    return true;
+  }
+
+  if (text.length > MAX_TEXT_LENGTH_FOR_HIGHLIGHT + HIGHLIGHT_UNIT_SLACK_JA) return false;
+
+  if (!isBlockDisplayLabel(el) && !isLabelVisuallySeparatedFromFollowing(el, parent)) {
+    return false;
+  }
+  return true;
+}
+
+function findBlockLabelFromPoint(clientX, clientY) {
+  let node = getPointReferenceNode(clientX, clientY);
+  if (node && node.nodeType === Node.TEXT_NODE) {
+    node = node.parentElement;
+  }
+  if (!node) {
+    node = document.elementFromPoint(clientX, clientY);
+  }
+  while (node && node !== document.body && node !== document.documentElement) {
+    if (isYomupUiElement(node) || isEditableElement(node)) return null;
+    if (node.closest && node.closest('code')) return null;
+    if (isGhostOverlayLink(node)) {
+      node = node.parentElement;
+      continue;
+    }
+    if (node.tagName && BLOCK_LABEL_TAGS.has(node.tagName) && isBlockLabelElement(node)) {
+      if (getContainingTextRectsForPoint(node, clientX, clientY).length > 0) {
+        return node;
+      }
+      return null;
+    }
+    node = node.parentElement;
+  }
+  return null;
+}
+
 function findHeadingSectionRoot(fromNode) {
   let el = fromNode && fromNode.nodeType === Node.TEXT_NODE ? fromNode.parentElement : fromNode;
   while (el && el !== document.body && el !== document.documentElement) {
@@ -2561,6 +2719,17 @@ function findHighlightBlockFromPoint(clientX, clientY) {
     return { mode: 'inline-text', element: geminiSequenceUnit };
   }
 
+  // li 内見出しは §3.2 専用 Range を deepestLi より優先（表セル目次型と同型）
+  const heading = findHeadingBlockFromPoint(clientX, clientY);
+  if (heading) {
+    return { mode: 'element', element: heading };
+  }
+
+  const blockLabel = findBlockLabelFromPoint(clientX, clientY);
+  if (blockLabel) {
+    return { mode: 'inline-text', element: blockLabel };
+  }
+
   const deepestLi = findDeepestListItemFromPoint(clientX, clientY);
   if (deepestLi) {
     return { mode: 'element', element: deepestLi };
@@ -2574,11 +2743,6 @@ function findHighlightBlockFromPoint(clientX, clientY) {
   const element = findBlockAncestorFromPoint(clientX, clientY);
   if (element) {
     return { mode: 'element', element };
-  }
-
-  const heading = findHeadingBlockFromPoint(clientX, clientY);
-  if (heading) {
-    return { mode: 'element', element: heading };
   }
 
   const inlineHost = findBestInlineTextHostFromPoint(clientX, clientY);
@@ -2813,6 +2977,13 @@ function collectBlockTextSegmentLines(block) {
         isTableCellBlock &&
         parent === block &&
         TD_CHILD_LINE_BREAK_TAGS.has(child.tagName)
+      ) {
+        walkNodes(child);
+        flushLine();
+      } else if (
+        child.nodeType === Node.ELEMENT_NODE &&
+        BLOCK_LABEL_PARENT_TAGS.has(parent.tagName) &&
+        isBlockLabelElement(child)
       ) {
         walkNodes(child);
         flushLine();
