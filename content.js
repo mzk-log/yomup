@@ -85,8 +85,8 @@ const TD_CHILD_LINE_BREAK_TAGS = new Set(['H1', 'H2', 'H3']);
 const LAYOUT_TABLE_CELL_MIN_HEADINGS = 2;
 const LAYOUT_TABLE_CELL_MIN_LINKS = 3;
 const LAYOUT_TABLE_CELL_MIN_BRS = 3;
-// 見出し専用 Range（ブロック祖先には含めない）。H1 もテキスト幅のみ光らせる
-const HEADING_SECTION_TAGS = new Set(['H1', 'H2', 'H3']);
+// 見出し専用 Range（ブロック祖先には含めない）。H1–H4 をテキスト幅のみ光らせる
+const HEADING_SECTION_TAGS = new Set(['H1', 'H2', 'H3', 'H4']);
 let highlightOverlayRoot = null;
 let currentHighlightRange = null;
 
