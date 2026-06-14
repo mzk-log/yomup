@@ -1904,6 +1904,7 @@ function isLikelyNikkeiPrAdRoot(el) {
 
 function clientPointInRangeClientRects(range, clientX, clientY) {
   if (!range) return false;
+  const lineTolerance = HIGHLIGHT_RECT_MERGE_LINE_TOLERANCE_PX;
   const rects = range.getClientRects();
   for (let i = 0; i < rects.length; i++) {
     const rect = rects[i];
@@ -1911,6 +1912,13 @@ function clientPointInRangeClientRects(range, clientX, clientY) {
     if (
       clientX >= rect.left && clientX <= rect.right &&
       clientY >= rect.top && clientY <= rect.bottom
+    ) {
+      return true;
+    }
+    // 同一行帯ならテキスト右の空白 hover を許容（PR 誤光りは縦方向のずれで除外）
+    if (
+      clientY >= rect.top - lineTolerance &&
+      clientY <= rect.bottom + lineTolerance
     ) {
       return true;
     }
