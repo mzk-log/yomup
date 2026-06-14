@@ -27,9 +27,6 @@ let stopwatchSeconds = 0; //ストップウォッチ経過時間(秒)
 let stopwatchLimitMinutes = null; // ループタイマーの上限時間（分）。nullの場合は通常のストップウォッチ
 let stopwatchLoopCount = 0; // ループ回数
 
-// テキスト外モードのトグル機能
-let NoTextModeOnOff = false; // 機能が有効かどうかのフラグ
-
 // サブポップアップのトグル機能
 let subPopupOnOff = false; // 機能が有効かどうかのフラグ
 let countDownTimerForSub = 0;
@@ -97,6 +94,10 @@ let currentHighlightRange = null;
 const ENABLE_HIGHLIGHT_OVERLAY_RECT_MERGE = true;
 const HIGHLIGHT_RECT_MERGE_LINE_TOLERANCE_PX = 6;
 const HIGHLIGHT_RECT_MERGE_GAP_TOLERANCE_PX = 12;
+// 日経型: 全面 <a> のヒット矩形が直下テキスト矩形より明らかに大きいときだけゴースト扱い
+const GHOST_OVERLAY_MIN_AREA_RATIO = 2.5;
+const GHOST_OVERLAY_MIN_WIDTH_RATIO = 1.8;
+const GHOST_OVERLAY_MIN_HEIGHT_RATIO = 1.8;
 
 
 // === ページの読み込み状態に応じて初期化処理を実行================================
@@ -128,10 +129,6 @@ function init() {
       highLightOnOff = true;
       attachHighlightListeners(); // 復元時にリスナーを追加
     }
-
-    // テキスト外ボタン
-    const savedNoText = localStorage.getItem(LOCALSTRG_NOTEXT_ONOFF);
-    if (savedNoText === 'true') NoTextModeOnOff = true;
 
     // サブポップアップボタン
     const savedSubPopup = localStorage.getItem(LOCALSTRG_SUBPOPUP_ONOFF);
@@ -532,7 +529,6 @@ function showYomuPPopup(
   }
   .strCnt-button,
   .lightbulb-button,
-  .layer-button,
   .stopwatch-button,
   .hourglass-button,
   .reload-button {
@@ -542,7 +538,6 @@ function showYomuPPopup(
     position: relative !important;
   }
   .lightbulb-button img.active,
-  .layer-button img.active,
   .hourglass-button img.active,
   .stopwatch-button img.active {
     background-color: red !important;
@@ -607,11 +602,6 @@ function showYomuPPopup(
   lightbulbButton.className = 'lightbulb-button';
   lightbulbButton.innerHTML = `<img src="${chrome.runtime.getURL('images/GA01_lightbulb-solid-full.svg')}" width="16" height="16" alt="電球" style="cursor: pointer;"><div class="tooltip">ハイライト実施</div>`;
 
-  // レイヤーボタン
-  const layerButton = document.createElement('div');
-  layerButton.className = 'layer-button';
-  layerButton.innerHTML = `<img src="${chrome.runtime.getURL('images/GA03_layer-group-solid-full.svg')}" width="16" height="16" alt="レイヤー" style="cursor: pointer;"><div class="tooltip">ハイライト予備<br>(うまくできない時)</div>`;
-
   // ストップウォッチボタン
   const stopwatchButton = document.createElement('div');
   stopwatchButton.className = 'stopwatch-button';
@@ -645,14 +635,6 @@ function showYomuPPopup(
     toggleHighlightMode(); // ハイライト処理を実行
   });
 
-
-  // レイヤーボタンのクリックイベントを追加
-  const layerIcon = layerButton.querySelector('img');
-  layerIcon.addEventListener('click', function (e) {
-    e.stopPropagation(); // イベントの伝播を停止
-    this.classList.toggle('active');
-    toggleNoTextMode();
-  });
 
   // ストップウォッチ表示要素を追加（コンテナで囲む）
   const stopwatchContainer = document.createElement('div');
@@ -989,7 +971,6 @@ function showYomuPPopup(
   playIcon.appendChild(strCntButton);
   playIcon.appendChild(lightbulbButton);
   playIcon.appendChild(hourglassButton);
-  playIcon.appendChild(layerButton);
   playIcon.appendChild(stopwatchButton);
   playIcon.appendChild(reloadButton);
   popup.appendChild(playIcon);
@@ -1036,7 +1017,6 @@ function showYomuPPopup(
   addTooltipEvents(strCntButton);
   addTooltipEvents(lightbulbButton);
   addTooltipEvents(hourglassButton);
-  addTooltipEvents(layerButton);
   addTooltipEvents(stopwatchButton);
   addTooltipEvents(reloadButton);
   addTooltipEvents(limitSelectWrapper);
@@ -1046,16 +1026,12 @@ function showYomuPPopup(
     if (highLightOnOff && lightbulbIcon) {
       lightbulbIcon.classList.add('active');
     }
-    if (NoTextModeOnOff && layerIcon) {
-      layerIcon.classList.add('active');
-    }
     if (subPopupOnOff && hourglassIcon) {
       hourglassIcon.classList.add('active');
     }
   } else if (!isPageTransition) {
     // ブラウザ起動時はボタン状態を初期化
     highLightOnOff = false;
-    NoTextModeOnOff = false;
     subPopupOnOff = false;
     stopwatchOnOff = false;
   }
@@ -1168,7 +1144,6 @@ function hideYomuPPopup(preserveModes = false) {
         // 念のため、highLightOnOffがfalseでもリスナーが残っている可能性があるので削除
         detachHighlightListeners();
       }
-      if (NoTextModeOnOff) toggleNoTextMode();
       if (subPopupOnOff) toggleSubPopup();
     }
 
@@ -1550,6 +1525,21 @@ function findChunkContainingOffset(chunks, offset) {
   return chunks[0] || null;
 }
 
+function shouldUseGhostCardLeadChunk(clientX, clientY, highlightBlock) {
+  if (!highlightBlock || highlightBlock.mode !== 'element') return false;
+  if (!isGhostOverlayAtPoint(clientX, clientY)) return false;
+  const el = highlightBlock.element;
+  if (!el || isLikelyNikkeiPrAdRoot(el)) return false;
+  if (getContainingTextRectsForPoint(el, clientX, clientY).length === 0) return false;
+  return true;
+}
+
+function buildGhostCardLeadChunk(blockText, languageMode) {
+  const chunks = buildLogicalChunks(blockText, languageMode);
+  if (chunks.length === 0) return null;
+  return chunks[0];
+}
+
 // === フェーズ C: ブロック論理塊 + オーバーレイ表示 =============================
 function isBlockHighlightContainer(el) {
   return !!(el && el.tagName && BLOCK_ANCESTOR_TAGS.has(el.tagName));
@@ -1659,7 +1649,7 @@ function findLayoutTableCellInnerBlockFromPoint(clientX, clientY, tableCell) {
     return { mode: 'element', element: heading };
   }
 
-  const inlineHost = findInlineTextHostFromPoint(clientX, clientY);
+  const inlineHost = findBestInlineTextHostFromPoint(clientX, clientY);
   if (inlineHost && tableCell.contains(inlineHost)) {
     return { mode: 'inline-text', element: inlineHost };
   }
@@ -1694,6 +1684,9 @@ function findDeepestListItemFromPoint(clientX, clientY) {
 }
 
 function findBlockAncestorFromPoint(clientX, clientY) {
+  const pointNode = getPointReferenceNode(clientX, clientY) || document.elementFromPoint(clientX, clientY);
+  if (isLikelyNikkeiPrAdRoot(pointNode)) return null;
+
   const deepestLi = findDeepestListItemFromPoint(clientX, clientY);
   if (deepestLi) return deepestLi;
 
@@ -1707,8 +1700,41 @@ function findBlockAncestorFromPoint(clientX, clientY) {
   while (node && node !== document.body && node !== document.documentElement) {
     if (isYomupUiElement(node) || isEditableElement(node)) return null;
     if (isHighlightExcludedCodeElement(node)) return null;
+    if (isGhostOverlayLink(node)) {
+      node = node.parentElement;
+      continue;
+    }
     if (isBlockHighlightContainer(node)) return node;
     node = node.parentElement;
+  }
+  return null;
+}
+
+function isHitStackBlockCandidate(el) {
+  if (isYomupUiElement(el) || isEditableElement(el)) return false;
+  if (isHighlightExcludedCodeElement(el)) return false;
+  if (isGhostOverlayLink(el)) return false;
+  if (isLikelyNikkeiPrAdRoot(el)) return false;
+  if (isNodeInsideTable(el) && el.tagName !== 'TD' && el.tagName !== 'TH') return false;
+
+  const isBlock = BLOCK_ANCESTOR_TAGS.has(el.tagName);
+  const isHeading = el.tagName && isHeadingSectionTag(el.tagName);
+  if (!isBlock && !isHeading) return false;
+
+  const text = (el.textContent || '').trim();
+  return !!text;
+}
+
+// 祖先探索で拾えないブロック（大きな <a> ラップ内の P 等）をヒットスタックから補完
+function findBlockInHitStackFromPoint(clientX, clientY) {
+  const pointNode = getPointReferenceNode(clientX, clientY) || document.elementFromPoint(clientX, clientY);
+  if (isWithinUiChromeRegion(pointNode)) return null;
+  if (isLikelyNikkeiPrAdRoot(pointNode)) return null;
+
+  const stack = document.elementsFromPoint(clientX, clientY);
+  const bestEl = pickBestHitStackBlockFromPoint(clientX, clientY, stack);
+  if (bestEl) {
+    return { mode: 'element', element: bestEl };
   }
   return null;
 }
@@ -1724,9 +1750,27 @@ function findHeadingBlockFromPoint(clientX, clientY) {
   while (node && node !== document.body && node !== document.documentElement) {
     if (isYomupUiElement(node) || isEditableElement(node)) return null;
     if (node.closest && node.closest('code')) return null;
+    if (isGhostOverlayLink(node)) {
+      node = node.parentElement;
+      continue;
+    }
     if (node.tagName && isHeadingSectionTag(node.tagName)) return node;
     node = node.parentElement;
   }
+
+  if (isGhostOverlayAtPoint(clientX, clientY)) {
+    const stack = document.elementsFromPoint(clientX, clientY);
+    for (let i = 0; i < stack.length; i++) {
+      const el = stack[i];
+      if (!el.tagName || !isHeadingSectionTag(el.tagName)) continue;
+      if (isYomupUiElement(el) || isEditableElement(el)) continue;
+      if (isGhostOverlayLink(el)) continue;
+      if (isLikelyNikkeiPrAdRoot(el)) continue;
+      if (getContainingTextRectsForPoint(el, clientX, clientY).length === 0) continue;
+      if (elementVisuallyContainsPoint(el, clientX, clientY)) return el;
+    }
+  }
+
   return null;
 }
 
@@ -1799,6 +1843,8 @@ function isWithinUiChromeRegion(node) {
 function isInlineTextHostElement(el) {
   if (!el || !el.tagName || !INLINE_TEXT_HOST_TAGS.has(el.tagName)) return false;
   if (isYomupUiElement(el) || isEditableElement(el)) return false;
+  // アイコン等を含む複合 <a> は inline-text 対象外（日経 PR バナー等）
+  if (el.tagName === 'A' && hasDirectElementChild(el)) return false;
   // pre 外の短文 code のみ inline-text 対象（pre 内は findPreBlockFromPoint に任せる）
   if (el.tagName === 'CODE') {
     if (el.closest && el.closest('pre')) return false;
@@ -1810,15 +1856,283 @@ function isInlineTextHostElement(el) {
   return text.length <= MAX_TEXT_LENGTH_FOR_HIGHLIGHT + HIGHLIGHT_UNIT_SLACK_JA;
 }
 
-function findInlineTextHostFromPoint(clientX, clientY) {
-  const stack = document.elementsFromPoint(clientX, clientY);
-  for (let i = 0; i < stack.length; i++) {
-    const el = stack[i];
-    if (isYomupUiElement(el) || isEditableElement(el)) continue;
-    if (isInlineTextHostElement(el)) {
-      return el;
+function collectTextClientRects(el) {
+  const rects = [];
+  if (!el) return rects;
+
+  const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+  while (walker.nextNode()) {
+    const node = walker.currentNode;
+    if (!(node.textContent || '').trim()) continue;
+    const range = document.createRange();
+    try {
+      range.selectNodeContents(node);
+      const clientRects = range.getClientRects();
+      for (let i = 0; i < clientRects.length; i++) {
+        const rect = clientRects[i];
+        if (rect.width > 0 && rect.height > 0) {
+          rects.push(rect);
+        }
+      }
+    } catch (_err) {
+      // ignore invalid ranges
     }
   }
+  return rects;
+}
+
+function getContainingTextRectsForPoint(el, clientX, clientY) {
+  const containing = [];
+  const rects = collectTextClientRects(el);
+  for (let i = 0; i < rects.length; i++) {
+    const rect = rects[i];
+    if (
+      clientX >= rect.left && clientX <= rect.right &&
+      clientY >= rect.top && clientY <= rect.bottom
+    ) {
+      containing.push(rect);
+    }
+  }
+  return containing;
+}
+
+function isLikelyNikkeiPrAdRoot(el) {
+  if (!el || !el.closest) return false;
+  if (el.closest('[class*="prContainer"]')) return true;
+  return !!el.closest('a[href*="pub_click"]');
+}
+
+function clientPointInRangeClientRects(range, clientX, clientY) {
+  if (!range) return false;
+  const rects = range.getClientRects();
+  for (let i = 0; i < rects.length; i++) {
+    const rect = rects[i];
+    if (rect.width <= 0 || rect.height <= 0) continue;
+    if (
+      clientX >= rect.left && clientX <= rect.right &&
+      clientY >= rect.top && clientY <= rect.bottom
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function pickBestHitStackBlockFromPoint(clientX, clientY, stack) {
+  let bestEl = null;
+  let bestMinWidth = Infinity;
+  let bestStackIndex = Infinity;
+
+  for (let i = 0; i < stack.length; i++) {
+    const el = stack[i];
+    if (!isHitStackBlockCandidate(el)) continue;
+    if (!elementVisuallyContainsPoint(el, clientX, clientY)) continue;
+
+    const containing = getContainingTextRectsForPoint(el, clientX, clientY);
+    if (containing.length === 0) continue;
+
+    let minWidth = Infinity;
+    for (let j = 0; j < containing.length; j++) {
+      if (containing[j].width < minWidth) minWidth = containing[j].width;
+    }
+
+    if (
+      minWidth < bestMinWidth ||
+      (minWidth === bestMinWidth && i < bestStackIndex)
+    ) {
+      bestEl = el;
+      bestMinWidth = minWidth;
+      bestStackIndex = i;
+    }
+  }
+  return bestEl;
+}
+
+function getDirectTextClientRects(el) {
+  const rects = [];
+  if (!el) return rects;
+
+  for (let i = 0; i < el.childNodes.length; i++) {
+    const child = el.childNodes[i];
+    if (child.nodeType !== Node.TEXT_NODE) continue;
+    const text = child.textContent || '';
+    if (!text.trim()) continue;
+    const range = document.createRange();
+    try {
+      range.setStart(child, 0);
+      range.setEnd(child, text.length);
+      const clientRects = range.getClientRects();
+      for (let j = 0; j < clientRects.length; j++) {
+        const rect = clientRects[j];
+        if (rect.width > 0 && rect.height > 0) {
+          rects.push(rect);
+        }
+      }
+    } catch (_err) {
+      // ignore invalid ranges
+    }
+  }
+  return rects;
+}
+
+function unionClientRects(rects) {
+  if (!rects || rects.length === 0) return null;
+
+  let left = Infinity;
+  let top = Infinity;
+  let right = -Infinity;
+  let bottom = -Infinity;
+  for (let i = 0; i < rects.length; i++) {
+    const rect = rects[i];
+    left = Math.min(left, rect.left);
+    top = Math.min(top, rect.top);
+    right = Math.max(right, rect.right);
+    bottom = Math.max(bottom, rect.bottom);
+  }
+  const width = right - left;
+  const height = bottom - top;
+  if (width <= 0 || height <= 0) return null;
+  return { left, top, right, bottom, width, height };
+}
+
+function isInPageAnchorListLink(el) {
+  if (!el || el.tagName !== 'A') return false;
+  const href = el.getAttribute('href') || '';
+  if (!href.startsWith('#')) return false;
+  return !!(el.closest && el.closest('li'));
+}
+
+function isGhostOverlayLinkStructure(el) {
+  if (!el || el.tagName !== 'A') return false;
+  if (isYomupUiElement(el) || isEditableElement(el)) return false;
+
+  let hasDirectText = false;
+  let hasDirectElement = false;
+  for (let i = 0; i < el.childNodes.length; i++) {
+    const child = el.childNodes[i];
+    if (child.nodeType === Node.TEXT_NODE) {
+      if ((child.textContent || '').trim()) hasDirectText = true;
+    } else if (child.nodeType === Node.ELEMENT_NODE) {
+      hasDirectElement = true;
+      break;
+    }
+  }
+  if (!hasDirectText || hasDirectElement) return false;
+
+  const text = (el.textContent || '').trim();
+  if (!text) return false;
+  return text.length <= MAX_TEXT_LENGTH_FOR_HIGHLIGHT + HIGHLIGHT_UNIT_SLACK_JA;
+}
+
+function hasGhostOverlayHitAreaMismatch(el) {
+  const linkRect = el.getBoundingClientRect();
+  if (linkRect.width <= 0 || linkRect.height <= 0) return false;
+
+  const textBounds = unionClientRects(getDirectTextClientRects(el));
+  if (!textBounds) return true;
+
+  const linkArea = linkRect.width * linkRect.height;
+  const textArea = textBounds.width * textBounds.height;
+  if (textArea <= 0) return true;
+
+  if (linkArea / textArea >= GHOST_OVERLAY_MIN_AREA_RATIO) return true;
+  if (linkRect.width / textBounds.width >= GHOST_OVERLAY_MIN_WIDTH_RATIO) return true;
+  if (linkRect.height / textBounds.height >= GHOST_OVERLAY_MIN_HEIGHT_RATIO) return true;
+  return false;
+}
+
+// ゴーストテキスト主体の全面 <a>（日経型カードリンク等）
+function isGhostOverlayLink(el) {
+  if (!isGhostOverlayLinkStructure(el)) return false;
+  if (isInPageAnchorListLink(el)) return false;
+  return hasGhostOverlayHitAreaMismatch(el);
+}
+
+function getCaretAnchorElement(clientX, clientY) {
+  const range = caretRangeFromClientXY(clientX, clientY);
+  let node = range ? range.startContainer : null;
+  if (node && node.nodeType === Node.TEXT_NODE) {
+    return node.parentElement;
+  }
+  if (node && node.nodeType === Node.ELEMENT_NODE) {
+    return node;
+  }
+  return document.elementFromPoint(clientX, clientY);
+}
+
+function isGhostOverlayAtPoint(clientX, clientY, stack) {
+  const elements = stack || document.elementsFromPoint(clientX, clientY);
+  if (elements.length > 0 && isGhostOverlayLink(elements[0])) return true;
+  return isGhostOverlayLink(getCaretAnchorElement(clientX, clientY));
+}
+
+function isCaretOnGhostOverlayLink(clientX, clientY) {
+  return isGhostOverlayLink(getCaretAnchorElement(clientX, clientY));
+}
+
+function elementVisuallyContainsPoint(el, clientX, clientY) {
+  if (!el) return false;
+  const rect = el.getBoundingClientRect();
+  if (
+    clientX >= rect.left && clientX <= rect.right &&
+    clientY >= rect.top && clientY <= rect.bottom
+  ) {
+    return true;
+  }
+  return getContainingTextRectsForPoint(el, clientX, clientY).length > 0;
+}
+
+function scoreInlineTextHostCandidate(el, clientX, clientY) {
+  const containing = getContainingTextRectsForPoint(el, clientX, clientY);
+  if (containing.length === 0) return null;
+
+  let minWidth = Infinity;
+  let minArea = Infinity;
+  for (let i = 0; i < containing.length; i++) {
+    const rect = containing[i];
+    if (rect.width < minWidth) minWidth = rect.width;
+    const area = rect.width * rect.height;
+    if (area < minArea) minArea = area;
+  }
+  return { minWidth, minArea };
+}
+
+function isBetterInlineTextHostCandidate(score, stackIndex, bestScore, bestStackIndex) {
+  if (!bestScore) return true;
+  if (score.minWidth < bestScore.minWidth) return true;
+  if (score.minWidth > bestScore.minWidth) return false;
+  if (score.minArea < bestScore.minArea) return true;
+  if (score.minArea > bestScore.minArea) return false;
+  return stackIndex < bestStackIndex;
+}
+
+function considerInlineTextHostCandidate(el, clientX, clientY, stackIndex, state) {
+  if (!el || isYomupUiElement(el) || isEditableElement(el)) return;
+  if (isGhostOverlayLink(el)) return;
+  if (!isInlineTextHostElement(el)) return;
+
+  const score = scoreInlineTextHostCandidate(el, clientX, clientY);
+  if (!score) return;
+
+  if (isBetterInlineTextHostCandidate(score, stackIndex, state.bestScore, state.bestStackIndex)) {
+    state.bestEl = el;
+    state.bestScore = score;
+    state.bestStackIndex = stackIndex;
+  }
+}
+
+function findBestInlineTextHostFromPoint(clientX, clientY) {
+  const state = {
+    bestEl: null,
+    bestScore: null,
+    bestStackIndex: Infinity
+  };
+
+  const stack = document.elementsFromPoint(clientX, clientY);
+  for (let i = 0; i < stack.length; i++) {
+    considerInlineTextHostCandidate(stack[i], clientX, clientY, i, state);
+  }
+  if (state.bestEl) return state.bestEl;
 
   let node = getPointReferenceNode(clientX, clientY);
   if (node && node.nodeType === Node.TEXT_NODE) {
@@ -1829,16 +2143,18 @@ function findInlineTextHostFromPoint(clientX, clientY) {
   }
   while (node && node !== document.body && node !== document.documentElement) {
     if (isYomupUiElement(node) || isEditableElement(node)) return null;
-    if (isInlineTextHostElement(node)) {
-      return node;
-    }
+    considerInlineTextHostCandidate(node, clientX, clientY, stack.length, state);
     if (isHighlightExcludedCodeElement(node)) {
       node = node.parentElement;
       continue;
     }
     node = node.parentElement;
   }
-  return null;
+  return state.bestEl;
+}
+
+function findInlineTextHostFromPoint(clientX, clientY) {
+  return findBestInlineTextHostFromPoint(clientX, clientY);
 }
 
 function isGeminiSequenceTextUnit(el) {
@@ -2060,6 +2376,18 @@ function isElementHighlightBlock(block) {
   return block.mode === 'element' || block.mode === 'inline-text';
 }
 
+function isInlineTextHighlightBlock(block) {
+  return !!(block && block.mode === 'inline-text');
+}
+
+function hasDirectElementChild(el) {
+  if (!el) return false;
+  for (let i = 0; i < el.childNodes.length; i++) {
+    if (el.childNodes[i].nodeType === Node.ELEMENT_NODE) return true;
+  }
+  return false;
+}
+
 function getSectionBlockRoot(block) {
   if (block.mode === 'br-flow') return block.container;
   if (block.mode === 'heading-interval') return block.root;
@@ -2214,7 +2542,7 @@ function findHighlightBlockFromPoint(clientX, clientY) {
   // header/footer/nav 内では LI よりインライン短文を優先（§3.7.2）
   const pointNode = getPointReferenceNode(clientX, clientY) || document.elementFromPoint(clientX, clientY);
   if (isWithinUiChromeRegion(pointNode)) {
-    const chromeInlineHost = findInlineTextHostFromPoint(clientX, clientY);
+    const chromeInlineHost = findBestInlineTextHostFromPoint(clientX, clientY);
     if (chromeInlineHost) {
       return { mode: 'inline-text', element: chromeInlineHost };
     }
@@ -2223,6 +2551,16 @@ function findHighlightBlockFromPoint(clientX, clientY) {
   const geminiSequenceUnit = findGeminiSequenceTextUnitFromPoint(clientX, clientY);
   if (geminiSequenceUnit) {
     return { mode: 'inline-text', element: geminiSequenceUnit };
+  }
+
+  const deepestLi = findDeepestListItemFromPoint(clientX, clientY);
+  if (deepestLi) {
+    return { mode: 'element', element: deepestLi };
+  }
+
+  if (isGhostOverlayAtPoint(clientX, clientY)) {
+    const ghostStackBlock = findBlockInHitStackFromPoint(clientX, clientY);
+    if (ghostStackBlock) return ghostStackBlock;
   }
 
   const element = findBlockAncestorFromPoint(clientX, clientY);
@@ -2235,7 +2573,7 @@ function findHighlightBlockFromPoint(clientX, clientY) {
     return { mode: 'element', element: heading };
   }
 
-  const inlineHost = findInlineTextHostFromPoint(clientX, clientY);
+  const inlineHost = findBestInlineTextHostFromPoint(clientX, clientY);
   if (inlineHost) {
     return { mode: 'inline-text', element: inlineHost };
   }
@@ -2251,6 +2589,10 @@ function findHighlightBlockFromPoint(clientX, clientY) {
 
   const interval = findHeadingIntervalBlockFromPoint(clientX, clientY);
   if (interval) return interval;
+
+  const stackBlock = findBlockInHitStackFromPoint(clientX, clientY);
+  if (stackBlock) return stackBlock;
+
   return null;
 }
 
@@ -2722,16 +3064,25 @@ function findNearestTextOffsetInBlock(highlightBlock, segments, clientX, clientY
 }
 
 function getCaretOffsetInBlock(highlightBlock, segments, clientX, clientY) {
-  const range = caretRangeFromClientXY(clientX, clientY);
-  if (range && highlightBlockContains(highlightBlock, range.startContainer)) {
-    const off = computeOffsetInBlockText(segments, range.startContainer, range.startOffset);
-    if (off >= 0) return off;
+  const caretOnGhost = isCaretOnGhostOverlayLink(clientX, clientY);
+
+  if (!caretOnGhost) {
+    const range = caretRangeFromClientXY(clientX, clientY);
+    if (range && highlightBlockContains(highlightBlock, range.startContainer)) {
+      const off = computeOffsetInBlockText(segments, range.startContainer, range.startOffset);
+      if (off >= 0) return off;
+    }
+    const hit = document.elementFromPoint(clientX, clientY);
+    if (hit && highlightBlockContains(highlightBlock, hit)) {
+      const off = computeOffsetInBlockText(segments, hit, 0);
+      if (off >= 0) return off;
+    }
   }
-  const hit = document.elementFromPoint(clientX, clientY);
-  if (hit && highlightBlockContains(highlightBlock, hit)) {
-    const off = computeOffsetInBlockText(segments, hit, 0);
-    if (off >= 0) return off;
+
+  if (isInlineTextHighlightBlock(highlightBlock)) {
+    return -1;
   }
+
   return findNearestTextOffsetInBlock(highlightBlock, segments, clientX, clientY);
 }
 
@@ -2857,17 +3208,72 @@ function mergeHighlightClientRects(rectList) {
   }));
 }
 
-function applyHighlightOverlay(range) {
+function getHighlightBlockClipElement(highlightBlock) {
+  if (isElementHighlightBlock(highlightBlock)) {
+    return highlightBlock.element;
+  }
+  return getSectionBlockRoot(highlightBlock);
+}
+
+function getHighlightBlockClipBounds(highlightBlock) {
+  const el = getHighlightBlockClipElement(highlightBlock);
+  if (!el) return null;
+  const rect = el.getBoundingClientRect();
+  if (rect.width <= 0 && rect.height <= 0) return null;
+  return rect;
+}
+
+function isValidHighlightClientRect(rect) {
+  return !!(rect && rect.width > 0 && rect.height > 0);
+}
+
+function clipClientRectToBounds(rect, bounds) {
+  if (!rect || !bounds) return null;
+  const left = Math.max(rect.left, bounds.left);
+  const top = Math.max(rect.top, bounds.top);
+  const right = Math.min(rect.right, bounds.right);
+  const bottom = Math.min(rect.bottom, bounds.bottom);
+  const width = right - left;
+  const height = bottom - top;
+  if (width <= 0 || height <= 0) return null;
+  return { left, top, right, bottom, width, height };
+}
+
+function filterHighlightClientRects(rectList, clipBounds) {
+  const filtered = [];
+  for (let i = 0; i < rectList.length; i++) {
+    const rect = rectList[i];
+    if (!isValidHighlightClientRect(rect)) continue;
+    if (clipBounds) {
+      const clipped = clipClientRectToBounds(rect, clipBounds);
+      if (clipped) filtered.push(clipped);
+    } else {
+      filtered.push({
+        left: rect.left,
+        top: rect.top,
+        right: rect.right,
+        bottom: rect.bottom,
+        width: rect.width,
+        height: rect.height
+      });
+    }
+  }
+  return filtered;
+}
+
+function applyHighlightOverlay(range, clipBounds) {
   clearHighlightOverlay();
   const root = ensureHighlightOverlayRoot();
-  const rawRects = range.getClientRects();
-  const rects = ENABLE_HIGHLIGHT_OVERLAY_RECT_MERGE
-    ? mergeHighlightClientRects(rawRects)
-    : Array.from(rawRects).filter((rect) => rect.width > 0 && rect.height > 0);
+  const rawRects = Array.from(range.getClientRects());
+  let rects = filterHighlightClientRects(rawRects, clipBounds);
+  if (ENABLE_HIGHLIGHT_OVERLAY_RECT_MERGE) {
+    rects = mergeHighlightClientRects(rects);
+  }
+  if (rects.length === 0) return false;
 
   for (let i = 0; i < rects.length; i++) {
     const rect = rects[i];
-    if (rect.width <= 0 && rect.height <= 0) continue;
+    if (!isValidHighlightClientRect(rect)) continue;
     const box = document.createElement('div');
     box.style.cssText =
       `position:fixed;left:${rect.left}px;top:${rect.top}px;width:${rect.width}px;height:${rect.height}px;` +
@@ -2875,6 +3281,7 @@ function applyHighlightOverlay(range) {
     root.appendChild(box);
   }
   currentHighlightRange = range;
+  return true;
 }
 
 function isSingleFullBlockLogicalChunk(chunks, blockText, chunk) {
@@ -2899,24 +3306,38 @@ function shouldUseSingleBlockUnionOverlay(chunks, blockText, chunk, range) {
   return countValidRangeClientRects(range) > 1;
 }
 
-function applyHighlightOverlayUnion(range) {
+function applyHighlightOverlayUnion(range, clipBounds) {
   clearHighlightOverlay();
   const root = ensureHighlightOverlayRoot();
-  const rect = range.getBoundingClientRect();
-  if (rect.width > 0 || rect.height > 0) {
-    const box = document.createElement('div');
-    box.style.cssText =
-      `position:fixed;left:${rect.left}px;top:${rect.top}px;width:${rect.width}px;height:${rect.height}px;` +
-      'outline:2px solid red;outline-offset:-2px;box-sizing:border-box;pointer-events:none;';
-    root.appendChild(box);
+  let rect = range.getBoundingClientRect();
+  if (clipBounds) {
+    const clipped = clipClientRectToBounds(rect, clipBounds);
+    if (!clipped) return false;
+    rect = clipped;
+  } else if (!isValidHighlightClientRect(rect)) {
+    return false;
   }
+
+  const box = document.createElement('div');
+  box.style.cssText =
+    `position:fixed;left:${rect.left}px;top:${rect.top}px;width:${rect.width}px;height:${rect.height}px;` +
+    'outline:2px solid red;outline-offset:-2px;box-sizing:border-box;pointer-events:none;';
+  root.appendChild(box);
   currentHighlightRange = range;
+  return true;
 }
 
 function tryHighlightLogicalBlockAtPoint(clientX, clientY) {
   try {
     const highlightBlock = findHighlightBlockFromPoint(clientX, clientY);
     if (!highlightBlock) return false;
+
+    if (
+      isInlineTextHighlightBlock(highlightBlock) &&
+      getContainingTextRectsForPoint(highlightBlock.element, clientX, clientY).length === 0
+    ) {
+      return false;
+    }
 
     const whole = collectHighlightBlockTextSegments(highlightBlock);
     if (!whole.blockText.trim() || whole.segments.length === 0) return false;
@@ -2925,33 +3346,61 @@ function tryHighlightLogicalBlockAtPoint(clientX, clientY) {
       ? highlightBlock.element
       : getSectionBlockRoot(highlightBlock);
     const languageMode = detectLanguageMode(whole.blockText, langContextNode);
-    const { blockText, segments } = resolveHighlightTextContext(
-      highlightBlock,
-      languageMode,
-      clientX,
-      clientY
-    );
+    const useGhostCardLeadChunk = shouldUseGhostCardLeadChunk(clientX, clientY, highlightBlock);
+    const { blockText, segments } = useGhostCardLeadChunk
+      ? whole
+      : resolveHighlightTextContext(highlightBlock, languageMode, clientX, clientY);
     if (!blockText.trim() || segments.length === 0) return false;
 
-    let offset = getCaretOffsetInBlock(highlightBlock, segments, clientX, clientY);
-    if (offset < 0) offset = Math.floor(blockText.length / 2);
+    let chunk;
+    let chunks;
+    if (useGhostCardLeadChunk) {
+      if (isPreHighlightBlock(highlightBlock)) {
+        chunks = [{ start: 0, end: blockText.length, text: blockText }];
+        chunk = chunks[0];
+      } else {
+        chunk = buildGhostCardLeadChunk(blockText, languageMode);
+        if (!chunk) return false;
+        chunks = buildLogicalChunks(blockText, languageMode);
+      }
+    } else {
+      let offset = getCaretOffsetInBlock(highlightBlock, segments, clientX, clientY);
+      if (offset < 0) {
+        if (isInlineTextHighlightBlock(highlightBlock)) return false;
+        offset = Math.floor(blockText.length / 2);
+      }
 
-    const chunks = isPreHighlightBlock(highlightBlock)
-      ? [{ start: 0, end: blockText.length, text: blockText }]
-      : buildLogicalChunks(blockText, languageMode);
-    const chunk = findChunkContainingOffset(chunks, offset);
+      chunks = isPreHighlightBlock(highlightBlock)
+        ? [{ start: 0, end: blockText.length, text: blockText }]
+        : buildLogicalChunks(blockText, languageMode);
+      chunk = findChunkContainingOffset(chunks, offset);
+    }
+
     if (!chunk || !chunk.text.trim()) return false;
     if (!withinHighlightLimit(chunk.text, languageMode)) return false;
 
     const range = createRangeForChunk(segments, chunk.start, chunk.end);
     if (!range) return false;
+    if (
+      !useGhostCardLeadChunk &&
+      !clientPointInRangeClientRects(range, clientX, clientY)
+    ) {
+      return false;
+    }
+
+    const clipBounds = getHighlightBlockClipBounds(highlightBlock);
 
     clearCurrentHighlight();
-    if (shouldUseSingleBlockUnionOverlay(chunks, blockText, chunk, range)) {
-      applyHighlightOverlayUnion(range);
+    let overlayApplied = false;
+    if (
+      !useGhostCardLeadChunk &&
+      shouldUseSingleBlockUnionOverlay(chunks, blockText, chunk, range)
+    ) {
+      overlayApplied = applyHighlightOverlayUnion(range, clipBounds);
     } else {
-      applyHighlightOverlay(range);
+      overlayApplied = applyHighlightOverlay(range, clipBounds);
     }
+    if (!overlayApplied) return false;
 
     const units = countUnits(chunk.text, languageMode);
     startCountdownSubPopup(units, languageMode);
@@ -3063,12 +3512,11 @@ function highlightElement(element, clientX, clientY) {
       return;
     }
 
-    let skipLegacyHighlight = false;
     if (typeof clientX === 'number' && typeof clientY === 'number') {
       if (tryHighlightLogicalBlockAtPoint(clientX, clientY)) {
         return;
       }
-      skipLegacyHighlight = true;
+      return;
     }
 
     if (getFirstTextNodeDepth(element) === -1) {
@@ -3140,11 +3588,6 @@ function highlightElement(element, clientX, clientY) {
       wrapBrLines(element); //br境界でspan
     }
 
-    if (skipLegacyHighlight) {
-      return;
-    }
-
-    //ハイライトを実施（文字数制限あり(5文字余裕持たせてある)）
     if (textLength <= MAX_TEXT_LENGTH_FOR_HIGHLIGHT + 5) {
       // 連続するspan要素を含む親要素を検出（span要素またはstrong要素の場合）
       let highlightTarget = element;
@@ -4047,33 +4490,20 @@ function applyHighlight(element) {
     // 既存のハイライトをクリア
     clearCurrentHighlight();
 
-    // 赤色、2px、solidのborderを追加
-    if (NoTextModeOnOff) {
-      // 新しい要素をハイライト
-      currentHighlightedElement = element.parentNode;
+    // 赤色、2px、solidのoutlineを追加
+    currentHighlightedElement = element;
 
-      if (currentHighlightedElement) {
-        // 親要素が存在し、かつ子要素数が1以外の場合のみ親に移動
-        currentHighlightedElement.style.border = '2px solid red';
-        currentHighlightedElement.style.outline = '';
-        debugLog(`要素をハイライトしました(NoTextMode=On))`);
+    if (currentHighlightedElement) {
+      currentHighlightedElement.style.border = '';
+      currentHighlightedElement.style.outline = '2px solid red';
+      // 祖先に overflow:hidden 等があると outline が切り取られて見えないため、
+      // 内側に描画してクリップを回避する
+      if (hasClippingAncestor(currentHighlightedElement)) {
+        currentHighlightedElement.style.outlineOffset = '-2px';
+      } else {
+        currentHighlightedElement.style.outlineOffset = '';
       }
-    } else {
-      // 新しい要素をハイライト
-      currentHighlightedElement = element;
-
-      if (currentHighlightedElement) {
-        currentHighlightedElement.style.border = '';
-        currentHighlightedElement.style.outline = '2px solid red';
-        // 祖先に overflow:hidden 等があると outline が切り取られて見えないため、
-        // 内側に描画してクリップを回避する
-        if (hasClippingAncestor(currentHighlightedElement)) {
-          currentHighlightedElement.style.outlineOffset = '-2px';
-        } else {
-          currentHighlightedElement.style.outlineOffset = '';
-        }
-        debugLog(`要素をハイライトしました(NoTextMode=Off)`);
-      }
+      debugLog('要素をハイライトしました');
     }
   } catch (error) {
     debugError('applyHighlight処理中にエラーが発生:', error);
@@ -4117,22 +4547,6 @@ function startCountdownSubPopup(unitCount, languageMode = LANGUAGE_MODE_JA) {
     debugError('カウントダウン開始中にエラーが発生:', error);
   }
 } //end startCountdownSubPopup
-
-
-// === テキスト外モードをトグルする関数 ========================================
-function toggleNoTextMode() {
-  NoTextModeOnOff = !NoTextModeOnOff; // 状態を反転
-  localStorage.setItem(LOCALSTRG_NOTEXT_ONOFF, NoTextModeOnOff.toString());
-
-  debugLog('テキスト外モード:', NoTextModeOnOff);
-
-  if (NoTextModeOnOff) {
-    // テキスト外モード有効時（何もしない）
-  } else {
-    // テキスト外モード無効時（何もしない）
-  }
-}
-
 
 
 // === サブポップアップモードをトグルする関数 =================================

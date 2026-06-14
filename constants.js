@@ -7,7 +7,7 @@
 
 // 右クリックメニューの設定を2次元配列で一元管理
 const MENU_CONFIG = [
-  { id: 'YomuP-apl', title: '読むプ' }
+  { id: 'YomuP-apl', title: '読むプDEV' }
 ];
 
 // PDF: Chromium 内蔵 PDF ビューアの拡張 ID（Chrome / Edge 共通）
@@ -31,17 +31,17 @@ const PDF_PAGE_MENU = {
 };
 
 // 読むプバージョン（機能変更.不具合修正・改善.申請）
-const YOMUP_VERSION = "3.0.0";
+const YOMUP_VERSION = "3.1.DEV";
 
 
 // デバッグログ出力の有効/無効（コンパイルスイッチ）
 const ENABLE_DEBUG_LOG = false; // true: 有効, false: 無効（本番環境）
 
 // テキストハイライトの文字数制限（日本語）
-const MAX_TEXT_LENGTH_FOR_HIGHLIGHT = 150;
+const MAX_TEXT_LENGTH_FOR_HIGHLIGHT = 100;
 
 // テキストハイライトの語数制限（英語・1〜2文相当の一呼吸）
-const MAX_WORDS_FOR_HIGHLIGHT = 30;
+const MAX_WORDS_FOR_HIGHLIGHT = 18;
 
 // ハイライト上限の余裕（実効上限 = MAX_* + SLACK）。英文 30+15=45語まで表示可
 const HIGHLIGHT_UNIT_SLACK_JA = 5;
@@ -90,7 +90,6 @@ const LOCALSTRG_YOMUP_REDISP = 'YomuPPopupVisible'; //リロード時の再表�
 const LOCALSTRG_YOMUP_XYPOS = 'YomuPPopupPosition'; //メインポップアップのXY座標
 const LOCALSTRG_YOMUPSUB_XYPOS = 'subPopupPosition'; //サブポップアップのXY座標
 const LOCALSTRG_HIGHLIGHT_ONOFF = 'highLightOnOff'; //電球ボタン復元用
-const LOCALSTRG_NOTEXT_ONOFF = 'NoTextModeOnOff'; //テキスト外ボタン復元用
 const LOCALSTRG_SUBPOPUP_ONOFF = 'subPopupOnOff'; //サブポップアップボタン復元用
 const LOCALSTRG_STOPWATCH_STATE = 'stopwatchState'; //ストップウォッチ状態保存用
 
