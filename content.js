@@ -3388,6 +3388,7 @@ function ensureHighlightOverlayRoot() {
 }
 
 function clearHighlightOverlay() {
+  stopHighlightUnderlineProgress();
   if (highlightOverlayRoot) {
     highlightOverlayRoot.textContent = '';
   }
@@ -3507,6 +3508,138 @@ function filterHighlightClientRects(rectList, clipBounds) {
   return filtered;
 }
 
+function isHighlightUnderlineOverlayStyle() {
+  return typeof HIGHLIGHT_OVERLAY_STYLE !== 'undefined' && HIGHLIGHT_OVERLAY_STYLE === 'underline';
+}
+
+function isHighlightUnderlineProgressEnabled() {
+  if (!isHighlightUnderlineOverlayStyle()) return false;
+  return typeof ENABLE_HIGHLIGHT_UNDERLINE_PROGRESS === 'undefined' || ENABLE_HIGHLIGHT_UNDERLINE_PROGRESS;
+}
+
+function getHighlightRectBottom(rect) {
+  if (typeof rect.bottom === 'number') return rect.bottom;
+  return rect.top + rect.height;
+}
+
+function createHighlightOverlayBox(rect) {
+  const box = document.createElement('div');
+  if (isHighlightUnderlineOverlayStyle()) {
+    const thickness = typeof HIGHLIGHT_UNDERLINE_THICKNESS_PX !== 'undefined'
+      ? HIGHLIGHT_UNDERLINE_THICKNESS_PX
+      : 2;
+    const color = typeof HIGHLIGHT_UNDERLINE_COLOR !== 'undefined'
+      ? HIGHLIGHT_UNDERLINE_COLOR
+      : 'red';
+    const underlineTop = getHighlightRectBottom(rect) - thickness;
+    const progressEnabled = isHighlightUnderlineProgressEnabled();
+    box.className = 'yomup-highlight-underline';
+    box.dataset.fullWidth = String(rect.width);
+    box.style.cssText =
+      `position:fixed;left:${rect.left}px;top:${underlineTop}px;` +
+      `width:${progressEnabled ? 0 : rect.width}px;height:${thickness}px;background:${color};` +
+      'pointer-events:none;';
+  } else {
+    box.className = 'yomup-highlight-outline';
+    box.style.cssText =
+      `position:fixed;left:${rect.left}px;top:${rect.top}px;width:${rect.width}px;height:${rect.height}px;` +
+      'outline:2px solid red;outline-offset:-2px;box-sizing:border-box;pointer-events:none;';
+  }
+  return box;
+}
+
+function stopHighlightUnderlineProgress() {
+  if (!highlightOverlayRoot) return;
+  const boxes = highlightOverlayRoot.querySelectorAll('.yomup-highlight-underline');
+  for (let i = 0; i < boxes.length; i++) {
+    boxes[i].style.transition = '';
+  }
+}
+
+function compareHighlightUnderlineReadingOrder(boxA, boxB, lineTolerancePx) {
+  const topA = parseFloat(boxA.style.top);
+  const topB = parseFloat(boxB.style.top);
+  if (Math.abs(topA - topB) > lineTolerancePx) return topA - topB;
+  return parseFloat(boxA.style.left) - parseFloat(boxB.style.left);
+}
+
+function groupHighlightUnderlineBoxesByLine(sortedBoxes, lineTolerancePx) {
+  const lineGroups = [];
+  for (let i = 0; i < sortedBoxes.length; i++) {
+    const box = sortedBoxes[i];
+    const top = parseFloat(box.style.top);
+    const lastGroup = lineGroups[lineGroups.length - 1];
+    if (
+      lastGroup &&
+      Math.abs(top - parseFloat(lastGroup[0].style.top)) <= lineTolerancePx
+    ) {
+      lastGroup.push(box);
+    } else {
+      lineGroups.push([box]);
+    }
+  }
+  for (let i = 0; i < lineGroups.length; i++) {
+    lineGroups[i].sort((a, b) => parseFloat(a.style.left) - parseFloat(b.style.left));
+  }
+  return lineGroups;
+}
+
+function startHighlightUnderlineProgress(durationSeconds) {
+  stopHighlightUnderlineProgress();
+  if (!isHighlightUnderlineProgressEnabled()) return;
+
+  const root = ensureHighlightOverlayRoot();
+  const boxes = root.querySelectorAll('.yomup-highlight-underline');
+  if (boxes.length === 0) return;
+
+  const minSeconds = typeof HIGHLIGHT_UNDERLINE_PROGRESS_MIN_SECONDS !== 'undefined'
+    ? HIGHLIGHT_UNDERLINE_PROGRESS_MIN_SECONDS
+    : 0.3;
+  const duration = Math.max(minSeconds, durationSeconds || 0);
+  const lineTolerance = typeof HIGHLIGHT_RECT_MERGE_LINE_TOLERANCE_PX !== 'undefined'
+    ? HIGHLIGHT_RECT_MERGE_LINE_TOLERANCE_PX
+    : 6;
+
+  const sortedBoxes = Array.from(boxes).sort((a, b) =>
+    compareHighlightUnderlineReadingOrder(a, b, lineTolerance)
+  );
+
+  let totalWidth = 0;
+  for (let i = 0; i < sortedBoxes.length; i++) {
+    totalWidth += parseFloat(sortedBoxes[i].dataset.fullWidth) || 0;
+  }
+  if (totalWidth <= 0) return;
+
+  for (let i = 0; i < sortedBoxes.length; i++) {
+    sortedBoxes[i].style.transition = 'none';
+    sortedBoxes[i].style.width = '0px';
+  }
+
+  void root.offsetHeight;
+
+  const lineGroups = groupHighlightUnderlineBoxesByLine(sortedBoxes, lineTolerance);
+  let delay = 0;
+  for (let g = 0; g < lineGroups.length; g++) {
+    const group = lineGroups[g];
+    let lineWidth = 0;
+    for (let i = 0; i < group.length; i++) {
+      lineWidth += parseFloat(group[i].dataset.fullWidth) || 0;
+    }
+    const lineDuration = duration * (lineWidth / totalWidth);
+    let lineDelay = delay;
+    for (let i = 0; i < group.length; i++) {
+      const box = group[i];
+      const fullWidth = parseFloat(box.dataset.fullWidth);
+      if (!fullWidth) continue;
+      const segmentDuration = lineWidth > 0 ? lineDuration * (fullWidth / lineWidth) : lineDuration;
+      box.style.transition = `width ${segmentDuration}s linear ${lineDelay}s`;
+      box.style.width = `${fullWidth}px`;
+      lineDelay += segmentDuration;
+    }
+    delay += lineDuration;
+  }
+}
+
 function applyHighlightOverlay(range, clipBounds) {
   clearHighlightOverlay();
   const root = ensureHighlightOverlayRoot();
@@ -3520,11 +3653,7 @@ function applyHighlightOverlay(range, clipBounds) {
   for (let i = 0; i < rects.length; i++) {
     const rect = rects[i];
     if (!isValidHighlightClientRect(rect)) continue;
-    const box = document.createElement('div');
-    box.style.cssText =
-      `position:fixed;left:${rect.left}px;top:${rect.top}px;width:${rect.width}px;height:${rect.height}px;` +
-      'outline:2px solid red;outline-offset:-2px;box-sizing:border-box;pointer-events:none;';
-    root.appendChild(box);
+    root.appendChild(createHighlightOverlayBox(rect));
   }
   currentHighlightRange = range;
   return true;
@@ -3553,6 +3682,11 @@ function shouldUseSingleBlockUnionOverlay(chunks, blockText, chunk, range) {
 }
 
 function applyHighlightOverlayUnion(range, clipBounds) {
+  // 下線は行ごとの矩形が必要なため、union（外接1矩形）は使わない
+  if (isHighlightUnderlineOverlayStyle()) {
+    return applyHighlightOverlay(range, clipBounds);
+  }
+
   clearHighlightOverlay();
   const root = ensureHighlightOverlayRoot();
   let rect = range.getBoundingClientRect();
@@ -3564,11 +3698,7 @@ function applyHighlightOverlayUnion(range, clipBounds) {
     return false;
   }
 
-  const box = document.createElement('div');
-  box.style.cssText =
-    `position:fixed;left:${rect.left}px;top:${rect.top}px;width:${rect.width}px;height:${rect.height}px;` +
-    'outline:2px solid red;outline-offset:-2px;box-sizing:border-box;pointer-events:none;';
-  root.appendChild(box);
+  root.appendChild(createHighlightOverlayBox(rect));
   currentHighlightRange = range;
   return true;
 }
@@ -4787,6 +4917,7 @@ function startCountdownSubPopup(unitCount, languageMode = LANGUAGE_MODE_JA) {
 
     // ポップアップの文字数を更新
     updateSubPopupCharCount(unitCount, readTime, unitLabel);
+    startHighlightUnderlineProgress(readTime);
 
     debugLog(`単位: ${unitCount}${unitLabel}, 読書: ${readTime}秒`);
   } catch (error) {

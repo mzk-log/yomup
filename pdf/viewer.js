@@ -474,6 +474,7 @@ function ensureHighlightOverlayRoot() {
 }
 
 function clearHighlightOverlay() {
+  stopHighlightUnderlineProgress();
   if (highlightOverlayRoot) {
     highlightOverlayRoot.textContent = '';
   }
@@ -536,16 +537,131 @@ function mergeHighlightClientRects(rectList) {
   }));
 }
 
+function isHighlightUnderlineOverlayStyle() {
+  return window.HIGHLIGHT_OVERLAY_STYLE === 'underline';
+}
+
+function isHighlightUnderlineProgressEnabled() {
+  if (!isHighlightUnderlineOverlayStyle()) return false;
+  return window.ENABLE_HIGHLIGHT_UNDERLINE_PROGRESS !== false;
+}
+
+function getHighlightRectBottom(rect) {
+  if (typeof rect.bottom === 'number') return rect.bottom;
+  return rect.top + rect.height;
+}
+
+function createHighlightOverlayBox(rect) {
+  const box = document.createElement('div');
+  if (isHighlightUnderlineOverlayStyle()) {
+    const thickness = window.HIGHLIGHT_UNDERLINE_THICKNESS_PX ?? 2;
+    const color = window.HIGHLIGHT_UNDERLINE_COLOR || 'red';
+    const underlineTop = getHighlightRectBottom(rect) - thickness;
+    const progressEnabled = isHighlightUnderlineProgressEnabled();
+    box.className = 'yomup-pdf-highlight-underline';
+    box.dataset.fullWidth = String(rect.width);
+    box.style.cssText =
+      `position:fixed;left:${rect.left}px;top:${underlineTop}px;` +
+      `width:${progressEnabled ? 0 : rect.width}px;height:${thickness}px;background:${color};`;
+  } else {
+    box.className = 'yomup-pdf-highlight-box';
+    box.style.cssText =
+      `position:fixed;left:${rect.left}px;top:${rect.top}px;width:${rect.width}px;height:${rect.height}px;`;
+  }
+  return box;
+}
+
+function stopHighlightUnderlineProgress() {
+  if (!highlightOverlayRoot) return;
+  const boxes = highlightOverlayRoot.querySelectorAll('.yomup-pdf-highlight-underline');
+  for (const box of boxes) {
+    box.style.transition = '';
+  }
+}
+
+function compareHighlightUnderlineReadingOrder(boxA, boxB, lineTolerancePx) {
+  const topA = parseFloat(boxA.style.top);
+  const topB = parseFloat(boxB.style.top);
+  if (Math.abs(topA - topB) > lineTolerancePx) return topA - topB;
+  return parseFloat(boxA.style.left) - parseFloat(boxB.style.left);
+}
+
+function groupHighlightUnderlineBoxesByLine(sortedBoxes, lineTolerancePx) {
+  const lineGroups = [];
+  for (const box of sortedBoxes) {
+    const top = parseFloat(box.style.top);
+    const lastGroup = lineGroups[lineGroups.length - 1];
+    if (
+      lastGroup &&
+      Math.abs(top - parseFloat(lastGroup[0].style.top)) <= lineTolerancePx
+    ) {
+      lastGroup.push(box);
+    } else {
+      lineGroups.push([box]);
+    }
+  }
+  for (const group of lineGroups) {
+    group.sort((a, b) => parseFloat(a.style.left) - parseFloat(b.style.left));
+  }
+  return lineGroups;
+}
+
+function startHighlightUnderlineProgress(durationSeconds) {
+  stopHighlightUnderlineProgress();
+  if (!isHighlightUnderlineProgressEnabled()) return;
+
+  const root = ensureHighlightOverlayRoot();
+  const boxes = root.querySelectorAll('.yomup-pdf-highlight-underline');
+  if (boxes.length === 0) return;
+
+  const minSeconds = window.HIGHLIGHT_UNDERLINE_PROGRESS_MIN_SECONDS ?? 0.3;
+  const duration = Math.max(minSeconds, durationSeconds || 0);
+  const lineTolerance = RECT_MERGE_LINE_TOLERANCE_PX;
+
+  const sortedBoxes = Array.from(boxes).sort((a, b) =>
+    compareHighlightUnderlineReadingOrder(a, b, lineTolerance)
+  );
+
+  let totalWidth = 0;
+  for (const box of sortedBoxes) {
+    totalWidth += parseFloat(box.dataset.fullWidth) || 0;
+  }
+  if (totalWidth <= 0) return;
+
+  for (const box of sortedBoxes) {
+    box.style.transition = 'none';
+    box.style.width = '0px';
+  }
+
+  void root.offsetHeight;
+
+  const lineGroups = groupHighlightUnderlineBoxesByLine(sortedBoxes, lineTolerance);
+  let delay = 0;
+  for (const group of lineGroups) {
+    let lineWidth = 0;
+    for (const box of group) {
+      lineWidth += parseFloat(box.dataset.fullWidth) || 0;
+    }
+    const lineDuration = duration * (lineWidth / totalWidth);
+    let lineDelay = delay;
+    for (const box of group) {
+      const fullWidth = parseFloat(box.dataset.fullWidth);
+      if (!fullWidth) continue;
+      const segmentDuration = lineWidth > 0 ? lineDuration * (fullWidth / lineWidth) : lineDuration;
+      box.style.transition = `width ${segmentDuration}s linear ${lineDelay}s`;
+      box.style.width = `${fullWidth}px`;
+      lineDelay += segmentDuration;
+    }
+    delay += lineDuration;
+  }
+}
+
 function applyHighlightOverlayRects(rects) {
   clearHighlightOverlay();
   const root = ensureHighlightOverlayRoot();
   const merged = mergeHighlightClientRects(rects);
   for (const rect of merged) {
-    const box = document.createElement('div');
-    box.className = 'yomup-pdf-highlight-box';
-    box.style.cssText =
-      `position:fixed;left:${rect.left}px;top:${rect.top}px;width:${rect.width}px;height:${rect.height}px;`;
-    root.appendChild(box);
+    root.appendChild(createHighlightOverlayBox(rect));
   }
 }
 
@@ -706,7 +822,9 @@ function tryHighlightAtPoint(clientX, clientY) {
   }
 
   applyHighlightOverlayRects(rects);
-  startHighlightTimer(countUnits(chunk.text, languageMode), languageMode);
+  const units = countUnits(chunk.text, languageMode);
+  startHighlightUnderlineProgress(calculateReadingTime(units, languageMode));
+  startHighlightTimer(units, languageMode);
 }
 
 function handleMouseMove(event) {

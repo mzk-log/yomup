@@ -7,7 +7,7 @@
 
 // 右クリックメニューの設定を2次元配列で一元管理
 const MENU_CONFIG = [
-  { id: 'YomuP-apl', title: '読むプ' }
+  { id: 'YomuP-apl', title: '読むプDEV' }
 ];
 
 // PDF: Chromium 内蔵 PDF ビューアの拡張 ID（Chrome / Edge 共通）
@@ -31,7 +31,7 @@ const PDF_PAGE_MENU = {
 };
 
 // 読むプバージョン（機能変更.不具合修正・改善.申請）
-const YOMUP_VERSION = "3.1.0";
+const YOMUP_VERSION = "3.2.DEV";
 
 
 // デバッグログ出力の有効/無効（コンパイルスイッチ）
@@ -46,6 +46,14 @@ const MAX_WORDS_FOR_HIGHLIGHT = 18;
 // ハイライト上限の余裕（実効上限 = MAX_* + SLACK）。英文 30+15=45語まで表示可
 const HIGHLIGHT_UNIT_SLACK_JA = 5;
 const HIGHLIGHT_UNIT_SLACK_EN = 15;
+
+// ハイライト描画（プロトタイプ）: 'outline' | 'underline'
+const HIGHLIGHT_OVERLAY_STYLE = 'underline';
+const HIGHLIGHT_UNDERLINE_THICKNESS_PX = 2;
+const HIGHLIGHT_UNDERLINE_COLOR = 'red';
+// 下線を読書時間に合わせて左から伸ばす（underline 時のみ）
+const ENABLE_HIGHLIGHT_UNDERLINE_PROGRESS = true;
+const HIGHLIGHT_UNDERLINE_PROGRESS_MIN_SECONDS = 0.3;
 
 // 読書速度（英語: 単語/分）
 const WORDS_PER_MINUTE = 225;
@@ -129,5 +137,10 @@ if (typeof window !== 'undefined') {
   window.JA_BOUNDARY_SEARCH_WINDOW_FORWARD = JA_BOUNDARY_SEARCH_WINDOW_FORWARD;
   window.HIGHLIGHT_TARGET_TAGS = HIGHLIGHT_TARGET_TAGS;
   window.CONSECUTIVE_GROUP_TAGS = CONSECUTIVE_GROUP_TAGS;
+  window.HIGHLIGHT_OVERLAY_STYLE = HIGHLIGHT_OVERLAY_STYLE;
+  window.HIGHLIGHT_UNDERLINE_THICKNESS_PX = HIGHLIGHT_UNDERLINE_THICKNESS_PX;
+  window.HIGHLIGHT_UNDERLINE_COLOR = HIGHLIGHT_UNDERLINE_COLOR;
+  window.ENABLE_HIGHLIGHT_UNDERLINE_PROGRESS = ENABLE_HIGHLIGHT_UNDERLINE_PROGRESS;
+  window.HIGHLIGHT_UNDERLINE_PROGRESS_MIN_SECONDS = HIGHLIGHT_UNDERLINE_PROGRESS_MIN_SECONDS;
 }
 

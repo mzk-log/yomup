@@ -173,6 +173,11 @@ body {
   pointer-events: none;
 }
 
+.yomup-pdf-highlight-underline {
+  box-sizing: border-box;
+  pointer-events: none;
+}
+
 #yomup-pdf-highlight-overlay-root {
   z-index: 5;
 }
