@@ -551,31 +551,67 @@ function getHighlightRectBottom(rect) {
   return rect.top + rect.height;
 }
 
+function getHighlightUnderlineGoalColor() {
+  return window.HIGHLIGHT_UNDERLINE_GOAL_COLOR || 'rgba(255, 0, 0, 0.28)';
+}
+
+function getHighlightUnderlineProgressColor() {
+  return window.HIGHLIGHT_UNDERLINE_COLOR || 'red';
+}
+
+function getHighlightUnderlineProgressEl(segment) {
+  return segment.querySelector('.yomup-pdf-highlight-underline-progress');
+}
+
 function createHighlightOverlayBox(rect) {
-  const box = document.createElement('div');
   if (isHighlightUnderlineOverlayStyle()) {
     const thickness = window.HIGHLIGHT_UNDERLINE_THICKNESS_PX ?? 2;
-    const color = window.HIGHLIGHT_UNDERLINE_COLOR || 'red';
     const underlineTop = getHighlightRectBottom(rect) - thickness;
     const progressEnabled = isHighlightUnderlineProgressEnabled();
-    box.className = 'yomup-pdf-highlight-underline';
-    box.dataset.fullWidth = String(rect.width);
-    box.style.cssText =
+
+    if (!progressEnabled) {
+      const box = document.createElement('div');
+      box.className = 'yomup-pdf-highlight-underline';
+      box.style.cssText =
+        `position:fixed;left:${rect.left}px;top:${underlineTop}px;` +
+        `width:${rect.width}px;height:${thickness}px;background:${getHighlightUnderlineProgressColor()};`;
+      return box;
+    }
+
+    const segment = document.createElement('div');
+    segment.className = 'yomup-pdf-highlight-underline-segment';
+    segment.dataset.fullWidth = String(rect.width);
+    segment.style.cssText =
       `position:fixed;left:${rect.left}px;top:${underlineTop}px;` +
-      `width:${progressEnabled ? 0 : rect.width}px;height:${thickness}px;background:${color};`;
-  } else {
-    box.className = 'yomup-pdf-highlight-box';
-    box.style.cssText =
-      `position:fixed;left:${rect.left}px;top:${rect.top}px;width:${rect.width}px;height:${rect.height}px;`;
+      `width:${rect.width}px;height:${thickness}px;`;
+
+    const goal = document.createElement('div');
+    goal.className = 'yomup-pdf-highlight-underline-goal';
+    goal.style.cssText =
+      `position:absolute;left:0;top:0;width:100%;height:100%;background:${getHighlightUnderlineGoalColor()};`;
+
+    const progress = document.createElement('div');
+    progress.className = 'yomup-pdf-highlight-underline-progress';
+    progress.style.cssText =
+      `position:absolute;left:0;top:0;width:0;height:100%;background:${getHighlightUnderlineProgressColor()};`;
+
+    segment.appendChild(goal);
+    segment.appendChild(progress);
+    return segment;
   }
+
+  const box = document.createElement('div');
+  box.className = 'yomup-pdf-highlight-box';
+  box.style.cssText =
+    `position:fixed;left:${rect.left}px;top:${rect.top}px;width:${rect.width}px;height:${rect.height}px;`;
   return box;
 }
 
 function stopHighlightUnderlineProgress() {
   if (!highlightOverlayRoot) return;
-  const boxes = highlightOverlayRoot.querySelectorAll('.yomup-pdf-highlight-underline');
-  for (const box of boxes) {
-    box.style.transition = '';
+  const progressEls = highlightOverlayRoot.querySelectorAll('.yomup-pdf-highlight-underline-progress');
+  for (const el of progressEls) {
+    el.style.transition = '';
   }
 }
 
@@ -611,7 +647,7 @@ function startHighlightUnderlineProgress(durationSeconds) {
   if (!isHighlightUnderlineProgressEnabled()) return;
 
   const root = ensureHighlightOverlayRoot();
-  const boxes = root.querySelectorAll('.yomup-pdf-highlight-underline');
+  const boxes = root.querySelectorAll('.yomup-pdf-highlight-underline-segment');
   if (boxes.length === 0) return;
 
   const minSeconds = window.HIGHLIGHT_UNDERLINE_PROGRESS_MIN_SECONDS ?? 0.3;
@@ -628,9 +664,11 @@ function startHighlightUnderlineProgress(durationSeconds) {
   }
   if (totalWidth <= 0) return;
 
-  for (const box of sortedBoxes) {
-    box.style.transition = 'none';
-    box.style.width = '0px';
+  for (const segment of sortedBoxes) {
+    const progressEl = getHighlightUnderlineProgressEl(segment);
+    if (!progressEl) continue;
+    progressEl.style.transition = 'none';
+    progressEl.style.width = '0px';
   }
 
   void root.offsetHeight;
@@ -639,17 +677,18 @@ function startHighlightUnderlineProgress(durationSeconds) {
   let delay = 0;
   for (const group of lineGroups) {
     let lineWidth = 0;
-    for (const box of group) {
-      lineWidth += parseFloat(box.dataset.fullWidth) || 0;
+    for (const segment of group) {
+      lineWidth += parseFloat(segment.dataset.fullWidth) || 0;
     }
     const lineDuration = duration * (lineWidth / totalWidth);
     let lineDelay = delay;
-    for (const box of group) {
-      const fullWidth = parseFloat(box.dataset.fullWidth);
-      if (!fullWidth) continue;
+    for (const segment of group) {
+      const fullWidth = parseFloat(segment.dataset.fullWidth);
+      const progressEl = getHighlightUnderlineProgressEl(segment);
+      if (!fullWidth || !progressEl) continue;
       const segmentDuration = lineWidth > 0 ? lineDuration * (fullWidth / lineWidth) : lineDuration;
-      box.style.transition = `width ${segmentDuration}s linear ${lineDelay}s`;
-      box.style.width = `${fullWidth}px`;
+      progressEl.style.transition = `width ${segmentDuration}s linear ${lineDelay}s`;
+      progressEl.style.width = '100%';
       lineDelay += segmentDuration;
     }
     delay += lineDuration;

@@ -3522,37 +3522,75 @@ function getHighlightRectBottom(rect) {
   return rect.top + rect.height;
 }
 
+function getHighlightUnderlineGoalColor() {
+  return typeof HIGHLIGHT_UNDERLINE_GOAL_COLOR !== 'undefined'
+    ? HIGHLIGHT_UNDERLINE_GOAL_COLOR
+    : 'rgba(255, 0, 0, 0.28)';
+}
+
+function getHighlightUnderlineProgressColor() {
+  return typeof HIGHLIGHT_UNDERLINE_COLOR !== 'undefined'
+    ? HIGHLIGHT_UNDERLINE_COLOR
+    : 'red';
+}
+
+function getHighlightUnderlineProgressEl(segment) {
+  return segment.querySelector('.yomup-highlight-underline-progress');
+}
+
 function createHighlightOverlayBox(rect) {
-  const box = document.createElement('div');
   if (isHighlightUnderlineOverlayStyle()) {
     const thickness = typeof HIGHLIGHT_UNDERLINE_THICKNESS_PX !== 'undefined'
       ? HIGHLIGHT_UNDERLINE_THICKNESS_PX
       : 2;
-    const color = typeof HIGHLIGHT_UNDERLINE_COLOR !== 'undefined'
-      ? HIGHLIGHT_UNDERLINE_COLOR
-      : 'red';
     const underlineTop = getHighlightRectBottom(rect) - thickness;
     const progressEnabled = isHighlightUnderlineProgressEnabled();
-    box.className = 'yomup-highlight-underline';
-    box.dataset.fullWidth = String(rect.width);
-    box.style.cssText =
+
+    if (!progressEnabled) {
+      const box = document.createElement('div');
+      box.className = 'yomup-highlight-underline';
+      box.style.cssText =
+        `position:fixed;left:${rect.left}px;top:${underlineTop}px;` +
+        `width:${rect.width}px;height:${thickness}px;background:${getHighlightUnderlineProgressColor()};` +
+        'pointer-events:none;';
+      return box;
+    }
+
+    const segment = document.createElement('div');
+    segment.className = 'yomup-highlight-underline-segment';
+    segment.dataset.fullWidth = String(rect.width);
+    segment.style.cssText =
       `position:fixed;left:${rect.left}px;top:${underlineTop}px;` +
-      `width:${progressEnabled ? 0 : rect.width}px;height:${thickness}px;background:${color};` +
-      'pointer-events:none;';
-  } else {
-    box.className = 'yomup-highlight-outline';
-    box.style.cssText =
-      `position:fixed;left:${rect.left}px;top:${rect.top}px;width:${rect.width}px;height:${rect.height}px;` +
-      'outline:2px solid red;outline-offset:-2px;box-sizing:border-box;pointer-events:none;';
+      `width:${rect.width}px;height:${thickness}px;pointer-events:none;`;
+
+    const goal = document.createElement('div');
+    goal.className = 'yomup-highlight-underline-goal';
+    goal.style.cssText =
+      `position:absolute;left:0;top:0;width:100%;height:100%;background:${getHighlightUnderlineGoalColor()};`;
+
+    const progress = document.createElement('div');
+    progress.className = 'yomup-highlight-underline-progress';
+    progress.style.cssText =
+      `position:absolute;left:0;top:0;width:0;height:100%;background:${getHighlightUnderlineProgressColor()};`;
+
+    segment.appendChild(goal);
+    segment.appendChild(progress);
+    return segment;
   }
+
+  const box = document.createElement('div');
+  box.className = 'yomup-highlight-outline';
+  box.style.cssText =
+    `position:fixed;left:${rect.left}px;top:${rect.top}px;width:${rect.width}px;height:${rect.height}px;` +
+    'outline:2px solid red;outline-offset:-2px;box-sizing:border-box;pointer-events:none;';
   return box;
 }
 
 function stopHighlightUnderlineProgress() {
   if (!highlightOverlayRoot) return;
-  const boxes = highlightOverlayRoot.querySelectorAll('.yomup-highlight-underline');
-  for (let i = 0; i < boxes.length; i++) {
-    boxes[i].style.transition = '';
+  const progressEls = highlightOverlayRoot.querySelectorAll('.yomup-highlight-underline-progress');
+  for (let i = 0; i < progressEls.length; i++) {
+    progressEls[i].style.transition = '';
   }
 }
 
@@ -3589,7 +3627,7 @@ function startHighlightUnderlineProgress(durationSeconds) {
   if (!isHighlightUnderlineProgressEnabled()) return;
 
   const root = ensureHighlightOverlayRoot();
-  const boxes = root.querySelectorAll('.yomup-highlight-underline');
+  const boxes = root.querySelectorAll('.yomup-highlight-underline-segment');
   if (boxes.length === 0) return;
 
   const minSeconds = typeof HIGHLIGHT_UNDERLINE_PROGRESS_MIN_SECONDS !== 'undefined'
@@ -3611,8 +3649,10 @@ function startHighlightUnderlineProgress(durationSeconds) {
   if (totalWidth <= 0) return;
 
   for (let i = 0; i < sortedBoxes.length; i++) {
-    sortedBoxes[i].style.transition = 'none';
-    sortedBoxes[i].style.width = '0px';
+    const progressEl = getHighlightUnderlineProgressEl(sortedBoxes[i]);
+    if (!progressEl) continue;
+    progressEl.style.transition = 'none';
+    progressEl.style.width = '0px';
   }
 
   void root.offsetHeight;
@@ -3628,12 +3668,13 @@ function startHighlightUnderlineProgress(durationSeconds) {
     const lineDuration = duration * (lineWidth / totalWidth);
     let lineDelay = delay;
     for (let i = 0; i < group.length; i++) {
-      const box = group[i];
-      const fullWidth = parseFloat(box.dataset.fullWidth);
-      if (!fullWidth) continue;
+      const segment = group[i];
+      const fullWidth = parseFloat(segment.dataset.fullWidth);
+      const progressEl = getHighlightUnderlineProgressEl(segment);
+      if (!fullWidth || !progressEl) continue;
       const segmentDuration = lineWidth > 0 ? lineDuration * (fullWidth / lineWidth) : lineDuration;
-      box.style.transition = `width ${segmentDuration}s linear ${lineDelay}s`;
-      box.style.width = `${fullWidth}px`;
+      progressEl.style.transition = `width ${segmentDuration}s linear ${lineDelay}s`;
+      progressEl.style.width = '100%';
       lineDelay += segmentDuration;
     }
     delay += lineDuration;
