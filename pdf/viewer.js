@@ -41,6 +41,7 @@ const pagesEl = document.getElementById('yomup-pdf-pages');
 /** @type {Array<{ pageNum: number, pageWrap: HTMLElement, blockText: string, segments: object[], lines: object[] }>} */
 const pageModels = [];
 let highlightOverlayRoot = null;
+let currentHighlightHitRects = null;
 let mouseTimeoutForHighlight = null;
 let lastHighlightClientX = 0;
 let lastHighlightClientY = 0;
@@ -478,6 +479,24 @@ function clearHighlightOverlay() {
   if (highlightOverlayRoot) {
     highlightOverlayRoot.textContent = '';
   }
+  currentHighlightHitRects = null;
+}
+
+function isPointInCurrentHighlightRects(clientX, clientY) {
+  if (!currentHighlightHitRects || currentHighlightHitRects.length === 0) return false;
+  const rightPad = window.HIGHLIGHT_STICKY_RIGHT_PADDING_PX ?? 0;
+  for (const rect of currentHighlightHitRects) {
+    if (rect.width <= 0 || rect.height <= 0) continue;
+    if (
+      clientX >= rect.left &&
+      clientX <= rect.right + rightPad &&
+      clientY >= rect.top &&
+      clientY <= rect.bottom
+    ) {
+      return true;
+    }
+  }
+  return false;
 }
 
 function mergeHighlightClientRects(rectList) {
@@ -879,7 +898,12 @@ function tryHighlightAtPoint(clientX, clientY) {
     return;
   }
 
+  if (isPointInCurrentHighlightRects(clientX, clientY)) {
+    return;
+  }
+
   applyHighlightOverlayRects(rects);
+  currentHighlightHitRects = rects;
   const units = countUnits(chunk.text, languageMode);
   startHighlightUnderlineProgress(calculateReadingTime(units, languageMode));
   startHighlightTimer(units, languageMode);
@@ -889,6 +913,10 @@ function handleMouseMove(event) {
   if (!highLightOnOff || !highlightListenersAttached) return;
   lastHighlightClientX = event.clientX;
   lastHighlightClientY = event.clientY;
+
+  if (isPointInCurrentHighlightRects(event.clientX, event.clientY)) {
+    return;
+  }
 
   if (mouseTimeoutForHighlight) {
     clearTimeout(mouseTimeoutForHighlight);

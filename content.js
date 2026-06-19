@@ -95,6 +95,13 @@ const BLOCK_LABEL_MAX_LEADING_PREFIX_CHARS = 4;
 let highlightOverlayRoot = null;
 let currentHighlightRange = null;
 
+function isPointInCurrentHighlight(clientX, clientY) {
+  return !!(
+    currentHighlightRange &&
+    clientPointInStickyHighlightRects(currentHighlightRange, clientX, clientY)
+  );
+}
+
 // getClientRects の矩形をマージして枠の細片化を抑える（テストNG時は false に戻す）
 const ENABLE_HIGHLIGHT_OVERLAY_RECT_MERGE = true;
 const HIGHLIGHT_RECT_MERGE_LINE_TOLERANCE_PX = 6;
@@ -1336,6 +1343,10 @@ function handleMouseMove(event) {
   lastHighlightClientX = event.clientX;
   lastHighlightClientY = event.clientY;
 
+  if (isPointInCurrentHighlight(event.clientX, event.clientY)) {
+    return;
+  }
+
   // マウスが動く度に既存のタイマーをキャンセル
   if (mouseTimeoutForHighlight) {
     clearTimeout(mouseTimeoutForHighlight);
@@ -2255,6 +2266,27 @@ function clientPointInRangeClientRects(range, clientX, clientY) {
     if (
       clientY >= rect.top - lineTolerance &&
       clientY <= rect.bottom + lineTolerance
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function clientPointInStickyHighlightRects(range, clientX, clientY) {
+  if (!range) return false;
+  const rightPad = typeof HIGHLIGHT_STICKY_RIGHT_PADDING_PX !== 'undefined'
+    ? HIGHLIGHT_STICKY_RIGHT_PADDING_PX
+    : 0;
+  const rects = range.getClientRects();
+  for (let i = 0; i < rects.length; i++) {
+    const rect = rects[i];
+    if (rect.width <= 0 || rect.height <= 0) continue;
+    if (
+      clientX >= rect.left &&
+      clientX <= rect.right + rightPad &&
+      clientY >= rect.top &&
+      clientY <= rect.bottom
     ) {
       return true;
     }
@@ -3951,6 +3983,10 @@ function tryHighlightLogicalBlockAtPoint(clientX, clientY) {
       !clientPointInRangeClientRects(range, clientX, clientY)
     ) {
       return false;
+    }
+
+    if (isPointInCurrentHighlight(clientX, clientY)) {
+      return true;
     }
 
     const clipBounds = getHighlightBlockClipBounds(highlightBlock);
