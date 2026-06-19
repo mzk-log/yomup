@@ -541,9 +541,13 @@ function isHighlightUnderlineOverlayStyle() {
   return window.HIGHLIGHT_OVERLAY_STYLE === 'underline';
 }
 
-function isHighlightUnderlineProgressEnabled() {
+function usesHighlightUnderlineSegmentLayer() {
   if (!isHighlightUnderlineOverlayStyle()) return false;
   return window.ENABLE_HIGHLIGHT_UNDERLINE_PROGRESS !== false;
+}
+
+function isHighlightUnderlineProgressEnabled() {
+  return usesHighlightUnderlineSegmentLayer() && window.isHighlightUnderlineProgressMode();
 }
 
 function getHighlightRectBottom(rect) {
@@ -567,9 +571,9 @@ function createHighlightOverlayBox(rect) {
   if (isHighlightUnderlineOverlayStyle()) {
     const thickness = window.HIGHLIGHT_UNDERLINE_THICKNESS_PX ?? 2;
     const underlineTop = getHighlightRectBottom(rect) - thickness;
-    const progressEnabled = isHighlightUnderlineProgressEnabled();
+    const useSegmentLayer = usesHighlightUnderlineSegmentLayer();
 
-    if (!progressEnabled) {
+    if (!useSegmentLayer) {
       const box = document.createElement('div');
       box.className = 'yomup-pdf-highlight-underline';
       box.style.cssText =
@@ -644,11 +648,26 @@ function groupHighlightUnderlineBoxesByLine(sortedBoxes, lineTolerancePx) {
 
 function startHighlightUnderlineProgress(durationSeconds) {
   stopHighlightUnderlineProgress();
-  if (!isHighlightUnderlineProgressEnabled()) return;
+  if (!usesHighlightUnderlineSegmentLayer()) return;
 
   const root = ensureHighlightOverlayRoot();
   const boxes = root.querySelectorAll('.yomup-pdf-highlight-underline-segment');
   if (boxes.length === 0) return;
+
+  const progressEls = [];
+  for (const segment of boxes) {
+    const progressEl = getHighlightUnderlineProgressEl(segment);
+    if (progressEl) progressEls.push(progressEl);
+  }
+  if (progressEls.length === 0) return;
+
+  if (!window.isHighlightUnderlineProgressMode()) {
+    for (const progressEl of progressEls) {
+      progressEl.style.transition = 'none';
+      progressEl.style.width = '100%';
+    }
+    return;
+  }
 
   const minSeconds = window.HIGHLIGHT_UNDERLINE_PROGRESS_MIN_SECONDS ?? 0.3;
   const duration = Math.max(minSeconds, durationSeconds || 0);
@@ -922,6 +941,41 @@ function detachHighlightListeners() {
   }
 }
 
+function getPdfUiLanguageMode() {
+  if (pageModels.length === 0) return LANGUAGE_MODE_JA;
+  const sample = pageModels.map((model) => model.blockText).join('').slice(0, 4000);
+  return detectLanguageMode(sample);
+}
+
+function refreshReadingSettingsToolbarLabels() {
+  const select = document.getElementById('yomup-pdf-reading-speed');
+  if (!select || typeof window.populateReadingSpeedSelect !== 'function') return;
+  window.populateReadingSpeedSelect(
+    select,
+    getPdfUiLanguageMode(),
+    window.loadReadingSpeedCharsPerMin()
+  );
+}
+
+function initReadingSettingsToolbar() {
+  const select = document.getElementById('yomup-pdf-reading-speed');
+  const progressBtn = document.getElementById('yomup-pdf-mode-progress');
+  if (!select || select.dataset.bound === '1') return;
+  select.dataset.bound = '1';
+
+  refreshReadingSettingsToolbarLabels();
+
+  select.addEventListener('change', () => {
+    window.saveReadingSpeedCharsPerMin(Number(select.value));
+    updateDocumentStatsDisplay(pageModels);
+    updateSelectionStatsDisplay();
+  });
+
+  if (typeof window.bindReadingModeToggleButton === 'function') {
+    window.bindReadingModeToggleButton(progressBtn, () => clearHighlightState());
+  }
+}
+
 async function renderPdf(pdfBytes, sourceUrl) {
   hideError();
   detachHighlightListeners();
@@ -948,6 +1002,7 @@ async function renderPdf(pdfBytes, sourceUrl) {
 
   defaultStatusText = `${pdf.numPages} ページ — ${fileName}`;
   updateDocumentStatsDisplay(pageModels);
+  refreshReadingSettingsToolbarLabels();
   initSelectionStatsListener();
   updateSelectionStatsDisplay();
   initHighlightToggle();
@@ -959,6 +1014,7 @@ async function renderPdf(pdfBytes, sourceUrl) {
 }
 
 async function main() {
+  initReadingSettingsToolbar();
   const params = new URLSearchParams(location.search);
   const errorParam = params.get('error');
   if (errorParam) {

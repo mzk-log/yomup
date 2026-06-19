@@ -38,10 +38,7 @@ let startX, startY, startLeft, startTop; // ドラッグ開始時の座標
 let currentDraggingPopup = null; // 現在ドラッグ中のポップアップ要素
 let popupViewportResizeDebounceTimer = null; // resize 時のポップアップ再配置 debounce用
 
-// 読書速度設定
-let readingSpeed = 250; // 1分間で読める文字数
-
-// ページ遷移判定用のグローバル変数
+// 読書速度設定（reading-settings.js が localStorage を正とする）
 let isPageTransition = false; // ページ遷移時かブラウザ起動時かを判定するフラグ
 
 // ハイライト遅延処理で使う最新ポインタ座標（setTimeout 内の event は古くなりうる）
@@ -218,6 +215,17 @@ function executeYomuP() {
 
 
 // === 文字数情報を取得する共通関数 ===========================================
+function refreshYomuPPopupTotalInfo() {
+  const existingPopup = document.getElementById(ID_YOMUP_POPUP_CONTAINER);
+  if (!existingPopup?.shadowRoot) return;
+  const totalInfo = existingPopup.shadowRoot.querySelector('.total-info');
+  if (!totalInfo) return;
+  const charCountInfo = getCharCountInfo();
+  totalInfo.textContent =
+    `全体： ${charCountInfo.textLengthAll}${charCountInfo.unitLabelAll}　` +
+    `${formatReadingTime(charCountInfo.readingTimeAll)}`;
+}
+
 function getCharCountInfo() {
   const bodyText = document.body.innerText.trim();
   const languageModeAll = detectLanguageMode(bodyText);
@@ -253,6 +261,9 @@ function getCharCountInfo() {
 
 // === 読書時間計算関数 ================== ===================================
 function calculateReadingTime(unitCount, languageMode = LANGUAGE_MODE_JA) {
+  if (typeof calculateReadingTimeWithSettings === 'function') {
+    return calculateReadingTimeWithSettings(unitCount, languageMode);
+  }
   if (languageMode === LANGUAGE_MODE_EN) {
     return Math.round(unitCount * (60 / WORDS_PER_MINUTE));
   }
@@ -586,6 +597,67 @@ function showYomuPPopup(
     white-space: nowrap !important;
     left: -12px !important; /* ポップアップの左端に揃える */
     transform: none !important;
+  }
+  .reading-settings-row {
+    display: flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    gap: 4px !important;
+    margin-top: 6px !important;
+    width: 100% !important;
+  }
+  .reading-speed-label {
+    font-size: 11px !important;
+    color: #6c757d !important;
+    flex-shrink: 0 !important;
+  }
+  .reading-speed-select-wrapper {
+    position: relative !important;
+    display: inline-block !important;
+    flex: 1 1 auto !important;
+    min-width: 0 !important;
+  }
+  .reading-speed-select {
+    font-size: 11px !important;
+    padding: 2px 2px !important;
+    border: 1px solid #dee2e6 !important;
+    border-radius: 4px !important;
+    background: white !important;
+    color: #495057 !important;
+    cursor: pointer !important;
+    width: 100% !important;
+    max-width: 108px !important;
+    pointer-events: auto !important;
+  }
+  .reading-mode-button {
+    display: inline-flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    box-sizing: border-box !important;
+    min-width: 20px !important;
+    height: auto !important;
+    padding: 2px 5px !important;
+    border: 1px solid #dee2e6 !important;
+    border-radius: 4px !important;
+    background: white !important;
+    color: #495057 !important;
+    font-size: 11px !important;
+    line-height: 1.2 !important;
+    cursor: pointer !important;
+    position: relative !important;
+    flex-shrink: 0 !important;
+    pointer-events: auto !important;
+  }
+  .reading-mode-button.active {
+    background-color: #fde8e8 !important;
+    border-color: #e8a0a0 !important;
+    color: #b54747 !important;
+  }
+  .reading-speed-select-wrapper .tooltip,
+  .reading-mode-button .tooltip {
+    white-space: nowrap !important;
+    left: 50% !important;
+    transform: translateX(-50%) !important;
   }
 `;
 
@@ -983,6 +1055,61 @@ function showYomuPPopup(
   playIcon.appendChild(reloadButton);
   popup.appendChild(playIcon);
 
+  const pageLanguageMode = detectLanguageMode(document.body.innerText || '');
+  const readingSettingsRow = document.createElement('div');
+  readingSettingsRow.className = 'reading-settings-row';
+
+  const readingSpeedLabel = document.createElement('span');
+  readingSpeedLabel.className = 'reading-speed-label';
+  readingSpeedLabel.textContent = '速度';
+
+  const readingSpeedSelectWrapper = document.createElement('div');
+  readingSpeedSelectWrapper.className = 'reading-speed-select-wrapper';
+
+  const readingSpeedSelect = document.createElement('select');
+  readingSpeedSelect.className = 'reading-speed-select';
+  populateReadingSpeedSelect(
+    readingSpeedSelect,
+    pageLanguageMode,
+    loadReadingSpeedCharsPerMin()
+  );
+
+  const readingSpeedTooltip = document.createElement('div');
+  readingSpeedTooltip.className = 'tooltip';
+  readingSpeedTooltip.textContent = '読書速度';
+
+  readingSpeedSelectWrapper.appendChild(readingSpeedSelect);
+  readingSpeedSelectWrapper.appendChild(readingSpeedTooltip);
+
+  const readingModeProgressBtn = document.createElement('button');
+  readingModeProgressBtn.type = 'button';
+  readingModeProgressBtn.className = 'reading-mode-button';
+  readingModeProgressBtn.setAttribute('aria-label', 'ライン進行');
+  readingModeProgressBtn.textContent = '→';
+  const progressModeTooltip = document.createElement('div');
+  progressModeTooltip.className = 'tooltip';
+  progressModeTooltip.textContent = 'ライン進行';
+  readingModeProgressBtn.appendChild(progressModeTooltip);
+
+  readingSettingsRow.appendChild(readingSpeedLabel);
+  readingSettingsRow.appendChild(readingSpeedSelectWrapper);
+  readingSettingsRow.appendChild(readingModeProgressBtn);
+  popup.appendChild(readingSettingsRow);
+
+  readingSpeedSelect.addEventListener('click', (e) => e.stopPropagation());
+  readingSpeedSelect.addEventListener('mousedown', (e) => e.stopPropagation());
+  readingSpeedSelect.addEventListener('change', (e) => {
+    e.stopPropagation();
+    saveReadingSpeedCharsPerMin(Number(readingSpeedSelect.value));
+    refreshYomuPPopupTotalInfo();
+    updateCharCountInfo();
+  });
+
+  bindReadingModeToggleButton(readingModeProgressBtn);
+
+  for (const controlEl of [readingSpeedSelect, readingModeProgressBtn]) {
+    controlEl.addEventListener('mousedown', (e) => e.stopPropagation());
+  }
 
   popup.appendChild(stopwatchContainer);
   popup.appendChild(stopwatchButtonContainer);
@@ -1028,6 +1155,8 @@ function showYomuPPopup(
   addTooltipEvents(stopwatchButton);
   addTooltipEvents(reloadButton);
   addTooltipEvents(limitSelectWrapper);
+  addTooltipEvents(readingSpeedSelectWrapper);
+  addTooltipEvents(readingModeProgressBtn);
 
   // モード状態に基づいてボタンのactiveクラスを復元
   if (isPageTransition && ENABLE_BUTTON_STATE_RESTORE) { //ページ遷移時のみ、有効 or 無効 を定数で切り替え
@@ -3512,9 +3641,13 @@ function isHighlightUnderlineOverlayStyle() {
   return typeof HIGHLIGHT_OVERLAY_STYLE !== 'undefined' && HIGHLIGHT_OVERLAY_STYLE === 'underline';
 }
 
-function isHighlightUnderlineProgressEnabled() {
+function usesHighlightUnderlineSegmentLayer() {
   if (!isHighlightUnderlineOverlayStyle()) return false;
   return typeof ENABLE_HIGHLIGHT_UNDERLINE_PROGRESS === 'undefined' || ENABLE_HIGHLIGHT_UNDERLINE_PROGRESS;
+}
+
+function isHighlightUnderlineProgressEnabled() {
+  return usesHighlightUnderlineSegmentLayer() && isHighlightUnderlineProgressMode();
 }
 
 function getHighlightRectBottom(rect) {
@@ -3544,9 +3677,9 @@ function createHighlightOverlayBox(rect) {
       ? HIGHLIGHT_UNDERLINE_THICKNESS_PX
       : 2;
     const underlineTop = getHighlightRectBottom(rect) - thickness;
-    const progressEnabled = isHighlightUnderlineProgressEnabled();
+    const useSegmentLayer = usesHighlightUnderlineSegmentLayer();
 
-    if (!progressEnabled) {
+    if (!useSegmentLayer) {
       const box = document.createElement('div');
       box.className = 'yomup-highlight-underline';
       box.style.cssText =
@@ -3624,11 +3757,26 @@ function groupHighlightUnderlineBoxesByLine(sortedBoxes, lineTolerancePx) {
 
 function startHighlightUnderlineProgress(durationSeconds) {
   stopHighlightUnderlineProgress();
-  if (!isHighlightUnderlineProgressEnabled()) return;
+  if (!usesHighlightUnderlineSegmentLayer()) return;
 
   const root = ensureHighlightOverlayRoot();
   const boxes = root.querySelectorAll('.yomup-highlight-underline-segment');
   if (boxes.length === 0) return;
+
+  const progressEls = [];
+  for (let i = 0; i < boxes.length; i++) {
+    const progressEl = getHighlightUnderlineProgressEl(boxes[i]);
+    if (progressEl) progressEls.push(progressEl);
+  }
+  if (progressEls.length === 0) return;
+
+  if (!isHighlightUnderlineProgressMode()) {
+    for (let i = 0; i < progressEls.length; i++) {
+      progressEls[i].style.transition = 'none';
+      progressEls[i].style.width = '100%';
+    }
+    return;
+  }
 
   const minSeconds = typeof HIGHLIGHT_UNDERLINE_PROGRESS_MIN_SECONDS !== 'undefined'
     ? HIGHLIGHT_UNDERLINE_PROGRESS_MIN_SECONDS

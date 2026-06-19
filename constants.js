@@ -56,11 +56,11 @@ const HIGHLIGHT_UNDERLINE_GOAL_COLOR = 'rgba(255, 0, 0, 0.28)';
 const ENABLE_HIGHLIGHT_UNDERLINE_PROGRESS = true;
 const HIGHLIGHT_UNDERLINE_PROGRESS_MIN_SECONDS = 0.3;
 
-// 読書速度（英語: 単語/分）
+// 読書速度（英語: 単語/分）— 基準 500字/分 ＝ 225語/分（UI 未接続時のフォールバック）
 const WORDS_PER_MINUTE = 225;
 
-// 読書速度（日本語: 字/分）
-const READING_SPEED_CHARS_PER_MIN = 750;
+// 読書速度（日本語: 字/分）— UI 未接続時のフォールバック
+const READING_SPEED_CHARS_PER_MIN = 500;
 
 // 言語ヒューリスティック: CJK文字の比率がこの値以上なら日本語
 const CJK_RATIO_THRESHOLD = 0.15;

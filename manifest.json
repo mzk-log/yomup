@@ -20,7 +20,7 @@
   "content_scripts": [
     {
       "matches": ["http://*/*", "https://*/*"],
-      "js": ["constants.js", "content.js"],
+      "js": ["constants.js", "reading-settings.js", "content.js"],
       "run_at": "document_idle"
     }
   ],

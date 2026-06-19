@@ -33,6 +33,14 @@
         aria-pressed="false"
         title="ストップウォッチ（クリックで表示）"
       >ストップウォッチ</button>
+      <label class="yomup-pdf-reading-speed-label" for="yomup-pdf-reading-speed">速度</label>
+      <select id="yomup-pdf-reading-speed" class="yomup-pdf-reading-speed-select" title="読書速度"></select>
+      <button
+        type="button"
+        id="yomup-pdf-mode-progress"
+        class="yomup-pdf-mode-btn"
+        aria-label="ライン進行"
+      >→</button>
     </div>
     <span id="yomup-pdf-status" aria-live="polite">読み込み中…</span>
   </header>
@@ -41,6 +49,7 @@
     <div id="yomup-pdf-pages"></div>
   </main>
   <script src="../constants.js"></script>
+  <script src="../reading-settings.js"></script>
   <script type="module" src="viewer.js"></script>
 </body>
 </html>

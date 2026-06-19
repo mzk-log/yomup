@@ -273,6 +273,9 @@ export function getUnitLabel(languageMode) {
 }
 
 export function calculateReadingTime(unitCount, languageMode) {
+  if (typeof window.calculateReadingTimeWithSettings === 'function') {
+    return window.calculateReadingTimeWithSettings(unitCount, languageMode);
+  }
   if (languageMode === LANGUAGE_MODE_EN) {
     return Math.round(unitCount * (60 / WORDS_PER_MINUTE));
   }

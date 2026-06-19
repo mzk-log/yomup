@@ -57,6 +57,41 @@ body {
   outline-offset: 2px;
 }
 
+.yomup-pdf-reading-speed-label {
+  font-size: 0.75rem;
+  color: #cbd5e1;
+}
+
+.yomup-pdf-reading-speed-select {
+  font-size: 0.75rem;
+  padding: 0.15rem 0.25rem;
+  border: 1px solid #888;
+  border-radius: 4px;
+  background: #4a4a4a;
+  color: #f1f1f1;
+  max-width: 6.5rem;
+}
+
+.yomup-pdf-mode-btn {
+  box-sizing: border-box;
+  min-width: 1.35rem;
+  height: auto;
+  padding: 0.15rem 0.35rem;
+  border: 1px solid #888;
+  border-radius: 4px;
+  background: #4a4a4a;
+  color: #f1f1f1;
+  font-size: 0.75rem;
+  line-height: 1.2;
+  cursor: pointer;
+}
+
+.yomup-pdf-mode-btn.active {
+  background: #5c3a3a;
+  border-color: #c97878;
+  color: #fde8e8;
+}
+
 #yomup-pdf-title {
   font-weight: 600;
 }
