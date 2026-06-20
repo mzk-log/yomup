@@ -2680,8 +2680,8 @@ function inlineTextHostAcceptsHoverPoint(el, clientX, clientY) {
   if (getContainingTextRectsForPoint(el, clientX, clientY).length > 0) {
     return true;
   }
-  // Gemini sequence: 行幅 div 内のテキスト右空白（NK-4 相当・領域限定）
-  if (isGeminiSequenceTextUnit(el)) {
+  // Gemini sequence / leaf-text-div: 行幅 div 内のテキスト右空白（NK-4 相当・領域限定）
+  if (isGeminiSequenceTextUnit(el) || isLeafTextDivElement(el)) {
     const rect = el.getBoundingClientRect();
     if (
       rect.width > 0 && rect.height > 0 &&
@@ -2890,6 +2890,83 @@ function findFaqAnswerBlockFromPoint(clientX, clientY) {
   if (!(block.textContent || '').trim()) return null;
 
   return { mode: 'element', element: block };
+}
+
+function isLeafTextDivElement(el) {
+  if (!el || el.tagName !== 'DIV') return false;
+  if (isYomupUiElement(el) || isEditableElement(el)) return false;
+  if (isHighlightExcludedCodeElement(el)) return false;
+  if (hasDirectElementChild(el)) return false;
+  const text = (el.textContent || '').trim();
+  if (!text) return false;
+  if (text.length > MAX_TEXT_LENGTH_FOR_HIGHLIGHT + HIGHLIGHT_UNIT_SLACK_JA) return false;
+  if (countWords(text) > MAX_WORDS_FOR_HIGHLIGHT + HIGHLIGHT_UNIT_SLACK_EN) return false;
+  return true;
+}
+
+function isLeafTextDivExcludedContext(el) {
+  if (!el) return true;
+  if (isNodeInsideTable(el)) return true;
+  if (isWithinUiChromeRegion(el)) return true;
+
+  let ancestor = el.parentElement;
+  while (ancestor && ancestor !== document.body && ancestor !== document.documentElement) {
+    if (isBrFlowContainer(ancestor)) return true;
+    ancestor = ancestor.parentElement;
+  }
+
+  if (isRubyBrBlockHost()) {
+    if (hasRubyBrBlockAozoraStructuralSignature(el)) return true;
+    let aozoraAncestor = el.parentElement;
+    while (aozoraAncestor && aozoraAncestor !== document.body && aozoraAncestor !== document.documentElement) {
+      if (hasRubyBrBlockAozoraStructuralSignature(aozoraAncestor)) return true;
+      aozoraAncestor = aozoraAncestor.parentElement;
+    }
+  }
+
+  if (el.closest && el.closest('.faq-answer')) return true;
+  if (isGhostOverlayLink(el)) return true;
+  if (isCardCellStructure(el)) return true;
+
+  let cardAncestor = el.parentElement;
+  while (cardAncestor && cardAncestor !== document.body && cardAncestor !== document.documentElement) {
+    if (isCardCellStructure(cardAncestor)) {
+      return !(cardAncestor === el.parentElement && el.tagName === 'DIV');
+    }
+    cardAncestor = cardAncestor.parentElement;
+  }
+
+  return false;
+}
+
+function findLeafTextDivBlockFromPoint(clientX, clientY) {
+  if (isGhostOverlayAtPoint(clientX, clientY)) return null;
+
+  let node = getPointReferenceNode(clientX, clientY);
+  if (node && node.nodeType === Node.TEXT_NODE) {
+    node = node.parentElement;
+  }
+  if (!node) {
+    node = document.elementFromPoint(clientX, clientY);
+  }
+
+  while (node && node !== document.body && node !== document.documentElement) {
+    if (isYomupUiElement(node) || isEditableElement(node)) return null;
+    if (isHighlightExcludedCodeElement(node)) {
+      node = node.parentElement;
+      continue;
+    }
+    if (node.tagName === 'DIV') {
+      if (isLeafTextDivElement(node) && !isLeafTextDivExcludedContext(node)) {
+        if (inlineTextHostAcceptsHoverPoint(node, clientX, clientY)) {
+          return { mode: 'inline-text', element: node };
+        }
+        return null;
+      }
+    }
+    node = node.parentElement;
+  }
+  return null;
 }
 
 function isRubyBrBlockHost() {
@@ -3197,6 +3274,9 @@ function findHighlightBlockFromPoint(clientX, clientY) {
 
   const faqAnswer = findFaqAnswerBlockFromPoint(clientX, clientY);
   if (faqAnswer) return faqAnswer;
+
+  const leafTextDiv = findLeafTextDivBlockFromPoint(clientX, clientY);
+  if (leafTextDiv) return leafTextDiv;
 
   const rubyBrBlock = findRubyBrBlockFromPoint(clientX, clientY);
   if (rubyBrBlock) return rubyBrBlock;
