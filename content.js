@@ -32,6 +32,7 @@ let subPopupOnOff = false; // 機能が有効かどうかのフラグ
 let countDownTimerForSub = 0;
 let countDownIntervalForSub = null; // カウントダウンタイマーのIDを保存
 let highlightProgressSession = null; // §19: ライン進行の一時停止／再開セッション
+let highlightProgressCountdownInterval = null; // §21: ライン進行用カウントダウン（部分タイマーと分離）
 
 // ドラッグ移動機能用の変数
 let isDragging = false; // ドラッグ中かどうかのフラグ
@@ -1438,7 +1439,7 @@ function handleMouseMove(event) {
   }
 
   // §19: ライン進行中は下線オーバーレイ上の移動で再描画しない
-  if (highlightProgressSession && countDownTimerForSub > 0) {
+  if (highlightProgressSession && getHighlightProgressRemainingSeconds() > 0) {
     if (isPointInCurrentHighlightOverlay(event.clientX, event.clientY)) {
       return;
     }
@@ -3793,6 +3794,7 @@ function ensureHighlightOverlayRoot() {
 
 function clearHighlightOverlay() {
   stopHighlightUnderlineProgress();
+  clearHighlightProgressCountdown();
   resetHighlightProgressSession();
   if (highlightOverlayRoot) {
     highlightOverlayRoot.textContent = '';
@@ -4011,6 +4013,55 @@ function resetHighlightProgressSession() {
   highlightProgressSession = null;
 }
 
+function clearHighlightProgressCountdown() {
+  if (highlightProgressCountdownInterval) {
+    clearInterval(highlightProgressCountdownInterval);
+    highlightProgressCountdownInterval = null;
+  }
+}
+
+function getHighlightProgressRemainingSeconds() {
+  if (!highlightProgressSession) return 0;
+  return highlightProgressSession.remainingSeconds || 0;
+}
+
+function startHighlightProgressCountdown() {
+  clearHighlightProgressCountdown();
+  if (!highlightProgressSession) return;
+
+  highlightProgressCountdownInterval = setInterval(() => {
+    if (!highlightProgressSession || highlightProgressSession.paused) return;
+    highlightProgressSession.remainingSeconds--;
+    if (highlightProgressSession.remainingSeconds <= 0) {
+      clearHighlightProgressCountdown();
+      resetHighlightProgressSession();
+    }
+  }, 1000);
+}
+
+function startHighlightLineProgress(unitCount, languageMode, progressTarget = null) {
+  const readTime = calculateReadingTime(unitCount, languageMode);
+  clearHighlightProgressCountdown();
+  resetHighlightProgressSession();
+
+  if (!isHighlightUnderlineProgressMode()) {
+    startHighlightUnderlineProgress(readTime);
+    return;
+  }
+
+  highlightProgressSession = {
+    unitCount,
+    readTime,
+    languageMode,
+    unitLabel: getUnitLabel(languageMode),
+    paused: false,
+    remainingSeconds: readTime,
+    target: progressTarget
+  };
+  startHighlightUnderlineProgress(readTime);
+  startHighlightProgressCountdown();
+}
+
 function captureHighlightProgressTarget(highlightBlock, chunk) {
   return {
     mode: highlightBlock.mode,
@@ -4160,7 +4211,6 @@ function startCountdownSubPopupInterval(unitCount, readTime, unitLabel) {
           clearInterval(countDownIntervalForSub);
           countDownIntervalForSub = null;
         }
-        resetHighlightProgressSession();
       }
     } catch (error) {
       debugError('カウントダウン更新中にエラーが発生:', error);
@@ -4174,24 +4224,21 @@ function startCountdownSubPopupInterval(unitCount, readTime, unitLabel) {
 
 function pauseHighlightProgress() {
   if (!highlightProgressSession || highlightProgressSession.paused) return;
-  if (countDownTimerForSub <= 0) return;
+  if (getHighlightProgressRemainingSeconds() <= 0) return;
 
+  clearHighlightProgressCountdown();
   pauseHighlightUnderlineProgress();
-  if (countDownIntervalForSub) {
-    clearInterval(countDownIntervalForSub);
-    countDownIntervalForSub = null;
-  }
   highlightProgressSession.paused = true;
   debugLog('ライン進行を一時停止しました');
 }
 
 function resumeHighlightProgress() {
   if (!highlightProgressSession || !highlightProgressSession.paused) return;
-  if (countDownTimerForSub <= 0) return;
+  const remaining = highlightProgressSession.remainingSeconds || 0;
+  if (remaining <= 0) return;
 
-  const session = highlightProgressSession;
-  resumeHighlightUnderlineProgress(countDownTimerForSub);
-  startCountdownSubPopupInterval(session.unitCount, session.readTime, session.unitLabel);
+  resumeHighlightUnderlineProgress(remaining);
+  startHighlightProgressCountdown();
   highlightProgressSession.paused = false;
   debugLog('ライン進行を再開しました');
 }
@@ -4205,7 +4252,7 @@ function handleProgressPauseClick(event) {
   if (!highLightOnOff) return;
   if (!isHighlightUnderlineProgressMode()) return;
   if (!highlightProgressSession) return;
-  if (countDownTimerForSub <= 0) return;
+  if (getHighlightProgressRemainingSeconds() <= 0) return;
   if (isYomupUiElement(event.target)) return;
 
   const root = highlightOverlayRoot;
@@ -4473,11 +4520,11 @@ function tryHighlightLogicalBlockAtPoint(clientX, clientY) {
     if (!overlayApplied) return false;
 
     const units = countUnits(chunk.text, languageMode);
-    startCountdownSubPopup(
-      units,
-      languageMode,
-      captureHighlightProgressTarget(highlightBlock, chunk)
-    );
+    const progressTarget = captureHighlightProgressTarget(highlightBlock, chunk);
+    if (subPopupOnOff) {
+      startCountdownSubPopup(units, languageMode);
+    }
+    startHighlightLineProgress(units, languageMode, progressTarget);
     debugLog(
       'logical chunk',
       highlightBlock.mode,
@@ -4704,7 +4751,10 @@ function highlightElement(element, clientX, clientY) {
       const finalLanguageMode = detectLanguageMode(finalText, highlightTarget);
       const finalUnits = countUnits(finalText, finalLanguageMode);
       applyHighlight(highlightTarget);
-      startCountdownSubPopup(finalUnits, finalLanguageMode);
+      if (subPopupOnOff) {
+        startCountdownSubPopup(finalUnits, finalLanguageMode);
+      }
+      startHighlightLineProgress(finalUnits, finalLanguageMode);
     }
   } catch (error) {
     debugError('highlightElement処理中にエラーが発生:', error);
@@ -5586,26 +5636,16 @@ function applyHighlight(element) {
 
 
 // === カウントダウン開始関数 ==================================================
-function startCountdownSubPopup(unitCount, languageMode = LANGUAGE_MODE_JA, progressTarget = null) {
+function startCountdownSubPopup(unitCount, languageMode = LANGUAGE_MODE_JA) {
   try {
     const unitLabel = getUnitLabel(languageMode);
     const readTime = calculateReadingTime(unitCount, languageMode);
     countDownTimerForSub = readTime;
 
-    highlightProgressSession = {
-      unitCount,
-      readTime,
-      languageMode,
-      unitLabel,
-      paused: false,
-      target: progressTarget
-    };
-
     startCountdownSubPopupInterval(unitCount, readTime, unitLabel);
 
     // ポップアップの文字数を更新
     updateSubPopupCharCount(unitCount, readTime, unitLabel);
-    startHighlightUnderlineProgress(readTime);
 
     debugLog(`単位: ${unitCount}${unitLabel}, 読書: ${readTime}秒`);
   } catch (error) {
@@ -6018,6 +6058,7 @@ function cleanupAllListeners() {
       clearInterval(countDownIntervalForSub);
       countDownIntervalForSub = null;
     }
+    clearHighlightProgressCountdown();
     resetHighlightProgressSession();
     if (popupViewportResizeDebounceTimer) {
       clearTimeout(popupViewportResizeDebounceTimer);

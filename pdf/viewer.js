@@ -10,7 +10,7 @@ import {
   LANGUAGE_MODE_JA,
   LANGUAGE_MODE_EN
 } from './highlight-core.js';
-import { initTimerPanel, startHighlightTimer, clearHighlightTimer, bindTimerToolbarToggle, pauseHighlightTimer, resumeHighlightTimer, getCountDownRemaining } from './timer-panel.js';
+import { initTimerPanel, startHighlightTimer, clearHighlightTimer, bindTimerToolbarToggle } from './timer-panel.js';
 import { initStopwatchPanel, bindStopwatchToolbarToggle } from './stopwatch-panel.js';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = chrome.runtime.getURL('vendor/pdf.worker.mjs');
@@ -51,6 +51,7 @@ let highlightListenersAttached = false;
 let highlightToggleInitialized = false;
 let selectionStatsListenerInitialized = false;
 let highlightProgressSession = null;
+let highlightProgressCountdownInterval = null;
 
 function loadHighlightModeFromStorage() {
   const saved = localStorage.getItem(HIGHLIGHT_STORAGE_KEY);
@@ -477,6 +478,7 @@ function ensureHighlightOverlayRoot() {
 
 function clearHighlightOverlay() {
   stopHighlightUnderlineProgress();
+  clearHighlightProgressCountdown();
   resetHighlightProgressSession();
   if (highlightOverlayRoot) {
     highlightOverlayRoot.textContent = '';
@@ -667,6 +669,27 @@ function resetHighlightProgressSession() {
   highlightProgressSession = null;
 }
 
+function clearHighlightProgressCountdown() {
+  if (highlightProgressCountdownInterval) {
+    clearInterval(highlightProgressCountdownInterval);
+    highlightProgressCountdownInterval = null;
+  }
+}
+
+function startHighlightProgressCountdown() {
+  clearHighlightProgressCountdown();
+  if (!highlightProgressSession) return;
+
+  highlightProgressCountdownInterval = setInterval(() => {
+    if (!highlightProgressSession || highlightProgressSession.paused) return;
+    highlightProgressSession.remainingSeconds--;
+    if (highlightProgressSession.remainingSeconds <= 0) {
+      clearHighlightProgressCountdown();
+      resetHighlightProgressSession();
+    }
+  }, 1000);
+}
+
 function capturePdfHighlightProgressTarget(pageModel, ctx, chunk) {
   return {
     pageNum: pageModel.pageNum,
@@ -768,19 +791,15 @@ function resumeHighlightUnderlineProgress(remainingSeconds) {
 
 function getHighlightProgressRemainingSeconds() {
   if (!highlightProgressSession) return 0;
-  if (highlightProgressSession.paused) {
-    return highlightProgressSession.remainingSeconds || 0;
-  }
-  return getCountDownRemaining();
+  return highlightProgressSession.remainingSeconds || 0;
 }
 
 function pauseHighlightProgress() {
   if (!highlightProgressSession || highlightProgressSession.paused) return;
   if (getHighlightProgressRemainingSeconds() <= 0) return;
 
-  highlightProgressSession.remainingSeconds = getCountDownRemaining() || highlightProgressSession.readTime;
+  clearHighlightProgressCountdown();
   pauseHighlightUnderlineProgress();
-  pauseHighlightTimer();
   highlightProgressSession.paused = true;
 }
 
@@ -790,7 +809,7 @@ function resumeHighlightProgress() {
   if (remaining <= 0) return;
 
   resumeHighlightUnderlineProgress(remaining);
-  resumeHighlightTimer();
+  startHighlightProgressCountdown();
   highlightProgressSession.paused = false;
 }
 
@@ -1101,6 +1120,7 @@ function tryHighlightAtPoint(clientX, clientY) {
       remainingSeconds: readTime,
       target: capturePdfHighlightProgressTarget(pageModel, ctx, chunk)
     };
+    startHighlightProgressCountdown();
   }
 }
 

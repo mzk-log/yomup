@@ -169,21 +169,20 @@ export function bindTimerToolbarToggle() {
 }
 
 export function startHighlightTimer(unitCount, languageMode) {
+  if (!enabled) return;
+  buildPanelIfNeeded();
+
   const unitLabel = getUnitLabel(languageMode);
   const readTime = calculateReadingTime(unitCount, languageMode);
   countDownRemaining = readTime;
   activeTimerContext = { unitCount, readTime, unitLabel };
 
-  if (enabled) {
-    buildPanelIfNeeded();
-    updateCharCountDisplay(unitCount, readTime, unitLabel);
-  }
-
+  updateCharCountDisplay(unitCount, readTime, unitLabel);
   startHighlightTimerInterval();
 }
 
 function startHighlightTimerInterval() {
-  if (!activeTimerContext) return;
+  if (!enabled || !activeTimerContext) return;
   const { unitCount, readTime, unitLabel } = activeTimerContext;
   if (countDownRemaining <= 0) return;
 
@@ -194,26 +193,13 @@ function startHighlightTimerInterval() {
 
   countDownInterval = setInterval(() => {
     countDownRemaining -= 1;
-    if (enabled) {
-      updateCharCountDisplay(unitCount, readTime, unitLabel);
-    }
+    updateCharCountDisplay(unitCount, readTime, unitLabel);
     if (countDownRemaining <= 0 && countDownInterval) {
       clearInterval(countDownInterval);
       countDownInterval = null;
       activeTimerContext = null;
     }
   }, 1000);
-}
-
-export function pauseHighlightTimer() {
-  if (countDownInterval) {
-    clearInterval(countDownInterval);
-    countDownInterval = null;
-  }
-}
-
-export function resumeHighlightTimer() {
-  startHighlightTimerInterval();
 }
 
 export function getCountDownRemaining() {
