@@ -1838,12 +1838,17 @@ function isBlockHighlightContainer(el) {
   return !!(el && el.tagName && BLOCK_ANCESTOR_TAGS.has(el.tagName));
 }
 
-// pre 内 code は論理塊対象。それ以外の code 配下は従来どおり除外
+// pre 内 code は論理塊対象。pre 外の code は §26 でブロック内 segment に含める
+function isInlineCodeElement(el) {
+  if (!el || el.tagName !== 'CODE') return false;
+  return !(el.closest && el.closest('pre'));
+}
+
 function isHighlightExcludedCodeElement(el) {
   if (!el || !el.closest) return false;
   const codeEl = el.closest('code');
   if (!codeEl) return false;
-  return !(codeEl.closest && codeEl.closest('pre'));
+  return isInlineCodeElement(codeEl);
 }
 
 function getPointReferenceNode(clientX, clientY) {
@@ -3376,6 +3381,30 @@ function shouldIncludeTextNodeInBlock(node, blockElement) {
     if (blockElement && blockElement.tagName === 'CODE' && blockElement === codeEl) {
       return true;
     }
+    // §26: pre 外インライン code — ブロック（P 等）の segment に含める
+    if (isInlineCodeElement(codeEl)) {
+      if (
+        blockElement &&
+        blockElement !== codeEl &&
+        blockElement.contains(codeEl)
+      ) {
+        return true;
+      }
+      // heading-interval 等（blockElement 未指定・preBlock のみ）でも BLOCK_ANCESTOR 内なら含める
+      if (!blockElement || blockElement.tagName === 'PRE') {
+        let ancestor = codeEl.parentElement;
+        while (ancestor && ancestor !== document.body) {
+          if (
+            ancestor.tagName &&
+            BLOCK_ANCESTOR_TAGS.has(ancestor.tagName) &&
+            ancestor.tagName !== 'PRE'
+          ) {
+            return true;
+          }
+          ancestor = ancestor.parentElement;
+        }
+      }
+    }
     return false;
   }
   return true;
@@ -3563,7 +3592,6 @@ function collectBlockTextSegmentLines(block) {
         if (child.tagName === 'SCRIPT' || child.tagName === 'STYLE' || child.tagName === 'NOSCRIPT') {
           continue;
         }
-        if (!isPreBlock && child.tagName === 'CODE') continue;
         walkNodes(child);
       }
     }
@@ -3624,7 +3652,6 @@ function collectSectionTextSegmentLines(sectionRoot, startHeading, endHeading) {
         if (child.tagName === 'SCRIPT' || child.tagName === 'STYLE' || child.tagName === 'NOSCRIPT') {
           continue;
         }
-        if (!preBlock && child.tagName === 'CODE') continue;
         walkNodes(child, preBlock);
       }
     }
