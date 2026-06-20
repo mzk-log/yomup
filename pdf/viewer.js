@@ -10,7 +10,7 @@ import {
   LANGUAGE_MODE_JA,
   LANGUAGE_MODE_EN
 } from './highlight-core.js';
-import { initTimerPanel, startHighlightTimer, clearHighlightTimer, bindTimerToolbarToggle } from './timer-panel.js';
+import { initTimerPanel, startHighlightTimer, clearHighlightTimer, bindTimerToolbarToggle, pauseHighlightTimer, resumeHighlightTimer, getCountDownRemaining } from './timer-panel.js';
 import { initStopwatchPanel, bindStopwatchToolbarToggle } from './stopwatch-panel.js';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = chrome.runtime.getURL('vendor/pdf.worker.mjs');
@@ -50,6 +50,7 @@ let highLightOnOff = false;
 let highlightListenersAttached = false;
 let highlightToggleInitialized = false;
 let selectionStatsListenerInitialized = false;
+let highlightProgressSession = null;
 
 function loadHighlightModeFromStorage() {
   const saved = localStorage.getItem(HIGHLIGHT_STORAGE_KEY);
@@ -476,6 +477,7 @@ function ensureHighlightOverlayRoot() {
 
 function clearHighlightOverlay() {
   stopHighlightUnderlineProgress();
+  resetHighlightProgressSession();
   if (highlightOverlayRoot) {
     highlightOverlayRoot.textContent = '';
   }
@@ -497,6 +499,29 @@ function isPointInCurrentHighlightRects(clientX, clientY) {
     }
   }
   return false;
+}
+
+function isPointInCurrentHighlightOverlay(clientX, clientY) {
+  if (!highlightOverlayRoot) return false;
+  const segments = highlightOverlayRoot.querySelectorAll('.yomup-pdf-highlight-underline-segment');
+  const linePad = RECT_MERGE_LINE_TOLERANCE_PX;
+  for (const segment of segments) {
+    const rect = segment.getBoundingClientRect();
+    if (
+      clientX >= rect.left &&
+      clientX <= rect.right &&
+      clientY >= rect.top - linePad &&
+      clientY <= rect.bottom + linePad
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function isPdfYomupUiElement(el) {
+  if (!el || typeof el.closest !== 'function') return false;
+  return !!el.closest('#yomup-pdf-timer-panel, #yomup-pdf-toolbar, #yomup-pdf-stopwatch-panel');
 }
 
 function mergeHighlightClientRects(rectList) {
@@ -635,6 +660,159 @@ function stopHighlightUnderlineProgress() {
   const progressEls = highlightOverlayRoot.querySelectorAll('.yomup-pdf-highlight-underline-progress');
   for (const el of progressEls) {
     el.style.transition = '';
+  }
+}
+
+function resetHighlightProgressSession() {
+  highlightProgressSession = null;
+}
+
+function capturePdfHighlightProgressTarget(pageModel, ctx, chunk) {
+  return {
+    pageNum: pageModel.pageNum,
+    contextLength: ctx.blockText.length,
+    chunkStart: chunk.start,
+    chunkEnd: chunk.end
+  };
+}
+
+function isSamePdfHighlightProgressTarget(pageModel, ctx, chunk) {
+  if (!highlightProgressSession || !highlightProgressSession.target) return false;
+  const target = highlightProgressSession.target;
+  return target.pageNum === pageModel.pageNum &&
+    target.contextLength === ctx.blockText.length &&
+    target.chunkStart === chunk.start &&
+    target.chunkEnd === chunk.end;
+}
+
+function getHighlightProgressElWidthPx(progressEl) {
+  const styleWidth = parseFloat(progressEl.style.width);
+  if (Number.isFinite(styleWidth) && styleWidth > 0) return styleWidth;
+  return parseFloat(getComputedStyle(progressEl).width) || 0;
+}
+
+function pauseHighlightUnderlineProgress() {
+  if (!highlightOverlayRoot) return;
+  const progressEls = highlightOverlayRoot.querySelectorAll('.yomup-pdf-highlight-underline-progress');
+  for (const el of progressEls) {
+    const frozenWidth = getComputedStyle(el).width;
+    el.style.transition = 'none';
+    el.style.width = frozenWidth;
+  }
+}
+
+function resumeHighlightUnderlineProgress(remainingSeconds) {
+  if (!usesHighlightUnderlineSegmentLayer() || !window.isHighlightUnderlineProgressMode()) return;
+
+  const root = ensureHighlightOverlayRoot();
+  const boxes = root.querySelectorAll('.yomup-pdf-highlight-underline-segment');
+  if (boxes.length === 0) return;
+
+  const minSeconds = window.HIGHLIGHT_UNDERLINE_PROGRESS_MIN_SECONDS ?? 0.3;
+  const duration = Math.max(minSeconds, remainingSeconds || 0);
+  const lineTolerance = RECT_MERGE_LINE_TOLERANCE_PX;
+
+  const sortedBoxes = Array.from(boxes).sort((a, b) =>
+    compareHighlightUnderlineReadingOrder(a, b, lineTolerance)
+  );
+
+  let totalRemainingWidth = 0;
+  for (const segment of sortedBoxes) {
+    const fullWidth = parseFloat(segment.dataset.fullWidth) || 0;
+    const progressEl = getHighlightUnderlineProgressEl(segment);
+    if (!fullWidth || !progressEl) continue;
+    const currentWidth = getHighlightProgressElWidthPx(progressEl);
+    totalRemainingWidth += Math.max(0, fullWidth - currentWidth);
+  }
+  if (totalRemainingWidth <= 0) return;
+
+  void root.offsetHeight;
+
+  const lineGroups = groupHighlightUnderlineBoxesByLine(sortedBoxes, lineTolerance);
+  let delay = 0;
+  for (const group of lineGroups) {
+    let lineRemainingWidth = 0;
+    for (const segment of group) {
+      const fullWidth = parseFloat(segment.dataset.fullWidth) || 0;
+      const progressEl = getHighlightUnderlineProgressEl(segment);
+      if (!fullWidth || !progressEl) continue;
+      const currentWidth = getHighlightProgressElWidthPx(progressEl);
+      lineRemainingWidth += Math.max(0, fullWidth - currentWidth);
+    }
+    if (lineRemainingWidth <= 0) continue;
+
+    const lineDuration = duration * (lineRemainingWidth / totalRemainingWidth);
+    let lineDelay = delay;
+    for (const segment of group) {
+      const fullWidth = parseFloat(segment.dataset.fullWidth);
+      const progressEl = getHighlightUnderlineProgressEl(segment);
+      if (!fullWidth || !progressEl) continue;
+      const currentWidth = getHighlightProgressElWidthPx(progressEl);
+      const remainingWidth = Math.max(0, fullWidth - currentWidth);
+      if (remainingWidth <= 0.5) {
+        progressEl.style.transition = 'none';
+        progressEl.style.width = `${fullWidth}px`;
+        continue;
+      }
+
+      const segmentDuration = lineRemainingWidth > 0
+        ? lineDuration * (remainingWidth / lineRemainingWidth)
+        : lineDuration;
+      progressEl.style.transition = `width ${segmentDuration}s linear ${lineDelay}s`;
+      progressEl.style.width = `${fullWidth}px`;
+      lineDelay += segmentDuration;
+    }
+    delay += lineDuration;
+  }
+}
+
+function getHighlightProgressRemainingSeconds() {
+  if (!highlightProgressSession) return 0;
+  if (highlightProgressSession.paused) {
+    return highlightProgressSession.remainingSeconds || 0;
+  }
+  return getCountDownRemaining();
+}
+
+function pauseHighlightProgress() {
+  if (!highlightProgressSession || highlightProgressSession.paused) return;
+  if (getHighlightProgressRemainingSeconds() <= 0) return;
+
+  highlightProgressSession.remainingSeconds = getCountDownRemaining() || highlightProgressSession.readTime;
+  pauseHighlightUnderlineProgress();
+  pauseHighlightTimer();
+  highlightProgressSession.paused = true;
+}
+
+function resumeHighlightProgress() {
+  if (!highlightProgressSession || !highlightProgressSession.paused) return;
+  const remaining = highlightProgressSession.remainingSeconds || 0;
+  if (remaining <= 0) return;
+
+  resumeHighlightUnderlineProgress(remaining);
+  resumeHighlightTimer();
+  highlightProgressSession.paused = false;
+}
+
+function resetHighlightProgressOnSettingsChange() {
+  resetHighlightProgressSession();
+  clearHighlightState();
+}
+
+function handleProgressPauseClick(event) {
+  if (!highLightOnOff || !highlightListenersAttached) return;
+  if (!isHighlightUnderlineProgressEnabled()) return;
+  if (!highlightProgressSession) return;
+  if (getHighlightProgressRemainingSeconds() <= 0) return;
+  if (isPdfYomupUiElement(event.target)) return;
+
+  const root = highlightOverlayRoot;
+  if (!root || !root.querySelector('.yomup-pdf-highlight-underline-segment')) return;
+
+  if (highlightProgressSession.paused) {
+    resumeHighlightProgress();
+  } else {
+    pauseHighlightProgress();
   }
 }
 
@@ -902,11 +1080,28 @@ function tryHighlightAtPoint(clientX, clientY) {
     return;
   }
 
+  if (highlightProgressSession && isSamePdfHighlightProgressTarget(pageModel, ctx, chunk)) {
+    return;
+  }
+
   applyHighlightOverlayRects(rects);
   currentHighlightHitRects = rects;
   const units = countUnits(chunk.text, languageMode);
-  startHighlightUnderlineProgress(calculateReadingTime(units, languageMode));
+  const readTime = calculateReadingTime(units, languageMode);
+  startHighlightUnderlineProgress(readTime);
   startHighlightTimer(units, languageMode);
+
+  if (isHighlightUnderlineProgressEnabled()) {
+    highlightProgressSession = {
+      unitCount: units,
+      readTime,
+      languageMode,
+      unitLabel: getUnitLabel(languageMode),
+      paused: false,
+      remainingSeconds: readTime,
+      target: capturePdfHighlightProgressTarget(pageModel, ctx, chunk)
+    };
+  }
 }
 
 function handleMouseMove(event) {
@@ -916,6 +1111,12 @@ function handleMouseMove(event) {
 
   if (isPointInCurrentHighlightRects(event.clientX, event.clientY)) {
     return;
+  }
+
+  if (highlightProgressSession && getHighlightProgressRemainingSeconds() > 0) {
+    if (isPointInCurrentHighlightOverlay(event.clientX, event.clientY)) {
+      return;
+    }
   }
 
   if (mouseTimeoutForHighlight) {
@@ -951,6 +1152,7 @@ function attachHighlightListeners() {
   const container = document.getElementById('yomup-pdf-container');
   container.addEventListener('mousemove', handleMouseMove);
   container.addEventListener('mouseleave', handleMouseLeave);
+  document.addEventListener('click', handleProgressPauseClick, true);
   window.addEventListener('scroll', handleViewportChange, true);
   window.addEventListener('resize', handleViewportChange);
 }
@@ -961,6 +1163,7 @@ function detachHighlightListeners() {
   const container = document.getElementById('yomup-pdf-container');
   container.removeEventListener('mousemove', handleMouseMove);
   container.removeEventListener('mouseleave', handleMouseLeave);
+  document.removeEventListener('click', handleProgressPauseClick, true);
   window.removeEventListener('scroll', handleViewportChange, true);
   window.removeEventListener('resize', handleViewportChange);
   if (mouseTimeoutForHighlight) {
@@ -997,10 +1200,13 @@ function initReadingSettingsToolbar() {
     window.saveReadingSpeedCharsPerMin(Number(select.value));
     updateDocumentStatsDisplay(pageModels);
     updateSelectionStatsDisplay();
+    if (highlightProgressSession) {
+      resetHighlightProgressOnSettingsChange();
+    }
   });
 
   if (typeof window.bindReadingModeToggleButton === 'function') {
-    window.bindReadingModeToggleButton(progressBtn, () => clearHighlightState());
+    window.bindReadingModeToggleButton(progressBtn, resetHighlightProgressOnSettingsChange);
   }
 }
 

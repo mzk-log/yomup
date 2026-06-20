@@ -6,6 +6,7 @@ const VISIBILITY_KEY = 'subPopupOnOff';
 
 let countDownInterval = null;
 let countDownRemaining = 0;
+let activeTimerContext = null;
 let panelEl = null;
 let charCountEl = null;
 let dragState = null;
@@ -168,28 +169,55 @@ export function bindTimerToolbarToggle() {
 }
 
 export function startHighlightTimer(unitCount, languageMode) {
-  if (!enabled) return;
-  buildPanelIfNeeded();
-
   const unitLabel = getUnitLabel(languageMode);
   const readTime = calculateReadingTime(unitCount, languageMode);
   countDownRemaining = readTime;
+  activeTimerContext = { unitCount, readTime, unitLabel };
+
+  if (enabled) {
+    buildPanelIfNeeded();
+    updateCharCountDisplay(unitCount, readTime, unitLabel);
+  }
+
+  startHighlightTimerInterval();
+}
+
+function startHighlightTimerInterval() {
+  if (!activeTimerContext) return;
+  const { unitCount, readTime, unitLabel } = activeTimerContext;
+  if (countDownRemaining <= 0) return;
 
   if (countDownInterval) {
     clearInterval(countDownInterval);
     countDownInterval = null;
   }
 
-  updateCharCountDisplay(unitCount, readTime, unitLabel);
-
   countDownInterval = setInterval(() => {
     countDownRemaining -= 1;
-    updateCharCountDisplay(unitCount, readTime, unitLabel);
+    if (enabled) {
+      updateCharCountDisplay(unitCount, readTime, unitLabel);
+    }
     if (countDownRemaining <= 0 && countDownInterval) {
       clearInterval(countDownInterval);
       countDownInterval = null;
+      activeTimerContext = null;
     }
   }, 1000);
+}
+
+export function pauseHighlightTimer() {
+  if (countDownInterval) {
+    clearInterval(countDownInterval);
+    countDownInterval = null;
+  }
+}
+
+export function resumeHighlightTimer() {
+  startHighlightTimerInterval();
+}
+
+export function getCountDownRemaining() {
+  return countDownRemaining;
 }
 
 export function clearHighlightTimer() {
@@ -197,6 +225,8 @@ export function clearHighlightTimer() {
     clearInterval(countDownInterval);
     countDownInterval = null;
   }
+  countDownRemaining = 0;
+  activeTimerContext = null;
   if (charCountEl) {
     charCountEl.style.display = 'none';
   }
