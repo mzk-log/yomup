@@ -1,9 +1,9 @@
 {
   "manifest_version": 3,
   "default_locale": "ja",
-  "name": "読むプ ： ハイライト・タイマーで集中Web読書",
-  "version": "3.2.255",
-  "description": "ハイライトで読みやすさを、タイマーでWeb読書への集中を支援します。",
+  "name": "読むプ ： ハイライト・タイマーで集中Web/PDF読書",
+  "version": "3.2.0",
+  "description": "ハイライトとタイマーで、Web/PDF読書の読みやすさ・集中を支援します。",
   "permissions": [
     "contextMenus",
     "activeTab",

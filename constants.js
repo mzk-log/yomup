@@ -31,7 +31,7 @@ const PDF_PAGE_MENU = {
 };
 
 // 読むプバージョン（機能変更.不具合修正・改善.申請）
-const YOMUP_VERSION = "3.2.DEV";
+const YOMUP_VERSION = "3.2.0";
 
 
 // デバッグログ出力の有効/無効（コンパイルスイッチ）
@@ -111,7 +111,7 @@ const SESSIONSTRG_PAGE_TRANSITION = 'pageTransition'; //ページ遷移判定用
 const ENABLE_BUTTON_STATE_RESTORE = true; // true: 有効, false: 無効
 
 // §18: UI 言語の開発用オーバーライド（本番リリース時は false）
-const ENABLE_UI_LOCALE_OVERRIDE = true;
+const ENABLE_UI_LOCALE_OVERRIDE = false;
 const LOCALSTRG_UI_LOCALE_OVERRIDE = 'YomuP_uiLocaleOverride';
 
 // グローバルスコープに公開（Service Worker用）
