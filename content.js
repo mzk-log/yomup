@@ -319,7 +319,8 @@ function refreshYomuPPopupTotalInfo() {
 }
 
 function getCharCountInfo() {
-  const bodyText = getInnerTextExcludingRubyFurigana(document.body);
+  const pageRoot = findPageMainContentRoot();
+  const bodyText = getInnerTextExcludingRubyFurigana(pageRoot);
   const languageModeAll = detectLanguageMode(bodyText);
   const unitCountAll = countUnits(bodyText, languageModeAll);
   const readingTimeAll = calculateReadingTime(unitCountAll, languageModeAll);
@@ -403,19 +404,49 @@ function detectLanguageByHeuristic(text) {
   return LANGUAGE_MODE_JA;
 }
 
+// §25: ページ全体カウント用 — UI クロームを除き README / article 等を優先
+const PAGE_MAIN_CONTENT_MIN_CHARS = 50;
+const PAGE_MAIN_CONTENT_SELECTORS = [
+  '#readme article.markdown-body',
+  '#readme .markdown-body',
+  '#readme article',
+  '#readme',
+  'article.markdown-body',
+  'article',
+  'main',
+  '[role="main"]'
+];
+
+function findPageMainContentRoot() {
+  for (const selector of PAGE_MAIN_CONTENT_SELECTORS) {
+    const el = document.querySelector(selector);
+    if (!el) continue;
+    if (getInnerTextExcludingRubyFurigana(el).length >= PAGE_MAIN_CONTENT_MIN_CHARS) {
+      return el;
+    }
+  }
+  return document.body;
+}
+
 function detectLanguageMode(text, contextNode) {
+  const docElement = document.documentElement;
   let el = contextNode;
   if (el && el.nodeType === Node.TEXT_NODE) el = el.parentElement;
-  while (el && el.nodeType === Node.ELEMENT_NODE) {
+  // `<html lang>` は祖先走査に含めない（GitHub 等 UI=en + 本文=ja の誤判定防止・§25）
+  while (el && el.nodeType === Node.ELEMENT_NODE && el !== docElement) {
     const fromAttr = normalizeLangTag(el.getAttribute && el.getAttribute('lang'));
     if (fromAttr) return fromAttr;
     el = el.parentElement;
   }
 
-  const docLang = normalizeLangTag(document.documentElement.getAttribute('lang'));
+  if ((text || '').trim()) {
+    return detectLanguageByHeuristic(text);
+  }
+
+  const docLang = normalizeLangTag(docElement.getAttribute('lang'));
   if (docLang) return docLang;
 
-  return detectLanguageByHeuristic(text);
+  return LANGUAGE_MODE_JA;
 }
 
 
@@ -1159,7 +1190,8 @@ function showYomuPPopup(
   playIcon.appendChild(reloadButton);
   popup.appendChild(playIcon);
 
-  const pageLanguageMode = detectLanguageMode(document.body.innerText || '');
+  const pageRoot = findPageMainContentRoot();
+  const pageLanguageMode = detectLanguageMode(getInnerTextExcludingRubyFurigana(pageRoot));
   const readingSettingsRow = document.createElement('div');
   readingSettingsRow.className = 'reading-settings-row';
 
