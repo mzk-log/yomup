@@ -69,6 +69,14 @@ const BR_FLOW_BOUNDARY_TAGS = new Set(['H2', 'H3']);
 const CARD_CELL_MIN_TEXT_DIVS = 2;
 const CARD_CELL_MAX_DIRECT_CHILDREN = 8;
 const CARD_CELL_MIN_SIBLING_DIVS = 3;
+// ruby-br-block（§16）: 青空ホスト + DIV + br 区切り構造（ruby / クラス名は不問）
+const RUBY_BR_BLOCK_HOST = 'aozora.gr.jp';
+const RUBY_BR_BLOCK_MIN_BR_COUNT = 2;
+const RUBY_BR_BLOCK_MIN_TEXT_LENGTH = 30;
+const RUBY_BR_BLOCK_EXCLUDED_CLASSES = new Set([
+  'title', 'author', 'metadata', 'midashi_anchor'
+]);
+const AOZORA_ORPHAN_TEXT_PARENT_TAGS = new Set(['CENTER', 'BODY']);
 // dd 直下のブロック子要素を論理行境界とする（h4 + 概要 div 等の連結防止）
 const DD_CHILD_LINE_BREAK_TAGS = new Set([
   'H1', 'H2', 'H3', 'H4', 'H5', 'H6',
@@ -94,8 +102,15 @@ const BLOCK_LABEL_MAX_COLON_CHARS = 40;
 const BLOCK_LABEL_MAX_LEADING_PREFIX_CHARS = 4;
 let highlightOverlayRoot = null;
 let currentHighlightRange = null;
+let currentHighlightRects = null;
 
 function isPointInCurrentHighlight(clientX, clientY) {
+  if (currentHighlightRects && currentHighlightRects.length > 0) {
+    const rightPad = typeof HIGHLIGHT_STICKY_RIGHT_PADDING_PX !== 'undefined'
+      ? HIGHLIGHT_STICKY_RIGHT_PADDING_PX
+      : 0;
+    return clientPointInClientRects(currentHighlightRects, clientX, clientY, { rightPad });
+  }
   return !!(
     currentHighlightRange &&
     clientPointInStickyHighlightRects(currentHighlightRange, clientX, clientY)
@@ -222,6 +237,48 @@ function executeYomuP() {
 
 
 // === 文字数情報を取得する共通関数 ===========================================
+function removeRubyFuriganaFromSubtree(root) {
+  if (!root || !root.querySelectorAll) return;
+  const furiganaEls = root.querySelectorAll('rt, rp');
+  for (let i = furiganaEls.length - 1; i >= 0; i--) {
+    furiganaEls[i].remove();
+  }
+}
+
+function removeYomupUiFromSubtree(root) {
+  if (!root || !root.querySelectorAll) return;
+  const popup = root.querySelector('#' + ID_YOMUP_POPUP_CONTAINER);
+  if (popup) popup.remove();
+  const subPopup = root.querySelector('#' + ID_SUBPOPUP_CONTAINER);
+  if (subPopup) subPopup.remove();
+}
+
+function getInnerTextExcludingRubyFurigana(rootElement) {
+  if (!rootElement) return '';
+  const clone = rootElement.cloneNode(true);
+  removeRubyFuriganaFromSubtree(clone);
+  removeYomupUiFromSubtree(clone);
+  return (clone.innerText || '').trim();
+}
+
+function getRangeTextExcludingRubyFurigana(range) {
+  if (!range || range.collapsed) return '';
+  const fragment = range.cloneContents();
+  removeRubyFuriganaFromSubtree(fragment);
+  const div = document.createElement('div');
+  div.appendChild(fragment);
+  return div.innerText || div.textContent || '';
+}
+
+function getSelectionTextExcludingRubyFurigana(selection) {
+  if (!selection || selection.rangeCount === 0) return '';
+  let text = '';
+  for (let i = 0; i < selection.rangeCount; i++) {
+    text += getRangeTextExcludingRubyFurigana(selection.getRangeAt(i));
+  }
+  return text.trim();
+}
+
 function refreshYomuPPopupTotalInfo() {
   const existingPopup = document.getElementById(ID_YOMUP_POPUP_CONTAINER);
   if (!existingPopup?.shadowRoot) return;
@@ -234,13 +291,13 @@ function refreshYomuPPopupTotalInfo() {
 }
 
 function getCharCountInfo() {
-  const bodyText = document.body.innerText.trim();
+  const bodyText = getInnerTextExcludingRubyFurigana(document.body);
   const languageModeAll = detectLanguageMode(bodyText);
   const unitCountAll = countUnits(bodyText, languageModeAll);
   const readingTimeAll = calculateReadingTime(unitCountAll, languageModeAll);
 
   const selection = window.getSelection();
-  const selectedText = selection.toString().trim();
+  const selectedText = getSelectionTextExcludingRubyFurigana(selection);
   const hasSelection = selectedText.length > 0;
   const languageModeSelected = hasSelection
     ? detectLanguageMode(selectedText, selection.anchorNode)
@@ -2249,21 +2306,24 @@ function isLikelyNikkeiPrAdRoot(el) {
   return !!el.closest('a[href*="pub_click"]');
 }
 
-function clientPointInRangeClientRects(range, clientX, clientY) {
-  if (!range) return false;
-  const lineTolerance = HIGHLIGHT_RECT_MERGE_LINE_TOLERANCE_PX;
-  const rects = range.getClientRects();
+function clientPointInClientRects(rects, clientX, clientY, options) {
+  if (!rects || rects.length === 0) return false;
+  const opts = options || {};
+  const rightPad = opts.rightPad || 0;
+  const lineTolerance = opts.lineTolerance || 0;
   for (let i = 0; i < rects.length; i++) {
     const rect = rects[i];
     if (rect.width <= 0 || rect.height <= 0) continue;
     if (
-      clientX >= rect.left && clientX <= rect.right &&
-      clientY >= rect.top && clientY <= rect.bottom
+      clientX >= rect.left &&
+      clientX <= rect.right + rightPad &&
+      clientY >= rect.top &&
+      clientY <= rect.bottom
     ) {
       return true;
     }
-    // 同一行帯ならテキスト右の空白 hover を許容（PR 誤光りは縦方向のずれで除外）
     if (
+      lineTolerance > 0 &&
       clientY >= rect.top - lineTolerance &&
       clientY <= rect.bottom + lineTolerance
     ) {
@@ -2271,6 +2331,16 @@ function clientPointInRangeClientRects(range, clientX, clientY) {
     }
   }
   return false;
+}
+
+function clientPointInRangeClientRects(range, clientX, clientY) {
+  if (!range) return false;
+  return clientPointInClientRects(
+    Array.from(range.getClientRects()),
+    clientX,
+    clientY,
+    { lineTolerance: HIGHLIGHT_RECT_MERGE_LINE_TOLERANCE_PX }
+  );
 }
 
 function clientPointInStickyHighlightRects(range, clientX, clientY) {
@@ -2766,6 +2836,94 @@ function findFaqAnswerBlockFromPoint(clientX, clientY) {
   return { mode: 'element', element: block };
 }
 
+function isRubyBrBlockHost() {
+  const host = location.hostname || '';
+  return host === RUBY_BR_BLOCK_HOST || host.endsWith('.' + RUBY_BR_BLOCK_HOST);
+}
+
+function isRubyBrBlockExcludedContainer(el) {
+  if (!el || !el.classList) return false;
+  for (const cls of RUBY_BR_BLOCK_EXCLUDED_CLASSES) {
+    if (el.classList.contains(cls)) return true;
+  }
+  return false;
+}
+
+function hasRubyBrBlockAozoraStructuralSignature(el) {
+  if (!el || el.tagName !== 'DIV') return false;
+  if (isRubyBrBlockExcludedContainer(el)) return false;
+  if (el.querySelectorAll('br').length < RUBY_BR_BLOCK_MIN_BR_COUNT) return false;
+  return (el.textContent || '').trim().length >= RUBY_BR_BLOCK_MIN_TEXT_LENGTH;
+}
+
+function isRubyBrBlockContainer(el) {
+  if (!el || el.tagName !== 'DIV') return false;
+  if (isYomupUiElement(el) || isEditableElement(el)) return false;
+  if (!isRubyBrBlockHost()) return false;
+  return hasRubyBrBlockAozoraStructuralSignature(el);
+}
+
+function findRubyBrContainerFromNode(node) {
+  let el = node && node.nodeType === Node.TEXT_NODE ? node.parentElement : node;
+  while (el && el !== document.body && el !== document.documentElement) {
+    if (isRubyBrBlockContainer(el)) return el;
+    el = el.parentElement;
+  }
+  return null;
+}
+
+function findRubyBrBlockFromPoint(clientX, clientY) {
+  const caretNode = getPointReferenceNode(clientX, clientY);
+  if (!caretNode) return null;
+
+  if (isNodeInsideTable(caretNode)) return null;
+  if (isWithinUiChromeRegion(caretNode)) return null;
+
+  const container = findRubyBrContainerFromNode(caretNode);
+  if (!container || !container.contains(caretNode)) return null;
+  if (isHighlightExcludedCodeElement(container)) return null;
+  if (!(container.textContent || '').trim()) return null;
+
+  return { mode: 'element', element: container };
+}
+
+function collectSingleTextNodeSegments(textNode) {
+  if (!textNode || textNode.nodeType !== Node.TEXT_NODE) {
+    return { blockText: '', segments: [] };
+  }
+  const text = textNode.textContent || '';
+  if (!text.trim()) return { blockText: '', segments: [] };
+  return {
+    blockText: text,
+    segments: [{ node: textNode, start: 0, end: text.length, text }]
+  };
+}
+
+function findAozoraOrphanTextBlockFromPoint(clientX, clientY) {
+  if (!isRubyBrBlockHost()) return null;
+  const caretNode = getPointReferenceNode(clientX, clientY);
+  if (!caretNode || caretNode.nodeType !== Node.TEXT_NODE) return null;
+  if (isNodeInsideTable(caretNode)) return null;
+  if (isWithinUiChromeRegion(caretNode)) return null;
+
+  const parent = caretNode.parentElement;
+  if (!parent || !parent.tagName || !AOZORA_ORPHAN_TEXT_PARENT_TAGS.has(parent.tagName)) {
+    return null;
+  }
+  if (isYomupUiElement(parent) || isEditableElement(parent)) return null;
+
+  const text = (caretNode.textContent || '').trim();
+  if (text.length < RUBY_BR_BLOCK_MIN_TEXT_LENGTH) return null;
+  if (text.length > MAX_TEXT_LENGTH_FOR_HIGHLIGHT + HIGHLIGHT_UNIT_SLACK_JA) return null;
+  if (!shouldIncludeTextNodeInBlock(caretNode, parent)) return null;
+
+  return {
+    mode: 'element',
+    element: parent,
+    scopedTextNode: caretNode
+  };
+}
+
 function isElementHighlightBlock(block) {
   return block.mode === 'element' || block.mode === 'inline-text';
 }
@@ -2984,6 +3142,12 @@ function findHighlightBlockFromPoint(clientX, clientY) {
   const faqAnswer = findFaqAnswerBlockFromPoint(clientX, clientY);
   if (faqAnswer) return faqAnswer;
 
+  const rubyBrBlock = findRubyBrBlockFromPoint(clientX, clientY);
+  if (rubyBrBlock) return rubyBrBlock;
+
+  const aozoraOrphanText = findAozoraOrphanTextBlockFromPoint(clientX, clientY);
+  if (aozoraOrphanText) return aozoraOrphanText;
+
   const brFlow = findBrFlowBlockFromPoint(clientX, clientY);
   if (brFlow) return brFlow;
 
@@ -3016,6 +3180,9 @@ function isNodeInHeadingInterval(node, root, startHeading, endHeading) {
 
 function highlightBlockContains(block, node) {
   if (!block || !node) return false;
+  if (block.scopedTextNode) {
+    return node === block.scopedTextNode;
+  }
   if (isElementHighlightBlock(block)) {
     return block.element.contains(node);
   }
@@ -3032,6 +3199,7 @@ function shouldIncludeTextNodeInBlock(node, blockElement) {
   if (!parent || isYomupUiElement(parent)) return false;
   if (parent.closest('script,style,noscript')) return false;
   if (isEditableElement(parent)) return false;
+  if (parent.closest('rt,rp')) return false;
   if (parent.closest('code')) {
     const codeEl = parent.closest('code');
     if (blockElement && blockElement.tagName === 'PRE' && blockElement.contains(parent)) {
@@ -3093,6 +3261,9 @@ function collectHeadingIntervalTextSegments(root, startHeading, endHeading) {
 }
 
 function collectHighlightBlockTextSegments(highlightBlock) {
+  if (highlightBlock.scopedTextNode) {
+    return collectSingleTextNodeSegments(highlightBlock.scopedTextNode);
+  }
   if (isElementHighlightBlock(highlightBlock)) {
     return collectBlockTextSegments(highlightBlock.element);
   }
@@ -3305,6 +3476,10 @@ function collectHeadingIntervalTextSegmentLines(root, startHeading, endHeading) 
 }
 
 function collectHighlightBlockTextSegmentLines(highlightBlock) {
+  if (highlightBlock.scopedTextNode) {
+    const single = collectSingleTextNodeSegments(highlightBlock.scopedTextNode);
+    return single.segments.length > 0 ? [single] : [];
+  }
   if (isElementHighlightBlock(highlightBlock)) {
     return collectBlockTextSegmentLines(highlightBlock.element);
   }
@@ -3336,6 +3511,34 @@ function getClientRectsForSegment(seg) {
   } catch (_e) {
     return [];
   }
+}
+
+function getClientRectsForChunkSegments(segments, chunkStart, chunkEnd) {
+  const rects = [];
+  if (!segments || segments.length === 0) return rects;
+  for (let i = 0; i < segments.length; i++) {
+    const seg = segments[i];
+    if (seg.end <= chunkStart || seg.start >= chunkEnd) continue;
+    const localStart = Math.max(0, chunkStart - seg.start);
+    const localEnd = Math.min(seg.text.length, chunkEnd - seg.start);
+    if (localEnd <= localStart) continue;
+    const node = seg.node;
+    if (!node || node.nodeType !== Node.TEXT_NODE) continue;
+    const nodeStart = (seg.nodeOffset || 0) + localStart;
+    const nodeEnd = (seg.nodeOffset || 0) + localEnd;
+    const r = document.createRange();
+    try {
+      r.setStart(node, nodeStart);
+      r.setEnd(node, nodeEnd);
+      const partRects = Array.from(r.getClientRects());
+      for (let j = 0; j < partRects.length; j++) {
+        rects.push(partRects[j]);
+      }
+    } catch (_e) {
+      // ignore
+    }
+  }
+  return rects;
 }
 
 function findLineIndexAtCaret(lines, clientX, clientY) {
@@ -3554,6 +3757,7 @@ function clearHighlightOverlay() {
     highlightOverlayRoot.textContent = '';
   }
   currentHighlightRange = null;
+  currentHighlightRects = null;
 }
 
 function mergeHighlightClientRects(rectList) {
@@ -3617,6 +3821,9 @@ function mergeHighlightClientRects(rectList) {
 }
 
 function getHighlightBlockClipElement(highlightBlock) {
+  if (highlightBlock.scopedTextNode) {
+    return highlightBlock.scopedTextNode.parentElement;
+  }
   if (isElementHighlightBlock(highlightBlock)) {
     return highlightBlock.element;
   }
@@ -3861,10 +4068,12 @@ function startHighlightUnderlineProgress(durationSeconds) {
   }
 }
 
-function applyHighlightOverlay(range, clipBounds) {
+function applyHighlightOverlay(range, clipBounds, clientRectsOverride) {
   clearHighlightOverlay();
   const root = ensureHighlightOverlayRoot();
-  const rawRects = Array.from(range.getClientRects());
+  const rawRects = clientRectsOverride
+    ? clientRectsOverride.slice()
+    : Array.from(range.getClientRects());
   let rects = filterHighlightClientRects(rawRects, clipBounds);
   if (ENABLE_HIGHLIGHT_OVERLAY_RECT_MERGE) {
     rects = mergeHighlightClientRects(rects);
@@ -3877,6 +4086,7 @@ function applyHighlightOverlay(range, clipBounds) {
     root.appendChild(createHighlightOverlayBox(rect));
   }
   currentHighlightRange = range;
+  currentHighlightRects = rects.slice();
   return true;
 }
 
@@ -3902,10 +4112,10 @@ function shouldUseSingleBlockUnionOverlay(chunks, blockText, chunk, range) {
   return countValidRangeClientRects(range) > 1;
 }
 
-function applyHighlightOverlayUnion(range, clipBounds) {
+function applyHighlightOverlayUnion(range, clipBounds, clientRectsOverride) {
   // 下線は行ごとの矩形が必要なため、union（外接1矩形）は使わない
   if (isHighlightUnderlineOverlayStyle()) {
-    return applyHighlightOverlay(range, clipBounds);
+    return applyHighlightOverlay(range, clipBounds, clientRectsOverride);
   }
 
   clearHighlightOverlay();
@@ -3978,9 +4188,12 @@ function tryHighlightLogicalBlockAtPoint(clientX, clientY) {
 
     const range = createRangeForChunk(segments, chunk.start, chunk.end);
     if (!range) return false;
+    const chunkRects = getClientRectsForChunkSegments(segments, chunk.start, chunk.end);
     if (
       !useGhostCardLeadChunk &&
-      !clientPointInRangeClientRects(range, clientX, clientY)
+      !clientPointInClientRects(chunkRects, clientX, clientY, {
+        lineTolerance: HIGHLIGHT_RECT_MERGE_LINE_TOLERANCE_PX
+      })
     ) {
       return false;
     }
@@ -3997,9 +4210,9 @@ function tryHighlightLogicalBlockAtPoint(clientX, clientY) {
       !useGhostCardLeadChunk &&
       shouldUseSingleBlockUnionOverlay(chunks, blockText, chunk, range)
     ) {
-      overlayApplied = applyHighlightOverlayUnion(range, clipBounds);
+      overlayApplied = applyHighlightOverlayUnion(range, clipBounds, chunkRects);
     } else {
-      overlayApplied = applyHighlightOverlay(range, clipBounds);
+      overlayApplied = applyHighlightOverlay(range, clipBounds, chunkRects);
     }
     if (!overlayApplied) return false;
 
