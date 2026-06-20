@@ -162,7 +162,7 @@ function init() {
     if (savedSubPopup === 'true') subPopupOnOff = true;
   }
 
-  if (isPopupMainVisible === 'true') {
+  if (isPageTransition && isPopupMainVisible === 'true') {
     debugLog('ポップアップを復元します');
     // 少し遅延させてからポップアップを表示（2000msくらいが実測で妥当）
     setTimeout(() => {
@@ -172,6 +172,10 @@ function init() {
       localStorage.removeItem(LOCALSTRG_YOMUP_REDISP);
       debugLog('localStorageをクリアしました');
     }, 2000);
+  } else if (isPopupMainVisible === 'true') {
+    // ブラウザ起動時などページ遷移以外では復元しない（§20）
+    localStorage.removeItem(LOCALSTRG_YOMUP_REDISP);
+    debugLog('ページ遷移以外のためポップアップ復元フラグをクリアしました');
   }
 
   // sessionStorageのフラグを削除（次回の判定のため）
@@ -1367,6 +1371,11 @@ function hideYomuPPopup(preserveModes = false) {
 
     // 3. ポップアップ削除
     existingPopupMain.remove();
+
+    // 4. 手動クローズ時はリロード復元フラグをクリア（§20）
+    if (!preserveModes) {
+      localStorage.removeItem(LOCALSTRG_YOMUP_REDISP);
+    }
   }
 } //end hideYomuPPopup
 
