@@ -311,9 +311,11 @@ function refreshYomuPPopupTotalInfo() {
   const totalInfo = existingPopup.shadowRoot.querySelector('.total-info');
   if (!totalInfo) return;
   const charCountInfo = getCharCountInfo();
-  totalInfo.textContent =
-    `全体： ${charCountInfo.textLengthAll}${charCountInfo.unitLabelAll}　` +
-    `${formatReadingTime(charCountInfo.readingTimeAll)}`;
+  totalInfo.textContent = formatUiTotalLine(
+    charCountInfo.textLengthAll,
+    charCountInfo.unitLabelAll,
+    charCountInfo.readingTimeAll
+  );
 }
 
 function getCharCountInfo() {
@@ -447,17 +449,7 @@ function updateCharCountInfo() {
 
 // === 時間表示フォーマット関数 ================================================
 function formatReadingTime(seconds) {
-  if (seconds < 60) {
-    return `${seconds}秒`;
-  } else {
-    const minutes = Math.floor(seconds / 60);
-    const remainingSeconds = seconds % 60;
-    if (minutes >= 60) {
-      return `${minutes}分`;
-    } else {
-      return `${minutes}分${remainingSeconds}秒`;
-    }
-  }
+  return formatUiReadingTime(seconds);
 }
 
 // === 選択範囲情報を表示する共通関数 ==========================================
@@ -480,15 +472,14 @@ function setSelectionInfoContent(
 
     // 1行目: 選択範囲の表示
     const line1 = document.createElement('div');
-    line1.textContent = `選択：${startText} ～ ${endText}`;
+    line1.textContent = formatUiSelectionLine(startText, endText);
     selectionInfoElement.appendChild(line1);
 
-    // 2行目: 文字数と読書時間の表示
     const line2 = document.createElement('div');
-    line2.textContent = `${selectedLength}${unitLabel} ${formatReadingTime(selectedReadingTime)}`;
+    line2.textContent = formatUiSelectionStats(selectedLength, unitLabel, selectedReadingTime);
     selectionInfoElement.appendChild(line2);
   } else {
-    selectionInfoElement.textContent = '選択：選択範囲がありません';
+    selectionInfoElement.textContent = formatUiSelectionEmpty();
   }
 }  //end setSelectionInfoContent
 
@@ -515,6 +506,8 @@ function showYomuPPopup(
   const shadow = container.attachShadow({ mode: 'open' });
 
   // スタイルシート（CSS）
+  const isEnPopup = getYomupUiLocale() === 'en';
+  const popupLocaleClass = isEnPopup ? 'yomup-popup-en' : 'yomup-popup-ja';
   const style = document.createElement('style');
   style.textContent = `
   .${CLASS_YOMUP_POPUP} {
@@ -536,6 +529,35 @@ function showYomuPPopup(
     text-align: center !important;
     line-height: 1.2 !important;
     box-sizing: border-box !important;
+  }
+  .${CLASS_YOMUP_POPUP}.yomup-popup-en {
+    padding: 6px 8px !important;
+  }
+  .yomup-popup-en .total-info,
+  .yomup-popup-en .selection-info {
+    white-space: normal !important;
+    word-break: break-word !important;
+  }
+  .yomup-popup-en .reading-settings-row {
+    gap: 0 !important;
+    margin-top: 6px !important;
+  }
+  .yomup-popup-en .reading-speed-label {
+    margin-right: 1px !important;
+  }
+  .yomup-popup-en .reading-speed-select-wrapper {
+    flex: 1 1 auto !important;
+    min-width: 0 !important;
+    max-width: 104px !important;
+  }
+  .yomup-popup-en .reading-speed-select {
+    max-width: 100% !important;
+    padding: 2px 1px !important;
+  }
+  .yomup-popup-en .reading-mode-button {
+    padding: 2px 3px !important;
+    min-width: 18px !important;
+    margin-left: 1px !important;
   }
   .yomup-popup-icon {
     position: absolute !important;
@@ -753,39 +775,39 @@ function showYomuPPopup(
 
   // ポップアップ要素
   const popup = document.createElement('div');
-  popup.className = CLASS_YOMUP_POPUP;
+  popup.className = `${CLASS_YOMUP_POPUP} ${popupLocaleClass}`;
 
   // 左上にアイコンを追加
   const popupIcon = document.createElement('div');
   popupIcon.className = 'yomup-popup-icon';
-  popupIcon.innerHTML = `<img src="${chrome.runtime.getURL('icon48.png')}" alt="アイコン" style="width: 100%; height: 100%;"><div class="tooltip">読むプ<br>Version<br>${YOMUP_VERSION}</div>`;
+  popupIcon.innerHTML = `<img src="${chrome.runtime.getURL('icon48.png')}" alt="${t('altIcon')}" style="width: 100%; height: 100%;"><div class="tooltip">${t('appNameTooltip', { version: YOMUP_VERSION })}</div>`;
   popup.appendChild(popupIcon);
 
   // アイコンを横並びで配置
   // 文字カウントボタン
   const strCntButton = document.createElement('div');
   strCntButton.className = 'strCnt-button';
-  strCntButton.innerHTML = `<img src="${chrome.runtime.getURL('images/GB01_object-group-solid-full.svg')}" width="16" height="16" alt="文字カウント" style="cursor: pointer;"><div class="tooltip">選択範囲の<br>文字数を<br>カウント</div>`;
+  strCntButton.innerHTML = `<img src="${chrome.runtime.getURL('images/GB01_object-group-solid-full.svg')}" width="16" height="16" alt="${t('altCharCount')}" style="cursor: pointer;"><div class="tooltip">${t('countSelectionTooltip')}</div>`;
 
   // 電球ボタン
   const lightbulbButton = document.createElement('div');
   lightbulbButton.className = 'lightbulb-button';
-  lightbulbButton.innerHTML = `<img src="${chrome.runtime.getURL('images/GA01_lightbulb-solid-full.svg')}" width="16" height="16" alt="電球" style="cursor: pointer;"><div class="tooltip">ハイライト実施</div>`;
+  lightbulbButton.innerHTML = `<img src="${chrome.runtime.getURL('images/GA01_lightbulb-solid-full.svg')}" width="16" height="16" alt="${t('altLightbulb')}" style="cursor: pointer;"><div class="tooltip">${t('highlightTooltip')}</div>`;
 
   // ストップウォッチボタン
   const stopwatchButton = document.createElement('div');
   stopwatchButton.className = 'stopwatch-button';
-  stopwatchButton.innerHTML = `<img src="${chrome.runtime.getURL('images/GB02_stopwatch-solid-full.svg')}" width="16" height="16" alt="ストップウォッチ" style="cursor: pointer;"><div class="tooltip">ストップウォッチ</div>`;
+  stopwatchButton.innerHTML = `<img src="${chrome.runtime.getURL('images/GB02_stopwatch-solid-full.svg')}" width="16" height="16" alt="${t('altStopwatch')}" style="cursor: pointer;"><div class="tooltip">${t('stopwatchTooltip')}</div>`;
 
   // 砂時計ボタンを作成
   const hourglassButton = document.createElement('div');
   hourglassButton.className = 'hourglass-button';
-  hourglassButton.innerHTML = `<img src="${chrome.runtime.getURL('images/GA02_hourglass-start-solid-full.svg')}" width="16" height="16" alt="砂時計" style="cursor: pointer;"><div class="tooltip">ハイライト部分タイマー</div>`;
+  hourglassButton.innerHTML = `<img src="${chrome.runtime.getURL('images/GA02_hourglass-start-solid-full.svg')}" width="16" height="16" alt="${t('altHourglass')}" style="cursor: pointer;"><div class="tooltip">${t('partialTimerTooltip')}</div>`;
 
   // リロードボタンを作成
   const reloadButton = document.createElement('div');
   reloadButton.className = 'reload-button';
-  reloadButton.innerHTML = `<img src="${chrome.runtime.getURL('images/GD01_rotate-right-solid-full.svg')}" width="16" height="16" alt="リロード" style="cursor: pointer;"><div class="tooltip">ページの<br>再読み込み</div>`;
+  reloadButton.innerHTML = `<img src="${chrome.runtime.getURL('images/GD01_rotate-right-solid-full.svg')}" width="16" height="16" alt="${t('altReload')}" style="cursor: pointer;"><div class="tooltip">${t('reloadTooltip')}</div>`;
 
 
   // 文字数カウントボタンのクリックイベントを追加
@@ -825,20 +847,12 @@ function showYomuPPopup(
   
   const limitSelect = document.createElement('select');
   limitSelect.className = 'stopwatch-limit-select';
-  limitSelect.innerHTML = `
-    <option value="-">-</option>
-    <option value="1">1分</option>
-    <option value="3">3分</option>
-    <option value="5">5分</option>
-    <option value="10">10分</option>
-    <option value="15">15分</option>
-  `;
-  limitSelect.value = '-'; // デフォルト値
-  
-  // ツールチップを追加
+  limitSelect.innerHTML = buildStopwatchIntervalOptionsHtml();
+  limitSelect.value = '-';
+
   const limitSelectTooltip = document.createElement('div');
   limitSelectTooltip.className = 'tooltip';
-  limitSelectTooltip.textContent = 'インターバル時間(分)';
+  limitSelectTooltip.textContent = t('intervalMinutesTooltip');
   
   limitSelectWrapper.appendChild(limitSelect);
   limitSelectWrapper.appendChild(limitSelectTooltip);
@@ -846,7 +860,7 @@ function showYomuPPopup(
   // ループ回数表示を追加
   const loopCountDisplay = document.createElement('div');
   loopCountDisplay.className = 'stopwatch-loop-count';
-  loopCountDisplay.textContent = '0回';
+  loopCountDisplay.textContent = formatUiLoopCount(0);
 
   // 横並びコンテナにストップウォッチ、ドロップダウン、ループ回数表示を追加
   stopwatchRow.appendChild(stopwatch);
@@ -864,18 +878,18 @@ function showYomuPPopup(
   // 再生ボタン
   const playButton = document.createElement('div');
   playButton.className = 'stopwatch-control-button';
-  playButton.innerHTML = `<img src="${chrome.runtime.getURL('images/GC01_play-solid-full.svg')}" width="10" height="10" alt="再生" style="cursor: pointer;">`;
+  playButton.innerHTML = `<img src="${chrome.runtime.getURL('images/GC01_play-solid-full.svg')}" width="10" height="10" alt="${t('altPlay')}" style="cursor: pointer;">`;
 
   // 一時停止ボタン
   const pauseButton = document.createElement('div');
   pauseButton.className = 'stopwatch-control-button';
-  pauseButton.innerHTML = `<img src="${chrome.runtime.getURL('images/GC02_pause-solid-full.svg')}" width="10" height="10" alt="一時停止" style="cursor: pointer;">`;
+  pauseButton.innerHTML = `<img src="${chrome.runtime.getURL('images/GC02_pause-solid-full.svg')}" width="10" height="10" alt="${t('altPause')}" style="cursor: pointer;">`;
   pauseButton.style.display = 'none'; // 初期状態は非表示
 
   // 停止ボタン
   const stopButton = document.createElement('div');
   stopButton.className = 'stopwatch-control-button';
-  stopButton.innerHTML = `<img src="${chrome.runtime.getURL('images/GC03_stop-solid-full.svg')}" width="10" height="10" alt="停止" style="cursor: pointer;">`;
+  stopButton.innerHTML = `<img src="${chrome.runtime.getURL('images/GC03_stop-solid-full.svg')}" width="10" height="10" alt="${t('altStop')}" style="cursor: pointer;">`;
 
   // ストップウォッチ制御ボタンをコンテナに追加
   stopwatchButtonContainer.appendChild(playButton);
@@ -908,7 +922,7 @@ function showYomuPPopup(
             stopwatch.textContent = '00:00';
           }
           if (loopCountDisplay) {
-            loopCountDisplay.textContent = '0回';
+            loopCountDisplay.textContent = formatUiLoopCount(0);
           }
           // ボタンを再生/停止に戻す
           if (playButton?.parentNode) playButton.remove();
@@ -960,7 +974,7 @@ function showYomuPPopup(
     stopwatchSeconds = 0;
     stopwatchLoopCount = 0;
     stopwatch.textContent = '00:00';
-    loopCountDisplay.textContent = '0回';
+    loopCountDisplay.textContent = formatUiLoopCount(0);
     
     // ループ回数表示の表示/非表示を切り替え
     if (selectedValue === '-') {
@@ -969,7 +983,7 @@ function showYomuPPopup(
     } else {
       stopwatchLimitMinutes = parseInt(selectedValue);
       loopCountDisplay.classList.add('visible');
-      loopCountDisplay.textContent = '0回';
+      loopCountDisplay.textContent = formatUiLoopCount(0);
     }
     
     // ボタンを再生/停止に戻す
@@ -999,7 +1013,7 @@ function showYomuPPopup(
                 // 上限に達したら0にリセットしてループ回数を増やす
                 stopwatchSeconds = 0;
                 stopwatchLoopCount++;
-                loopCountDisplay.textContent = `${stopwatchLoopCount}回`;
+                loopCountDisplay.textContent = formatUiLoopCount(stopwatchLoopCount);
               }
             }
             
@@ -1064,7 +1078,7 @@ function showYomuPPopup(
         stopwatch.textContent = '00:00';
       }
       if (loopCountDisplay) {
-        loopCountDisplay.textContent = '0回';
+        loopCountDisplay.textContent = formatUiLoopCount(0);
       }
       if (playButton?.parentNode) playButton.remove();
       if (pauseButton?.parentNode) pauseButton.remove();
@@ -1122,7 +1136,7 @@ function showYomuPPopup(
   // 全体情報（1行目）
   const totalInfo = document.createElement('div');
   totalInfo.className = 'total-info';
-  totalInfo.textContent = `全体： ${textLength}${unitLabel}　${formatReadingTime(readingTime)}`;
+  totalInfo.textContent = formatUiTotalLine(textLength, unitLabel, readingTime);
 
   // 選択範囲情報（2-3行目）
   const selectionInfo = document.createElement('div');
@@ -1151,7 +1165,7 @@ function showYomuPPopup(
 
   const readingSpeedLabel = document.createElement('span');
   readingSpeedLabel.className = 'reading-speed-label';
-  readingSpeedLabel.textContent = '速度';
+  readingSpeedLabel.textContent = t('speedLabel');
 
   const readingSpeedSelectWrapper = document.createElement('div');
   readingSpeedSelectWrapper.className = 'reading-speed-select-wrapper';
@@ -1166,7 +1180,7 @@ function showYomuPPopup(
 
   const readingSpeedTooltip = document.createElement('div');
   readingSpeedTooltip.className = 'tooltip';
-  readingSpeedTooltip.textContent = '読書速度';
+  readingSpeedTooltip.textContent = t('readingSpeedTooltip');
 
   readingSpeedSelectWrapper.appendChild(readingSpeedSelect);
   readingSpeedSelectWrapper.appendChild(readingSpeedTooltip);
@@ -1174,11 +1188,11 @@ function showYomuPPopup(
   const readingModeProgressBtn = document.createElement('button');
   readingModeProgressBtn.type = 'button';
   readingModeProgressBtn.className = 'reading-mode-button';
-  readingModeProgressBtn.setAttribute('aria-label', 'ライン進行');
+  readingModeProgressBtn.setAttribute('aria-label', getHighlightModeToggleUiLabel());
   readingModeProgressBtn.textContent = '→';
   const progressModeTooltip = document.createElement('div');
   progressModeTooltip.className = 'tooltip';
-  progressModeTooltip.textContent = 'ライン進行';
+  progressModeTooltip.textContent = getHighlightModeToggleUiLabel();
   readingModeProgressBtn.appendChild(progressModeTooltip);
 
   readingSettingsRow.appendChild(readingSpeedLabel);
@@ -1298,7 +1312,7 @@ function showYomuPPopup(
         if (stopwatchLimitMinutes !== null) {
           limitSelect.value = stopwatchLimitMinutes.toString();
           loopCountDisplay.classList.add('visible');
-          loopCountDisplay.textContent = `${stopwatchLoopCount}回`;
+          loopCountDisplay.textContent = formatUiLoopCount(stopwatchLoopCount);
         } else {
           limitSelect.value = '-';
           loopCountDisplay.classList.remove('visible');
@@ -1326,7 +1340,7 @@ function showYomuPPopup(
                   // 上限に達したら0にリセットしてループ回数を増やす
                   stopwatchSeconds = 0;
                   stopwatchLoopCount++;
-                  loopCountDisplay.textContent = `${stopwatchLoopCount}回`;
+                  loopCountDisplay.textContent = formatUiLoopCount(stopwatchLoopCount);
                 }
               }
               
@@ -5682,6 +5696,11 @@ function showSubPopup() {
   const shadow = container.attachShadow({ mode: 'open' });
 
   // Shadow DOM内にスタイルシートを作成(CSS)
+  const isEnSubPopup = getYomupUiLocale() === 'en';
+  const subPopupWidth = isEnSubPopup ? '168px' : '140px';
+  const subPopupHeight = isEnSubPopup ? 'auto' : '40px';
+  const subPopupMinHeight = '40px';
+  const subPopupFontSize = '12px';
   const subPopupStyles = document.createElement('style');
   subPopupStyles.textContent = `
     .${CLASS_SUBPOPUP} {
@@ -5692,13 +5711,14 @@ function showSubPopup() {
       border: 2px solid #333 !important;
       border-radius: 10px !important;
       padding: 5px !important;
-      font-size: 12px !important;
+      font-size: ${subPopupFontSize} !important;
       font-family: Arial, sans-serif !important;
       color: #333 !important;
       box-shadow: 0 4px 20px rgba(0,0,0,0.3) !important;
       z-index: 10000 !important;
-      width: 140px !important;
-      height: 40px !important;
+      width: ${subPopupWidth} !important;
+      min-height: ${subPopupMinHeight} !important;
+      height: ${subPopupHeight} !important;
       display: flex !important;
       flex-direction: column !important;
       text-align: center !important;
@@ -5707,8 +5727,11 @@ function showSubPopup() {
     }
     .char-count {
       margin: auto 0 !important;
-      font-size: 12px !important;
+      font-size: ${subPopupFontSize} !important;
       color: #666 !important;
+      line-height: 1.2 !important;
+      white-space: normal !important;
+      word-break: break-word !important;
     }
   `;
 
@@ -5718,7 +5741,7 @@ function showSubPopup() {
 
   // メッセージ
   const message = document.createElement('div');
-  message.textContent = 'ハイライト部分タイマー';
+  message.textContent = t('partialTimerTitle');
 
   // 文字数表示要素（初期状態では非表示）
   const charCount = document.createElement('div');
@@ -5768,7 +5791,12 @@ function updateSubPopupCharCount(unitCount, readTime, unitLabel = '字') {
     if (shadow) {
       const charCount = shadow.querySelector('.char-count');
       if (charCount) {
-        charCount.textContent = `${unitCount}${unitLabel}⇒［${countDownTimerForSub}／${readTime}秒］`;
+        charCount.textContent = formatUiPartialTimerDisplay(
+          unitCount,
+          unitLabel,
+          countDownTimerForSub,
+          readTime
+        );
         charCount.style.display = 'block';
       }
     }

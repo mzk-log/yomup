@@ -247,6 +247,13 @@ async function resolveActiveTabUrl(tabId) {
   }
 }
 
+function getContextMenuTitle(menuItem) {
+  if (menuItem.titleKey) {
+    return chrome.i18n.getMessage(menuItem.titleKey) || menuItem.titleKey;
+  }
+  return menuItem.title || menuItem.id;
+}
+
 async function syncContextMenusForTab(tabId) {
   const seq = ++contextMenuSyncSeq;
   const tabUrl = await resolveActiveTabUrl(tabId);
@@ -261,7 +268,7 @@ async function syncContextMenusForTab(tabId) {
     if (pdfTab) {
       await createContextMenuAsync({
         id: PDF_PAGE_MENU.id,
-        title: PDF_PAGE_MENU.title,
+        title: getContextMenuTitle(PDF_PAGE_MENU),
         contexts: ['all']
       });
       return;
@@ -270,14 +277,14 @@ async function syncContextMenusForTab(tabId) {
     for (const menuItem of MENU_CONFIG) {
       await createContextMenuAsync({
         id: menuItem.id,
-        title: menuItem.title,
+        title: getContextMenuTitle(menuItem),
         contexts: ['page', 'selection']
       });
     }
 
     await createContextMenuAsync({
       id: PDF_LINK_MENU.id,
-      title: PDF_LINK_MENU.title,
+      title: getContextMenuTitle(PDF_LINK_MENU),
       contexts: ['link'],
       targetUrlPatterns: PDF_LINK_TARGET_URL_PATTERNS
     });

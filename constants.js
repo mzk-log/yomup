@@ -7,7 +7,7 @@
 
 // 右クリックメニューの設定を2次元配列で一元管理
 const MENU_CONFIG = [
-  { id: 'YomuP-apl', title: '読むプDEV' }
+  { id: 'YomuP-apl', titleKey: 'contextMenuYomuP' }
 ];
 
 // PDF: Chromium 内蔵 PDF ビューアの拡張 ID（Chrome / Edge 共通）
@@ -21,13 +21,13 @@ const BUILTIN_PDF_VIEWER_IDS = [
 // PDF: リンク右クリック用メニュー
 const PDF_LINK_MENU = {
   id: 'YomuP-pdf-link',
-  title: '読むプでPDFを開く'
+  titleKey: 'contextMenuOpenPdf'
 };
 
 // PDF: 内蔵ビューア表示中タブのページ右クリック用メニュー
 const PDF_PAGE_MENU = {
   id: 'YomuP-pdf-page',
-  title: '読むプでPDFを開く'
+  titleKey: 'contextMenuOpenPdf'
 };
 
 // 読むプバージョン（機能変更.不具合修正・改善.申請）
@@ -110,6 +110,10 @@ const SESSIONSTRG_PAGE_TRANSITION = 'pageTransition'; //ページ遷移判定用
 // ボタン状態復元機能の有効/無効（コンパイルスイッチ）
 const ENABLE_BUTTON_STATE_RESTORE = true; // true: 有効, false: 無効
 
+// §18: UI 言語の開発用オーバーライド（本番リリース時は false）
+const ENABLE_UI_LOCALE_OVERRIDE = true;
+const LOCALSTRG_UI_LOCALE_OVERRIDE = 'YomuP_uiLocaleOverride';
+
 // グローバルスコープに公開（Service Worker用）
 if (typeof self !== 'undefined') {
   self.MENU_CONFIG = MENU_CONFIG;
@@ -147,5 +151,7 @@ if (typeof window !== 'undefined') {
   window.ENABLE_HIGHLIGHT_UNDERLINE_PROGRESS = ENABLE_HIGHLIGHT_UNDERLINE_PROGRESS;
   window.HIGHLIGHT_UNDERLINE_PROGRESS_MIN_SECONDS = HIGHLIGHT_UNDERLINE_PROGRESS_MIN_SECONDS;
   window.HIGHLIGHT_STICKY_RIGHT_PADDING_PX = HIGHLIGHT_STICKY_RIGHT_PADDING_PX;
+  window.ENABLE_UI_LOCALE_OVERRIDE = ENABLE_UI_LOCALE_OVERRIDE;
+  window.LOCALSTRG_UI_LOCALE_OVERRIDE = LOCALSTRG_UI_LOCALE_OVERRIDE;
 }
 

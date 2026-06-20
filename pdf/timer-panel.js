@@ -91,7 +91,12 @@ function attachDragHandlers() {
 
 function updateCharCountDisplay(unitCount, readTime, unitLabel) {
   if (!charCountEl) return;
-  charCountEl.textContent = `${unitCount}${unitLabel}⇒［${countDownRemaining}／${readTime}秒］`;
+  charCountEl.textContent = formatUiPartialTimerDisplay(
+    unitCount,
+    unitLabel,
+    countDownRemaining,
+    readTime
+  );
   charCountEl.style.display = 'block';
 }
 
@@ -108,8 +113,8 @@ function updateToolbarToggleUi() {
   btn.classList.toggle('is-on', enabled);
   btn.setAttribute('aria-pressed', String(enabled));
   btn.title = enabled
-    ? '部分タイマー ON（クリックで OFF）'
-    : '部分タイマー OFF（クリックで ON）';
+    ? t('partialTimerOnTitle')
+    : t('partialTimerOffTitle');
 }
 
 function buildPanelIfNeeded() {
@@ -121,7 +126,7 @@ function buildPanelIfNeeded() {
 
   const title = document.createElement('div');
   title.className = 'yomup-pdf-timer-title';
-  title.textContent = 'ハイライト部分タイマー';
+  title.textContent = t('partialTimerTitle');
 
   charCountEl = document.createElement('div');
   charCountEl.className = 'yomup-pdf-timer-count';

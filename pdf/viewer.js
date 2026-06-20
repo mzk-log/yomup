@@ -61,8 +61,10 @@ function loadHighlightModeFromStorage() {
 }
 
 function formatStatusWithHighlightMode() {
-  const modeLabel = highLightOnOff ? 'ハイライト ON' : 'ハイライト OFF';
-  return defaultStatusText ? `${defaultStatusText}（${modeLabel}）` : modeLabel;
+  const modeLabel = highLightOnOff ? t('highlightOnStatus') : t('highlightOffStatus');
+  return defaultStatusText
+    ? t('statusWithHighlight', { status: defaultStatusText, mode: modeLabel })
+    : modeLabel;
 }
 
 function decodeFileNameFromUrl(sourceUrl) {
@@ -90,8 +92,8 @@ function updateHighlightToggleUi() {
   btn.classList.toggle('is-on', highLightOnOff);
   btn.setAttribute('aria-pressed', String(highLightOnOff));
   btn.title = highLightOnOff
-    ? 'ハイライト ON（クリックで OFF）'
-    : 'ハイライト OFF（クリックで ON・テキスト選択向け）';
+    ? t('highlightOnTitle')
+    : t('highlightOffTitle');
 }
 
 function toggleHighlightMode() {
@@ -129,7 +131,7 @@ function setStatus(text, title = text) {
 function showError(message) {
   messageEl.textContent = message;
   messageEl.classList.remove('hidden');
-  setStatus('読み込み失敗');
+  setStatus(t('loadFailed'));
 }
 
 function hideError() {
@@ -138,11 +140,7 @@ function hideError() {
 }
 
 function formatReadingTime(seconds) {
-  if (seconds < 60) return `${seconds}秒`;
-  const minutes = Math.floor(seconds / 60);
-  const remainingSeconds = seconds % 60;
-  if (minutes >= 60) return `${minutes}分`;
-  return `${minutes}分${remainingSeconds}秒`;
+  return formatUiReadingTime(seconds);
 }
 
 function collectDocumentText(models) {
@@ -162,7 +160,7 @@ function updateDocumentStatsDisplay(models) {
   const unitCount = countUnits(fullText, languageMode);
   const readingTime = calculateReadingTime(unitCount, languageMode);
   const unitLabel = getUnitLabel(languageMode);
-  el.textContent = `全体：${unitCount}${unitLabel} ${formatReadingTime(readingTime)}`;
+  el.textContent = formatUiTotalLine(unitCount, unitLabel, readingTime);
   el.hidden = false;
 }
 
@@ -224,7 +222,7 @@ function updateSelectionStatsDisplay() {
   el.replaceChildren('');
   const stats = getPdfSelectionStats();
   if (!stats) {
-    el.textContent = '選択：選択範囲がありません';
+    el.textContent = formatUiSelectionEmpty();
     el.title = '';
     return;
   }
@@ -232,9 +230,9 @@ function updateSelectionStatsDisplay() {
   const startText = stats.selectedText.substring(0, 3);
   const endText = stats.selectedText.substring(stats.selectedText.length - 3);
   const line1 = document.createElement('div');
-  line1.textContent = `選択：${startText} ～ ${endText}`;
+  line1.textContent = formatUiSelectionLine(startText, endText);
   const line2 = document.createElement('div');
-  line2.textContent = `${stats.unitCount}${stats.unitLabel} ${formatReadingTime(stats.readingTime)}`;
+  line2.textContent = formatUiSelectionStats(stats.unitCount, stats.unitLabel, stats.readingTime);
   el.appendChild(line1);
   el.appendChild(line2);
   el.title = `${line1.textContent}\n${line2.textContent}`;
@@ -256,7 +254,7 @@ async function loadPdfBytes() {
   const params = new URLSearchParams(location.search);
   const fileCacheId = params.get('fid');
   if (fileCacheId) {
-    setStatus('ローカル PDF を読み込み中…');
+    setStatus(t('loadingLocalPdf'));
     const response = await chrome.runtime.sendMessage({
       action: 'getFilePdfCache',
       id: fileCacheId
@@ -275,7 +273,7 @@ async function loadPdfBytes() {
     throw new Error('PDF URL がありません。拡張アイコンから PDF を開き直してください。');
   }
 
-  setStatus('PDF を取得中…');
+  setStatus(t('fetchingPdf'));
 
   const response = await chrome.runtime.sendMessage({ action: 'fetchPdf', url: src });
   if (!response || response.error) {
@@ -1206,6 +1204,10 @@ function refreshReadingSettingsToolbarLabels() {
     getPdfUiLanguageMode(),
     window.loadReadingSpeedCharsPerMin()
   );
+
+  const speedLabel = document.querySelector('.yomup-pdf-reading-speed-label');
+  if (speedLabel) speedLabel.textContent = t('speedLabel');
+  if (select) select.title = t('readingSpeedTooltip');
 }
 
 function initReadingSettingsToolbar() {
@@ -1239,7 +1241,7 @@ async function renderPdf(pdfBytes, sourceUrl) {
 
   const fileName = decodeFileNameFromUrl(sourceUrl);
 
-  setStatus(`読み込み中… (${fileName})`, fileName);
+  setStatus(t('loadingWithFile', { file: fileName }), fileName);
 
   const loadingTask = createPdfDocumentTask(pdfBytes);
   const pdf = await loadingTask.promise;
@@ -1250,11 +1252,11 @@ async function renderPdf(pdfBytes, sourceUrl) {
   );
 
   for (let pageNum = 1; pageNum <= pdf.numPages; pageNum += 1) {
-    setStatus(`${pageNum} / ${pdf.numPages} ページ`);
+    setStatus(t('pageProgress', { current: pageNum, total: pdf.numPages }));
     await renderPage(pdf, pageNum, containerWidth);
   }
 
-  defaultStatusText = `${pdf.numPages} ページ — ${fileName}`;
+  defaultStatusText = t('documentStatus', { pages: pdf.numPages, file: fileName });
   updateDocumentStatsDisplay(pageModels);
   refreshReadingSettingsToolbarLabels();
   initSelectionStatsListener();
@@ -1268,6 +1270,9 @@ async function renderPdf(pdfBytes, sourceUrl) {
 }
 
 async function main() {
+  if (typeof applyPdfToolbarStaticUi === 'function') {
+    applyPdfToolbarStaticUi();
+  }
   initReadingSettingsToolbar();
   const params = new URLSearchParams(location.search);
   const errorParam = params.get('error');

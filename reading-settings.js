@@ -43,6 +43,9 @@ function getReadingSpeedForLanguage(languageMode) {
 }
 
 function formatReadingSpeedOptionLabel(languageMode, charsPerMin) {
+  if (typeof formatUiReadingSpeedOptionLabel === 'function') {
+    return formatUiReadingSpeedOptionLabel(languageMode, charsPerMin);
+  }
   if (languageMode === 'en') {
     return `${wordsPerMinFromCharsPerMin(charsPerMin)}語/分`;
   }
@@ -87,6 +90,13 @@ function populateReadingSpeedSelect(selectEl, languageMode, selectedCharsPerMin)
 
 const HIGHLIGHT_MODE_TOGGLE_LABEL = 'ライン進行';
 
+function getHighlightModeToggleUiLabel() {
+  if (typeof getHighlightModeToggleLabel === 'function') {
+    return getHighlightModeToggleLabel();
+  }
+  return HIGHLIGHT_MODE_TOGGLE_LABEL;
+}
+
 function bindReadingModeToggleButton(toggleBtn, onChange) {
   if (!toggleBtn) return;
 
@@ -94,13 +104,13 @@ function bindReadingModeToggleButton(toggleBtn, onChange) {
     const isProgress = isHighlightUnderlineProgressMode();
     toggleBtn.classList.toggle('active', isProgress);
     toggleBtn.setAttribute('aria-pressed', String(isProgress));
-    toggleBtn.setAttribute('aria-label', HIGHLIGHT_MODE_TOGGLE_LABEL);
+    toggleBtn.setAttribute('aria-label', getHighlightModeToggleUiLabel());
     const tooltip = toggleBtn.querySelector('.tooltip');
     if (tooltip) {
-      tooltip.textContent = HIGHLIGHT_MODE_TOGGLE_LABEL;
+      tooltip.textContent = getHighlightModeToggleUiLabel();
       toggleBtn.removeAttribute('title');
     } else {
-      toggleBtn.title = HIGHLIGHT_MODE_TOGGLE_LABEL;
+      toggleBtn.title = getHighlightModeToggleUiLabel();
     }
   }
 
@@ -133,6 +143,6 @@ if (typeof window !== 'undefined') {
   window.isHighlightUnderlineProgressMode = isHighlightUnderlineProgressMode;
   window.calculateReadingTimeWithSettings = calculateReadingTimeWithSettings;
   window.populateReadingSpeedSelect = populateReadingSpeedSelect;
-  window.HIGHLIGHT_MODE_TOGGLE_LABEL = HIGHLIGHT_MODE_TOGGLE_LABEL;
+  window.getHighlightModeToggleUiLabel = getHighlightModeToggleUiLabel;
   window.bindReadingModeToggleButton = bindReadingModeToggleButton;
 }

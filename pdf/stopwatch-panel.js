@@ -125,7 +125,7 @@ function resetStopwatchState() {
   seconds = 0;
   loopCount = 0;
   updateTimeDisplay();
-  if (loopCountEl) loopCountEl.textContent = '0回';
+  if (loopCountEl) loopCountEl.textContent = formatUiLoopCount(0);
   resetControlsToPlayStop();
 }
 
@@ -136,7 +136,7 @@ function tickStopwatch() {
     if (seconds >= limitSeconds) {
       seconds = 0;
       loopCount += 1;
-      if (loopCountEl) loopCountEl.textContent = `${loopCount}回`;
+      if (loopCountEl) loopCountEl.textContent = formatUiLoopCount(loopCount);
     }
   }
   updateTimeDisplay();
@@ -196,7 +196,7 @@ function buildPanel() {
 
   const title = document.createElement('div');
   title.className = 'yomup-pdf-stopwatch-title';
-  title.textContent = 'ストップウォッチ';
+  title.textContent = t('stopwatchTooltip');
 
   const row = document.createElement('div');
   row.className = 'yomup-pdf-stopwatch-row';
@@ -209,15 +209,8 @@ function buildPanel() {
   limitWrap.className = 'yomup-pdf-stopwatch-limit-wrap';
   limitSelectEl = document.createElement('select');
   limitSelectEl.className = 'yomup-pdf-stopwatch-limit';
-  limitSelectEl.title = 'インターバル時間(分)';
-  limitSelectEl.innerHTML = `
-    <option value="-">-</option>
-    <option value="1">1分</option>
-    <option value="3">3分</option>
-    <option value="5">5分</option>
-    <option value="10">10分</option>
-    <option value="15">15分</option>
-  `;
+  limitSelectEl.title = t('intervalMinutesTooltip');
+  limitSelectEl.innerHTML = buildStopwatchIntervalOptionsHtml();
   limitSelectEl.value = '-';
   limitSelectEl.addEventListener('change', onLimitChange);
   limitSelectEl.addEventListener('mousedown', (e) => e.stopPropagation());
@@ -225,7 +218,7 @@ function buildPanel() {
 
   loopCountEl = document.createElement('div');
   loopCountEl.className = 'yomup-pdf-stopwatch-loop';
-  loopCountEl.textContent = '0回';
+  loopCountEl.textContent = formatUiLoopCount(0);
 
   row.appendChild(timeEl);
   row.appendChild(limitWrap);
@@ -234,9 +227,9 @@ function buildPanel() {
   controlsEl = document.createElement('div');
   controlsEl.className = 'yomup-pdf-stopwatch-controls';
 
-  playBtn = createControlButton('yomup-pdf-stopwatch-ctrl', '再生', IMG.play);
-  pauseBtn = createControlButton('yomup-pdf-stopwatch-ctrl', '一時停止', IMG.pause);
-  stopBtn = createControlButton('yomup-pdf-stopwatch-ctrl', '停止', IMG.stop);
+  playBtn = createControlButton('yomup-pdf-stopwatch-ctrl', t('altPlay'), IMG.play);
+  pauseBtn = createControlButton('yomup-pdf-stopwatch-ctrl', t('altPause'), IMG.pause);
+  stopBtn = createControlButton('yomup-pdf-stopwatch-ctrl', t('altStop'), IMG.stop);
   playBtn.addEventListener('click', onPlayClick);
   pauseBtn.addEventListener('click', onPauseClick);
   stopBtn.addEventListener('click', onStopClick);
@@ -271,8 +264,8 @@ function updateToolbarToggleUi() {
   btn.classList.toggle('is-on', visible);
   btn.setAttribute('aria-pressed', String(visible));
   btn.title = visible
-    ? 'ストップウォッチ表示中（クリックで非表示）'
-    : 'ストップウォッチ（クリックで表示）';
+    ? t('stopwatchVisibleTitle')
+    : t('stopwatchShowTitle');
 }
 
 export function setStopwatchPanelVisible(nextVisible) {
