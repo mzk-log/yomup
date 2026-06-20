@@ -184,7 +184,6 @@ export function startHighlightTimer(unitCount, languageMode) {
 function startHighlightTimerInterval() {
   if (!enabled || !activeTimerContext) return;
   const { unitCount, readTime, unitLabel } = activeTimerContext;
-  if (countDownRemaining <= 0) return;
 
   if (countDownInterval) {
     clearInterval(countDownInterval);
@@ -194,11 +193,6 @@ function startHighlightTimerInterval() {
   countDownInterval = setInterval(() => {
     countDownRemaining -= 1;
     updateCharCountDisplay(unitCount, readTime, unitLabel);
-    if (countDownRemaining <= 0 && countDownInterval) {
-      clearInterval(countDownInterval);
-      countDownInterval = null;
-      activeTimerContext = null;
-    }
   }, 1000);
 }
 

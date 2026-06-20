@@ -1258,6 +1258,7 @@ function showYomuPPopup(
     }
     if (subPopupOnOff && hourglassIcon) {
       hourglassIcon.classList.add('active');
+      showSubPopup();
     }
   } else if (!isPageTransition) {
     // ブラウザ起動時はボタン状態を初期化
@@ -4206,12 +4207,6 @@ function startCountdownSubPopupInterval(unitCount, readTime, unitLabel) {
     try {
       countDownTimerForSub--;
       updateSubPopupCharCount(unitCount, readTime, unitLabel);
-      if (countDownTimerForSub <= 0) {
-        if (countDownIntervalForSub) {
-          clearInterval(countDownIntervalForSub);
-          countDownIntervalForSub = null;
-        }
-      }
     } catch (error) {
       debugError('カウントダウン更新中にエラーが発生:', error);
       if (countDownIntervalForSub) {
