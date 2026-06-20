@@ -31,6 +31,7 @@ let stopwatchLoopCount = 0; // ループ回数
 let subPopupOnOff = false; // 機能が有効かどうかのフラグ
 let countDownTimerForSub = 0;
 let countDownIntervalForSub = null; // カウントダウンタイマーのIDを保存
+let highlightProgressSession = null; // §19: ライン進行の一時停止／再開セッション
 
 // ドラッグ移動機能用の変数
 let isDragging = false; // ドラッグ中かどうかのフラグ
@@ -115,6 +116,26 @@ function isPointInCurrentHighlight(clientX, clientY) {
     currentHighlightRange &&
     clientPointInStickyHighlightRects(currentHighlightRange, clientX, clientY)
   );
+}
+
+function isPointInCurrentHighlightOverlay(clientX, clientY) {
+  if (!highlightOverlayRoot) return false;
+  const segments = highlightOverlayRoot.querySelectorAll('.yomup-highlight-underline-segment');
+  const linePad = typeof HIGHLIGHT_RECT_MERGE_LINE_TOLERANCE_PX !== 'undefined'
+    ? HIGHLIGHT_RECT_MERGE_LINE_TOLERANCE_PX
+    : 6;
+  for (let i = 0; i < segments.length; i++) {
+    const rect = segments[i].getBoundingClientRect();
+    if (
+      clientX >= rect.left &&
+      clientX <= rect.right &&
+      clientY >= rect.top - linePad &&
+      clientY <= rect.bottom + linePad
+    ) {
+      return true;
+    }
+  }
+  return false;
 }
 
 // getClientRects の矩形をマージして枠の細片化を抑える（テストNG時は false に戻す）
@@ -1171,9 +1192,12 @@ function showYomuPPopup(
     saveReadingSpeedCharsPerMin(Number(readingSpeedSelect.value));
     refreshYomuPPopupTotalInfo();
     updateCharCountInfo();
+    if (highlightProgressSession) {
+      resetHighlightProgressOnSettingsChange();
+    }
   });
 
-  bindReadingModeToggleButton(readingModeProgressBtn);
+  bindReadingModeToggleButton(readingModeProgressBtn, resetHighlightProgressOnSettingsChange);
 
   for (const controlEl of [readingSpeedSelect, readingModeProgressBtn]) {
     controlEl.addEventListener('mousedown', (e) => e.stopPropagation());
@@ -1411,6 +1435,13 @@ function handleMouseMove(event) {
 
   if (isPointInCurrentHighlight(event.clientX, event.clientY)) {
     return;
+  }
+
+  // §19: ライン進行中は下線オーバーレイ上の移動で再描画しない
+  if (highlightProgressSession && countDownTimerForSub > 0) {
+    if (isPointInCurrentHighlightOverlay(event.clientX, event.clientY)) {
+      return;
+    }
   }
 
   // マウスが動く度に既存のタイマーをキャンセル
@@ -3762,6 +3793,7 @@ function ensureHighlightOverlayRoot() {
 
 function clearHighlightOverlay() {
   stopHighlightUnderlineProgress();
+  resetHighlightProgressSession();
   if (highlightOverlayRoot) {
     highlightOverlayRoot.textContent = '';
   }
@@ -3972,6 +4004,217 @@ function stopHighlightUnderlineProgress() {
   const progressEls = highlightOverlayRoot.querySelectorAll('.yomup-highlight-underline-progress');
   for (let i = 0; i < progressEls.length; i++) {
     progressEls[i].style.transition = '';
+  }
+}
+
+function resetHighlightProgressSession() {
+  highlightProgressSession = null;
+}
+
+function captureHighlightProgressTarget(highlightBlock, chunk) {
+  return {
+    mode: highlightBlock.mode,
+    element: highlightBlock.element || null,
+    scopedTextNode: highlightBlock.scopedTextNode || null,
+    container: highlightBlock.container || null,
+    root: highlightBlock.root || null,
+    startHeading: highlightBlock.startHeading || null,
+    endHeading: highlightBlock.endHeading || null,
+    chunkStart: chunk.start,
+    chunkEnd: chunk.end
+  };
+}
+
+function isSameHighlightProgressTarget(highlightBlock, chunk) {
+  if (!highlightProgressSession || !highlightProgressSession.target) return false;
+  const target = highlightProgressSession.target;
+  if (target.chunkStart !== chunk.start || target.chunkEnd !== chunk.end) return false;
+  if (target.mode !== highlightBlock.mode) return false;
+  if (target.scopedTextNode) {
+    return highlightBlock.scopedTextNode === target.scopedTextNode;
+  }
+  if (target.element) {
+    return highlightBlock.element === target.element;
+  }
+  if (target.mode === 'heading-interval') {
+    return highlightBlock.root === target.root &&
+      highlightBlock.startHeading === target.startHeading &&
+      highlightBlock.endHeading === target.endHeading;
+  }
+  if (target.mode === 'br-flow') {
+    return highlightBlock.container === target.container;
+  }
+  return false;
+}
+
+function getHighlightUnderlineLineTolerancePx() {
+  return typeof HIGHLIGHT_RECT_MERGE_LINE_TOLERANCE_PX !== 'undefined'
+    ? HIGHLIGHT_RECT_MERGE_LINE_TOLERANCE_PX
+    : 6;
+}
+
+function getHighlightUnderlineProgressMinSeconds() {
+  return typeof HIGHLIGHT_UNDERLINE_PROGRESS_MIN_SECONDS !== 'undefined'
+    ? HIGHLIGHT_UNDERLINE_PROGRESS_MIN_SECONDS
+    : 0.3;
+}
+
+function getHighlightProgressElWidthPx(progressEl) {
+  const styleWidth = parseFloat(progressEl.style.width);
+  if (Number.isFinite(styleWidth) && styleWidth > 0) return styleWidth;
+  return parseFloat(getComputedStyle(progressEl).width) || 0;
+}
+
+function pauseHighlightUnderlineProgress() {
+  if (!highlightOverlayRoot) return;
+  const progressEls = highlightOverlayRoot.querySelectorAll('.yomup-highlight-underline-progress');
+  for (let i = 0; i < progressEls.length; i++) {
+    const el = progressEls[i];
+    // transition を先に切ると終了値(100%)へジャンプするため、幅を先に取得する
+    const frozenWidth = getComputedStyle(el).width;
+    el.style.transition = 'none';
+    el.style.width = frozenWidth;
+  }
+}
+
+function resumeHighlightUnderlineProgress(remainingSeconds) {
+  if (!usesHighlightUnderlineSegmentLayer() || !isHighlightUnderlineProgressMode()) return;
+
+  const root = ensureHighlightOverlayRoot();
+  const boxes = root.querySelectorAll('.yomup-highlight-underline-segment');
+  if (boxes.length === 0) return;
+
+  const duration = Math.max(getHighlightUnderlineProgressMinSeconds(), remainingSeconds || 0);
+  const lineTolerance = getHighlightUnderlineLineTolerancePx();
+
+  const sortedBoxes = Array.from(boxes).sort((a, b) =>
+    compareHighlightUnderlineReadingOrder(a, b, lineTolerance)
+  );
+
+  let totalRemainingWidth = 0;
+  for (let i = 0; i < sortedBoxes.length; i++) {
+    const segment = sortedBoxes[i];
+    const fullWidth = parseFloat(segment.dataset.fullWidth) || 0;
+    const progressEl = getHighlightUnderlineProgressEl(segment);
+    if (!fullWidth || !progressEl) continue;
+    const currentWidth = getHighlightProgressElWidthPx(progressEl);
+    totalRemainingWidth += Math.max(0, fullWidth - currentWidth);
+  }
+  if (totalRemainingWidth <= 0) return;
+
+  void root.offsetHeight;
+
+  const lineGroups = groupHighlightUnderlineBoxesByLine(sortedBoxes, lineTolerance);
+  let delay = 0;
+  for (let g = 0; g < lineGroups.length; g++) {
+    const group = lineGroups[g];
+    let lineRemainingWidth = 0;
+    for (let i = 0; i < group.length; i++) {
+      const segment = group[i];
+      const fullWidth = parseFloat(segment.dataset.fullWidth) || 0;
+      const progressEl = getHighlightUnderlineProgressEl(segment);
+      if (!fullWidth || !progressEl) continue;
+      const currentWidth = getHighlightProgressElWidthPx(progressEl);
+      lineRemainingWidth += Math.max(0, fullWidth - currentWidth);
+    }
+    if (lineRemainingWidth <= 0) continue;
+
+    const lineDuration = duration * (lineRemainingWidth / totalRemainingWidth);
+    let lineDelay = delay;
+    for (let i = 0; i < group.length; i++) {
+      const segment = group[i];
+      const fullWidth = parseFloat(segment.dataset.fullWidth) || 0;
+      const progressEl = getHighlightUnderlineProgressEl(segment);
+      if (!fullWidth || !progressEl) continue;
+      const currentWidth = getHighlightProgressElWidthPx(progressEl);
+      const remainingWidth = Math.max(0, fullWidth - currentWidth);
+      if (remainingWidth <= 0.5) {
+        progressEl.style.transition = 'none';
+        progressEl.style.width = fullWidth + 'px';
+        continue;
+      }
+
+      const segmentDuration = lineRemainingWidth > 0
+        ? lineDuration * (remainingWidth / lineRemainingWidth)
+        : lineDuration;
+      progressEl.style.transition = `width ${segmentDuration}s linear ${lineDelay}s`;
+      progressEl.style.width = fullWidth + 'px';
+      lineDelay += segmentDuration;
+    }
+    delay += lineDuration;
+  }
+}
+
+function startCountdownSubPopupInterval(unitCount, readTime, unitLabel) {
+  if (countDownIntervalForSub) {
+    clearInterval(countDownIntervalForSub);
+    countDownIntervalForSub = null;
+  }
+
+  countDownIntervalForSub = setInterval(() => {
+    try {
+      countDownTimerForSub--;
+      updateSubPopupCharCount(unitCount, readTime, unitLabel);
+      if (countDownTimerForSub <= 0) {
+        if (countDownIntervalForSub) {
+          clearInterval(countDownIntervalForSub);
+          countDownIntervalForSub = null;
+        }
+        resetHighlightProgressSession();
+      }
+    } catch (error) {
+      debugError('カウントダウン更新中にエラーが発生:', error);
+      if (countDownIntervalForSub) {
+        clearInterval(countDownIntervalForSub);
+        countDownIntervalForSub = null;
+      }
+    }
+  }, 1000);
+}
+
+function pauseHighlightProgress() {
+  if (!highlightProgressSession || highlightProgressSession.paused) return;
+  if (countDownTimerForSub <= 0) return;
+
+  pauseHighlightUnderlineProgress();
+  if (countDownIntervalForSub) {
+    clearInterval(countDownIntervalForSub);
+    countDownIntervalForSub = null;
+  }
+  highlightProgressSession.paused = true;
+  debugLog('ライン進行を一時停止しました');
+}
+
+function resumeHighlightProgress() {
+  if (!highlightProgressSession || !highlightProgressSession.paused) return;
+  if (countDownTimerForSub <= 0) return;
+
+  const session = highlightProgressSession;
+  resumeHighlightUnderlineProgress(countDownTimerForSub);
+  startCountdownSubPopupInterval(session.unitCount, session.readTime, session.unitLabel);
+  highlightProgressSession.paused = false;
+  debugLog('ライン進行を再開しました');
+}
+
+function resetHighlightProgressOnSettingsChange() {
+  resetHighlightProgressSession();
+  clearCurrentHighlight();
+}
+
+function handleProgressPauseClick(event) {
+  if (!highLightOnOff) return;
+  if (!isHighlightUnderlineProgressMode()) return;
+  if (!highlightProgressSession) return;
+  if (countDownTimerForSub <= 0) return;
+  if (isYomupUiElement(event.target)) return;
+
+  const root = highlightOverlayRoot;
+  if (!root || !root.querySelector('.yomup-highlight-underline-segment')) return;
+
+  if (highlightProgressSession.paused) {
+    resumeHighlightProgress();
+  } else {
+    pauseHighlightProgress();
   }
 }
 
@@ -4211,6 +4454,10 @@ function tryHighlightLogicalBlockAtPoint(clientX, clientY) {
       return true;
     }
 
+    if (highlightProgressSession && isSameHighlightProgressTarget(highlightBlock, chunk)) {
+      return true;
+    }
+
     const clipBounds = getHighlightBlockClipBounds(highlightBlock);
 
     clearCurrentHighlight();
@@ -4226,7 +4473,11 @@ function tryHighlightLogicalBlockAtPoint(clientX, clientY) {
     if (!overlayApplied) return false;
 
     const units = countUnits(chunk.text, languageMode);
-    startCountdownSubPopup(units, languageMode);
+    startCountdownSubPopup(
+      units,
+      languageMode,
+      captureHighlightProgressTarget(highlightBlock, chunk)
+    );
     debugLog(
       'logical chunk',
       highlightBlock.mode,
@@ -5335,32 +5586,22 @@ function applyHighlight(element) {
 
 
 // === カウントダウン開始関数 ==================================================
-function startCountdownSubPopup(unitCount, languageMode = LANGUAGE_MODE_JA) {
+function startCountdownSubPopup(unitCount, languageMode = LANGUAGE_MODE_JA, progressTarget = null) {
   try {
     const unitLabel = getUnitLabel(languageMode);
     const readTime = calculateReadingTime(unitCount, languageMode);
     countDownTimerForSub = readTime;
 
-    // 既存のタイマーをクリア（重複防止）
-    if (countDownIntervalForSub) {
-      clearInterval(countDownIntervalForSub);
-      countDownIntervalForSub = null;
-    }
+    highlightProgressSession = {
+      unitCount,
+      readTime,
+      languageMode,
+      unitLabel,
+      paused: false,
+      target: progressTarget
+    };
 
-    // 1秒毎のダウンカウントタイマーを開始
-    countDownIntervalForSub = setInterval(() => {
-      try {
-        countDownTimerForSub--;
-        updateSubPopupCharCount(unitCount, readTime, unitLabel);
-      } catch (error) {
-        debugError('カウントダウン更新中にエラーが発生:', error);
-        // タイマーを停止してエラーを防ぐ
-        if (countDownIntervalForSub) {
-          clearInterval(countDownIntervalForSub);
-          countDownIntervalForSub = null;
-        }
-      }
-    }, 1000);
+    startCountdownSubPopupInterval(unitCount, readTime, unitLabel);
 
     // ポップアップの文字数を更新
     updateSubPopupCharCount(unitCount, readTime, unitLabel);
@@ -5777,6 +6018,7 @@ function cleanupAllListeners() {
       clearInterval(countDownIntervalForSub);
       countDownIntervalForSub = null;
     }
+    resetHighlightProgressSession();
     if (popupViewportResizeDebounceTimer) {
       clearTimeout(popupViewportResizeDebounceTimer);
       popupViewportResizeDebounceTimer = null;
@@ -5802,6 +6044,7 @@ function cleanupAllListeners() {
 function attachHighlightListeners() {
   document.addEventListener('mousemove', handleMouseMove);
   document.addEventListener('mouseout', handleMouseOut);
+  document.addEventListener('click', handleProgressPauseClick, true);
   document.addEventListener('scroll', handleHighlightViewportChange, { capture: true, passive: true });
   window.addEventListener('resize', handleHighlightViewportChange, { passive: true });
 }
@@ -5809,6 +6052,7 @@ function attachHighlightListeners() {
 function detachHighlightListeners() {
   document.removeEventListener('mousemove', handleMouseMove);
   document.removeEventListener('mouseout', handleMouseOut);
+  document.removeEventListener('click', handleProgressPauseClick, true);
   document.removeEventListener('scroll', handleHighlightViewportChange, { capture: true });
   window.removeEventListener('resize', handleHighlightViewportChange);
 }
