@@ -802,6 +802,36 @@ function showYomuPPopup(
     left: 50% !important;
     transform: translateX(-50%) !important;
   }
+  .donation-link-row {
+    margin-top: 6px !important;
+    padding-top: 4px !important;
+    border-top: 1px solid #e9ecef !important;
+    position: relative !important;
+  }
+  .donation-link {
+    font-size: 10px !important;
+    color: #868e96 !important;
+    text-decoration: none !important;
+    cursor: pointer !important;
+    pointer-events: auto !important;
+    display: inline-block !important;
+    line-height: 1.3 !important;
+    position: relative !important;
+  }
+  .donation-link-row .tooltip {
+    white-space: normal !important;
+    width: 168px !important;
+    max-width: 168px !important;
+    box-sizing: border-box !important;
+    text-align: center !important;
+    line-height: 1.4 !important;
+    left: 50% !important;
+    transform: translateX(-50%) !important;
+  }
+  .donation-link:hover {
+    color: #495057 !important;
+    text-decoration: underline !important;
+  }
 `;
 
   // ポップアップ要素
@@ -1253,6 +1283,23 @@ function showYomuPPopup(
   popup.appendChild(stopwatchContainer);
   popup.appendChild(stopwatchButtonContainer);
 
+  const donationLinkRow = document.createElement('div');
+  donationLinkRow.className = 'donation-link-row';
+  const donationLink = document.createElement('a');
+  donationLink.className = 'donation-link';
+  donationLink.href = DONATION_KOFI_URL;
+  donationLink.target = '_blank';
+  donationLink.rel = 'noopener noreferrer';
+  donationLink.textContent = t('donationLinkText');
+  donationLink.addEventListener('click', (e) => e.stopPropagation());
+  donationLink.addEventListener('mousedown', (e) => e.stopPropagation());
+  donationLinkRow.appendChild(donationLink);
+  const donationTooltip = document.createElement('div');
+  donationTooltip.className = 'tooltip';
+  donationTooltip.innerHTML = t('donationLinkTitle');
+  donationLinkRow.appendChild(donationTooltip);
+  popup.appendChild(donationLinkRow);
+
   shadow.appendChild(style);
   shadow.appendChild(popup);
 
@@ -1296,6 +1343,7 @@ function showYomuPPopup(
   addTooltipEvents(limitSelectWrapper);
   addTooltipEvents(readingSpeedSelectWrapper);
   addTooltipEvents(readingModeProgressBtn);
+  addTooltipEvents(donationLinkRow);
 
   // モード状態に基づいてボタンのactiveクラスを復元
   if (isPageTransition && ENABLE_BUTTON_STATE_RESTORE) { //ページ遷移時のみ、有効 or 無効 を定数で切り替え

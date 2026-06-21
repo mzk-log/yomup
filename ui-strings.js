@@ -55,7 +55,9 @@ const UI_STRINGS = {
     fetchingPdf: 'PDF を取得中…',
     pageProgress: '{current} / {total} ページ',
     documentStatus: '{pages} ページ — {file}',
-    statusWithHighlight: '{status}（{mode}）'
+    statusWithHighlight: '{status}（{mode}）',
+    donationLinkText: 'Ko-fiで応援する（任意）',
+    donationLinkTitle: '応援（寄付）は任意です。<br>応援の有無で機能は変わりません。<br>クリックで外部の寄付サイト（Ko-fi）が開きます。'
   },
   en: {
     totalLabel: 'Total: ',
@@ -110,7 +112,9 @@ const UI_STRINGS = {
     fetchingPdf: 'Fetching PDF…',
     pageProgress: '{current} / {total} pages',
     documentStatus: '{pages} pages — {file}',
-    statusWithHighlight: '{status} ({mode})'
+    statusWithHighlight: '{status} ({mode})',
+    donationLinkText: 'Support on Ko-fi (optional)',
+    donationLinkTitle: 'Support (donation) is optional.<br>Features are unchanged whether you support or not.<br>Opens an external donation site (Ko-fi) in a new tab.'
   }
 };
 
