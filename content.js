@@ -71,6 +71,8 @@ const BR_FLOW_BOUNDARY_TAGS = new Set(['H2', 'H3']);
 const CARD_CELL_MIN_TEXT_DIVS = 2;
 const CARD_CELL_MAX_DIRECT_CHILDREN = 8;
 const CARD_CELL_MIN_SIBLING_DIVS = 3;
+// Ko-fi 料金プラン等: H2/H3 + 直下テキスト div（card-cell の 2-div 要件を満たさない行）
+const CARD_CELL_PRICING_ROW_HEADING_TAGS = new Set(['H2', 'H3']);
 // ruby-br-block（§16）: 青空ホスト + DIV + br 区切り構造（ruby / クラス名は不問）
 const RUBY_BR_BLOCK_HOST = 'aozora.gr.jp';
 const RUBY_BR_BLOCK_MIN_BR_COUNT = 2;
@@ -2863,9 +2865,72 @@ function isCardCellStructure(el) {
   if (isYomupUiElement(el) || isEditableElement(el)) return false;
   if (isHighlightExcludedCodeElement(el)) return false;
   if (hasDirectHeadingChild(el)) return false;
-  if (countDirectTextDivChildren(el) < CARD_CELL_MIN_TEXT_DIVS) return false;
+  const textDivChildren = getDirectTextDivChildren(el);
+  for (let i = 0; i < textDivChildren.length; i++) {
+    if (isBrOnlyDivElement(textDivChildren[i])) return false;
+  }
+  if (textDivChildren.length < CARD_CELL_MIN_TEXT_DIVS) return false;
   if (el.children.length > CARD_CELL_MAX_DIRECT_CHILDREN) return false;
   return countSiblingDivsWithText(el) >= CARD_CELL_MIN_SIBLING_DIVS;
+}
+
+function hasOnlyCardCellPricingRowDirectChildren(el) {
+  for (let i = 0; i < el.children.length; i++) {
+    const child = el.children[i];
+    if (child.nodeType !== Node.ELEMENT_NODE) continue;
+    const tag = child.tagName;
+    if (CARD_CELL_PRICING_ROW_HEADING_TAGS.has(tag)) continue;
+    if (tag === 'DIV' && (child.textContent || '').trim()) continue;
+    if (!(child.textContent || '').trim()) continue;
+    return false;
+  }
+  return true;
+}
+
+// H2/H3 + 直下テキスト div 1 つ以上（例: Ko-fi pricing の $12/month + fee 行）
+function isCardCellPricingRow(el) {
+  if (!el || el.tagName !== 'DIV') return false;
+  if (isYomupUiElement(el) || isEditableElement(el)) return false;
+  if (isHighlightExcludedCodeElement(el)) return false;
+  if (el.children.length > CARD_CELL_MAX_DIRECT_CHILDREN) return false;
+
+  let headingCount = 0;
+  let textDivCount = 0;
+  for (let i = 0; i < el.children.length; i++) {
+    const child = el.children[i];
+    if (child.nodeType !== Node.ELEMENT_NODE) continue;
+    if (CARD_CELL_PRICING_ROW_HEADING_TAGS.has(child.tagName)) {
+      headingCount++;
+    } else if (child.tagName === 'DIV' && (child.textContent || '').trim()) {
+      textDivCount++;
+    }
+  }
+  if (headingCount < 1 || textDivCount < 1) return false;
+  return hasOnlyCardCellPricingRowDirectChildren(el);
+}
+
+function resolveCardCellPricingRowUnit(rowEl, caretNode, clientX, clientY) {
+  const textDivs = getDirectTextDivChildren(rowEl).filter(isCardCellTextUnit);
+  if (textDivs.length === 0) return null;
+
+  let ref = caretNode;
+  if (ref && ref.nodeType === Node.TEXT_NODE) {
+    ref = ref.parentElement;
+  }
+  if (!ref) {
+    ref = document.elementFromPoint(clientX, clientY);
+  }
+
+  if (ref) {
+    for (let i = 0; i < textDivs.length; i++) {
+      const div = textDivs[i];
+      if (div === ref || div.contains(ref)) {
+        return div;
+      }
+    }
+  }
+
+  return pickNearestCardTextUnit(textDivs, clientX, clientY);
 }
 
 function pickNearestCardTextUnit(textDivs, clientX, clientY) {
@@ -2919,6 +2984,16 @@ function resolveCardCellTextUnit(cardEl, caretNode, clientX, clientY) {
         return div;
       }
     }
+
+    const allDirectDivs = getDirectTextDivChildren(cardEl);
+    for (let i = 0; i < allDirectDivs.length; i++) {
+      const child = allDirectDivs[i];
+      if (!child.contains(ref)) continue;
+      if (isCardCellPricingRow(child)) {
+        const unit = resolveCardCellPricingRowUnit(child, caretNode, clientX, clientY);
+        if (unit) return unit;
+      }
+    }
   }
 
   return pickNearestCardTextUnit(textDivs, clientX, clientY);
@@ -2937,6 +3012,12 @@ function findCardCellBlockFromPoint(clientX, clientY) {
 
   while (node && node !== document.body && node !== document.documentElement) {
     if (isYomupUiElement(node) || isEditableElement(node)) return null;
+    if (isCardCellPricingRow(node)) {
+      const unit = resolveCardCellPricingRowUnit(node, caretNode || node, clientX, clientY);
+      if (unit) {
+        return { mode: 'element', element: unit };
+      }
+    }
     if (isCardCellStructure(node)) {
       const unit = resolveCardCellTextUnit(node, caretNode || node, clientX, clientY);
       if (unit) {
@@ -2975,6 +3056,98 @@ function findFaqAnswerBlockFromPoint(clientX, clientY) {
   if (!(block.textContent || '').trim()) return null;
 
   return { mode: 'element', element: block };
+}
+
+function hasOnlyBrDirectElementChildren(el) {
+  if (!el) return false;
+  let brCount = 0;
+  for (let i = 0; i < el.childNodes.length; i++) {
+    const child = el.childNodes[i];
+    if (child.nodeType !== Node.ELEMENT_NODE) continue;
+    if (child.tagName !== 'BR') return false;
+    brCount++;
+  }
+  return brCount >= 1;
+}
+
+function isBrOnlyDivElement(el) {
+  if (!el || el.tagName !== 'DIV') return false;
+  if (isYomupUiElement(el) || isEditableElement(el)) return false;
+  if (isHighlightExcludedCodeElement(el)) return false;
+  if (!hasOnlyBrDirectElementChildren(el)) return false;
+  const text = (el.textContent || '').trim();
+  if (!text) return false;
+  if (isBrFlowContainer(el)) return false;
+  return true;
+}
+
+function isBrOnlyDivExcludedContext(el) {
+  if (!el) return true;
+  if (isNodeInsideTable(el)) return true;
+  if (isWithinUiChromeRegion(el)) return true;
+
+  let ancestor = el.parentElement;
+  while (ancestor && ancestor !== document.body && ancestor !== document.documentElement) {
+    if (isBrFlowContainer(ancestor)) return true;
+    ancestor = ancestor.parentElement;
+  }
+
+  if (isRubyBrBlockHost()) {
+    if (hasRubyBrBlockAozoraStructuralSignature(el)) return true;
+    let aozoraAncestor = el.parentElement;
+    while (aozoraAncestor && aozoraAncestor !== document.body && aozoraAncestor !== document.documentElement) {
+      if (hasRubyBrBlockAozoraStructuralSignature(aozoraAncestor)) return true;
+      aozoraAncestor = aozoraAncestor.parentElement;
+    }
+  }
+
+  if (el.closest && el.closest('.faq-answer')) return true;
+  if (isGhostOverlayLink(el)) return true;
+  if (isCardCellStructure(el)) return true;
+
+  return false;
+}
+
+function brOnlyDivAcceptsHoverPoint(el, clientX, clientY) {
+  if (getContainingTextRectsForPoint(el, clientX, clientY).length > 0) {
+    return true;
+  }
+  const rect = el.getBoundingClientRect();
+  return !!(
+    rect.width > 0 && rect.height > 0 &&
+    clientX >= rect.left && clientX <= rect.right &&
+    clientY >= rect.top && clientY <= rect.bottom
+  );
+}
+
+function findBrOnlyDivBlockFromPoint(clientX, clientY) {
+  if (isGhostOverlayAtPoint(clientX, clientY)) return null;
+
+  let node = getPointReferenceNode(clientX, clientY);
+  if (node && node.nodeType === Node.TEXT_NODE) {
+    node = node.parentElement;
+  }
+  if (!node) {
+    node = document.elementFromPoint(clientX, clientY);
+  }
+
+  while (node && node !== document.body && node !== document.documentElement) {
+    if (isYomupUiElement(node) || isEditableElement(node)) return null;
+    if (isHighlightExcludedCodeElement(node)) {
+      node = node.parentElement;
+      continue;
+    }
+    if (node.tagName === 'DIV') {
+      if (isBrOnlyDivElement(node) && !isBrOnlyDivExcludedContext(node)) {
+        if (brOnlyDivAcceptsHoverPoint(node, clientX, clientY)) {
+          return { mode: 'element', element: node };
+        }
+        return null;
+      }
+    }
+    node = node.parentElement;
+  }
+  return null;
 }
 
 function isLeafTextDivElement(el) {
@@ -3353,6 +3526,9 @@ function findHighlightBlockFromPoint(clientX, clientY) {
   if (inlineHost) {
     return { mode: 'inline-text', element: inlineHost };
   }
+
+  const brOnlyDiv = findBrOnlyDivBlockFromPoint(clientX, clientY);
+  if (brOnlyDiv) return brOnlyDiv;
 
   const cardCell = findCardCellBlockFromPoint(clientX, clientY);
   if (cardCell) return cardCell;
@@ -4139,6 +4315,170 @@ function getHighlightRectBottom(rect) {
   return rect.top + rect.height;
 }
 
+function getHighlightUnderlineAnchorBottom(rect, hostElement) {
+  let bottom = getHighlightRectBottom(rect);
+  if (!hostElement || typeof hostElement.getBoundingClientRect !== 'function') return bottom;
+  try {
+    const style = window.getComputedStyle(hostElement);
+    const lh = parseFloat(style.lineHeight);
+    if (Number.isFinite(lh) && lh > 0 && rect.height > lh * 1.15) {
+      bottom = rect.top + lh;
+    }
+  } catch (_e) {
+    // ignore
+  }
+  return bottom;
+}
+
+function getHighlightUnderlineTop(rect, hostElement) {
+  const thickness = typeof HIGHLIGHT_UNDERLINE_THICKNESS_PX !== 'undefined'
+    ? HIGHLIGHT_UNDERLINE_THICKNESS_PX
+    : 2;
+  return getHighlightUnderlineAnchorBottom(rect, hostElement) - thickness;
+}
+
+function filterClientRectsAtPointer(rects, clientX, clientY, options) {
+  if (!rects || rects.length <= 1) return rects;
+  const opts = options || {};
+  const lineTolerance = typeof opts.lineTolerance === 'number'
+    ? opts.lineTolerance
+    : getHighlightUnderlineLineTolerancePx();
+  const rightPad = opts.rightPad || 0;
+  const filtered = [];
+  for (let i = 0; i < rects.length; i++) {
+    const rect = rects[i];
+    if (rect.width <= 0 || rect.height <= 0) continue;
+    if (
+      clientY >= rect.top - lineTolerance &&
+      clientY <= rect.bottom + lineTolerance &&
+      clientX >= rect.left &&
+      clientX <= rect.right + rightPad
+    ) {
+      filtered.push(rect);
+    }
+  }
+  return filtered.length > 0 ? filtered : rects;
+}
+
+function countVisualLinesInClientRects(rects, lineTolerance) {
+  if (!rects || rects.length === 0) return 0;
+  const tol = typeof lineTolerance === 'number'
+    ? lineTolerance
+    : getHighlightUnderlineLineTolerancePx();
+  const lineTops = [];
+  for (let i = 0; i < rects.length; i++) {
+    const rect = rects[i];
+    if (rect.width <= 0 || rect.height <= 0) continue;
+    let placed = false;
+    for (let j = 0; j < lineTops.length; j++) {
+      if (Math.abs(rect.top - lineTops[j]) <= tol) {
+        placed = true;
+        break;
+      }
+    }
+    if (!placed) lineTops.push(rect.top);
+  }
+  return lineTops.length;
+}
+
+function getOffsetInBlockTextFromClientPoint(segments, clientX, clientY) {
+  const range = caretRangeFromClientXY(clientX, clientY);
+  if (!range) return -1;
+  return computeOffsetInBlockText(segments, range.startContainer, range.startOffset);
+}
+
+function isClientRectOnVisualLine(rect, lineTop, lineBottom, lineTolerance) {
+  if (!rect || rect.width <= 0 || rect.height <= 0) return false;
+  const tol = typeof lineTolerance === 'number' ? lineTolerance : getHighlightUnderlineLineTolerancePx();
+  const cy = rect.top + rect.height / 2;
+  return cy >= lineTop - tol && cy <= lineBottom + tol;
+}
+
+function expandChunkOffsetToVisualLine(segments, chunk, offset, lineTop, lineBottom, direction) {
+  const tol = getHighlightUnderlineLineTolerancePx();
+  const minBound = chunk.start;
+  const maxBound = chunk.end;
+  let pos = offset;
+
+  if (direction === 'start') {
+    while (pos > minBound) {
+      const prev = pos - 1;
+      const range = createRangeForChunk(segments, prev, pos);
+      if (!range) break;
+      const rects = Array.from(range.getClientRects()).filter((r) => r.width > 0 && r.height > 0);
+      if (rects.length === 0) break;
+      let onLine = false;
+      for (let i = 0; i < rects.length; i++) {
+        if (isClientRectOnVisualLine(rects[i], lineTop, lineBottom, tol)) {
+          onLine = true;
+          break;
+        }
+      }
+      if (!onLine) break;
+      pos = prev;
+    }
+    return pos;
+  }
+
+  while (pos < maxBound) {
+    const next = pos + 1;
+    const range = createRangeForChunk(segments, pos, next);
+    if (!range) break;
+    const rects = Array.from(range.getClientRects()).filter((r) => r.width > 0 && r.height > 0);
+    if (rects.length === 0) break;
+    let onLine = false;
+    for (let i = 0; i < rects.length; i++) {
+      if (isClientRectOnVisualLine(rects[i], lineTop, lineBottom, tol)) {
+        onLine = true;
+        break;
+      }
+    }
+    if (!onLine) break;
+    pos = next;
+  }
+  return pos;
+}
+
+// 下線をホバー行の rect のみに絞ったとき、語数・タイマーもその行の部分チャンクに合わせる
+function narrowChunkToClientRects(segments, blockText, chunk, targetRects) {
+  if (!chunk || !targetRects || targetRects.length === 0 || !blockText) return chunk;
+
+  let lineTop = Infinity;
+  let lineBottom = -Infinity;
+  let left = Infinity;
+  let right = -Infinity;
+  for (let i = 0; i < targetRects.length; i++) {
+    const r = targetRects[i];
+    if (r.width <= 0 || r.height <= 0) continue;
+    lineTop = Math.min(lineTop, r.top);
+    lineBottom = Math.max(lineBottom, r.bottom);
+    left = Math.min(left, r.left);
+    right = Math.max(right, r.right);
+  }
+  if (!Number.isFinite(left)) return chunk;
+
+  const midY = lineTop + (lineBottom - lineTop) / 2;
+  const pad = Math.min(4, Math.max(1, (right - left) * 0.05));
+  const xStart = left + pad;
+  const xEnd = Math.max(xStart + 1, right - pad);
+
+  let startOff = getOffsetInBlockTextFromClientPoint(segments, xStart, midY);
+  let endOff = getOffsetInBlockTextFromClientPoint(segments, xEnd, midY);
+  if (startOff < 0 || endOff < 0) return chunk;
+
+  if (startOff < chunk.start) startOff = chunk.start;
+  if (endOff > chunk.end) endOff = chunk.end;
+  if (endOff <= startOff) return chunk;
+
+  startOff = expandChunkOffsetToVisualLine(segments, chunk, startOff, lineTop, lineBottom, 'start');
+  endOff = expandChunkOffsetToVisualLine(segments, chunk, endOff, lineTop, lineBottom, 'end');
+  if (endOff <= startOff) return chunk;
+
+  const text = blockText.slice(startOff, endOff);
+  if (!text.trim()) return chunk;
+  return { start: startOff, end: endOff, text };
+}
+
 function getHighlightUnderlineGoalColor() {
   return typeof HIGHLIGHT_UNDERLINE_GOAL_COLOR !== 'undefined'
     ? HIGHLIGHT_UNDERLINE_GOAL_COLOR
@@ -4155,12 +4495,12 @@ function getHighlightUnderlineProgressEl(segment) {
   return segment.querySelector('.yomup-highlight-underline-progress');
 }
 
-function createHighlightOverlayBox(rect) {
+function createHighlightOverlayBox(rect, hostElement) {
   if (isHighlightUnderlineOverlayStyle()) {
     const thickness = typeof HIGHLIGHT_UNDERLINE_THICKNESS_PX !== 'undefined'
       ? HIGHLIGHT_UNDERLINE_THICKNESS_PX
       : 2;
-    const underlineTop = getHighlightRectBottom(rect) - thickness;
+    const underlineTop = getHighlightUnderlineTop(rect, hostElement);
     const useSegmentLayer = usesHighlightUnderlineSegmentLayer();
 
     if (!useSegmentLayer) {
@@ -4563,7 +4903,7 @@ function startHighlightUnderlineProgress(durationSeconds) {
   }
 }
 
-function applyHighlightOverlay(range, clipBounds, clientRectsOverride) {
+function applyHighlightOverlay(range, clipBounds, clientRectsOverride, hostElement) {
   clearHighlightOverlay();
   const root = ensureHighlightOverlayRoot();
   const rawRects = clientRectsOverride
@@ -4578,7 +4918,7 @@ function applyHighlightOverlay(range, clipBounds, clientRectsOverride) {
   for (let i = 0; i < rects.length; i++) {
     const rect = rects[i];
     if (!isValidHighlightClientRect(rect)) continue;
-    root.appendChild(createHighlightOverlayBox(rect));
+    root.appendChild(createHighlightOverlayBox(rect, hostElement));
   }
   currentHighlightRange = range;
   currentHighlightRects = rects.slice();
@@ -4607,10 +4947,10 @@ function shouldUseSingleBlockUnionOverlay(chunks, blockText, chunk, range) {
   return countValidRangeClientRects(range) > 1;
 }
 
-function applyHighlightOverlayUnion(range, clipBounds, clientRectsOverride) {
+function applyHighlightOverlayUnion(range, clipBounds, clientRectsOverride, hostElement) {
   // 下線は行ごとの矩形が必要なため、union（外接1矩形）は使わない
   if (isHighlightUnderlineOverlayStyle()) {
-    return applyHighlightOverlay(range, clipBounds, clientRectsOverride);
+    return applyHighlightOverlay(range, clipBounds, clientRectsOverride, hostElement);
   }
 
   clearHighlightOverlay();
@@ -4702,6 +5042,32 @@ function tryHighlightLogicalBlockAtPoint(clientX, clientY) {
     }
 
     const clipBounds = getHighlightBlockClipBounds(highlightBlock);
+    const overlayHostElement = getHighlightBlockClipElement(highlightBlock);
+    let overlayRects = chunkRects;
+    let displayChunk = chunk;
+    let displayRange = range;
+    const lineTolerance = getHighlightUnderlineLineTolerancePx();
+    const chunkSpansMultipleVisualLines = countVisualLinesInClientRects(chunkRects, lineTolerance) > 1;
+    const shouldNarrowOverlayToHoverVisualLine =
+      !useGhostCardLeadChunk &&
+      isHighlightUnderlineOverlayStyle() &&
+      languageMode === LANGUAGE_MODE_EN &&
+      isSingleFullBlockLogicalChunk(chunks, blockText, chunk) &&
+      chunkSpansMultipleVisualLines &&
+      overlayRects.length > 1;
+    if (shouldNarrowOverlayToHoverVisualLine) {
+      overlayRects = filterClientRectsAtPointer(overlayRects, clientX, clientY, {
+        lineTolerance
+      });
+      if (overlayRects.length > 0 && overlayRects.length < chunkRects.length) {
+        const narrowed = narrowChunkToClientRects(segments, blockText, chunk, overlayRects);
+        if (narrowed.start !== chunk.start || narrowed.end !== chunk.end) {
+          displayChunk = narrowed;
+          const narrowedRange = createRangeForChunk(segments, displayChunk.start, displayChunk.end);
+          if (narrowedRange) displayRange = narrowedRange;
+        }
+      }
+    }
 
     clearCurrentHighlight();
     let overlayApplied = false;
@@ -4709,14 +5075,14 @@ function tryHighlightLogicalBlockAtPoint(clientX, clientY) {
       !useGhostCardLeadChunk &&
       shouldUseSingleBlockUnionOverlay(chunks, blockText, chunk, range)
     ) {
-      overlayApplied = applyHighlightOverlayUnion(range, clipBounds, chunkRects);
+      overlayApplied = applyHighlightOverlayUnion(displayRange, clipBounds, overlayRects, overlayHostElement);
     } else {
-      overlayApplied = applyHighlightOverlay(range, clipBounds, chunkRects);
+      overlayApplied = applyHighlightOverlay(displayRange, clipBounds, overlayRects, overlayHostElement);
     }
     if (!overlayApplied) return false;
 
-    const units = countUnits(chunk.text, languageMode);
-    const progressTarget = captureHighlightProgressTarget(highlightBlock, chunk);
+    const units = countUnits(displayChunk.text, languageMode);
+    const progressTarget = captureHighlightProgressTarget(highlightBlock, displayChunk);
     if (subPopupOnOff) {
       startCountdownSubPopup(units, languageMode);
     }
@@ -4725,8 +5091,8 @@ function tryHighlightLogicalBlockAtPoint(clientX, clientY) {
       'logical chunk',
       highlightBlock.mode,
       languageMode,
-      chunk.start,
-      chunk.end,
+      displayChunk.start,
+      displayChunk.end,
       units
     );
     return true;
