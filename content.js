@@ -6217,6 +6217,23 @@ function startCountdownSubPopup(unitCount, languageMode = LANGUAGE_MODE_JA) {
 
 
 // === サブポップアップモードをトグルする関数 =================================
+function getHourglassIcon() {
+  const popupMain = document.getElementById(ID_YOMUP_POPUP_CONTAINER);
+  if (!popupMain || !popupMain.shadowRoot) return null;
+  return popupMain.shadowRoot.querySelector('.hourglass-button img');
+}
+
+function closeSubPopupFromUi() {
+  subPopupOnOff = false;
+  localStorage.setItem(LOCALSTRG_SUBPOPUP_ONOFF, 'false');
+  hideSubPopup();
+  const hourglassIcon = getHourglassIcon();
+  if (hourglassIcon) {
+    hourglassIcon.classList.remove('active');
+  }
+  debugLog('サブポップアップを閉じました');
+}
+
 function toggleSubPopup() {
   subPopupOnOff = !subPopupOnOff; // 状態を反転
   localStorage.setItem(LOCALSTRG_SUBPOPUP_ONOFF, subPopupOnOff.toString());
@@ -6227,8 +6244,7 @@ function toggleSubPopup() {
     // ポップアップを表示
     showSubPopup();
   } else {
-    // ポップアップを非表示
-    hideSubPopup();
+    closeSubPopupFromUi();
   }
 } //end toggleSubPopup
 
@@ -6322,6 +6338,7 @@ function showSubPopup() {
 
   // ドラッグ移動機能を追加
   addDragFunctionality(subpopup);
+  addSubPopupDblClickToClose(subpopup);
 
   debugLog('ポップアップを表示しました');
 } //end showSubPopup
@@ -6514,6 +6531,14 @@ function addClickToCloseFunctionality(popup) {
   popup.addEventListener('dblclick', function (e) {
     e.preventDefault();
     hideYomuPPopup();
+  });
+}
+
+function addSubPopupDblClickToClose(subpopup) {
+  subpopup.addEventListener('dblclick', function (e) {
+    e.preventDefault();
+    e.stopPropagation();
+    closeSubPopupFromUi();
   });
 }
 
