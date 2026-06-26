@@ -1536,7 +1536,7 @@ function handleMouseMove(event) {
   }
 
   // §19: ライン進行中は下線オーバーレイ上の移動で再描画しない
-  if (highlightProgressSession && getHighlightProgressRemainingSeconds() > 0) {
+  if (highlightProgressSession) {
     if (isPointInCurrentHighlightOverlay(event.clientX, event.clientY)) {
       return;
     }
@@ -4576,7 +4576,8 @@ function startHighlightProgressCountdown() {
     highlightProgressSession.remainingSeconds--;
     if (highlightProgressSession.remainingSeconds <= 0) {
       clearHighlightProgressCountdown();
-      resetHighlightProgressSession();
+      highlightProgressSession.remainingSeconds = 0;
+      highlightProgressSession.paused = false;
     }
   }, 1000);
 }
@@ -4779,6 +4780,19 @@ function resumeHighlightProgress() {
   debugLog('ライン進行を再開しました');
 }
 
+function restartHighlightLineProgress() {
+  if (!highlightProgressSession || !isHighlightUnderlineProgressMode()) return;
+  const readTime = highlightProgressSession.readTime;
+  if (!readTime || readTime <= 0) return;
+
+  clearHighlightProgressCountdown();
+  highlightProgressSession.paused = false;
+  highlightProgressSession.remainingSeconds = readTime;
+  startHighlightUnderlineProgress(readTime);
+  startHighlightProgressCountdown();
+  debugLog('ライン進行を最初から再開しました');
+}
+
 function resetHighlightProgressOnSettingsChange() {
   resetHighlightProgressSession();
   clearCurrentHighlight();
@@ -4788,11 +4802,15 @@ function handleProgressPauseClick(event) {
   if (!highLightOnOff) return;
   if (!isHighlightUnderlineProgressMode()) return;
   if (!highlightProgressSession) return;
-  if (getHighlightProgressRemainingSeconds() <= 0) return;
   if (isYomupUiElement(event.target)) return;
 
   const root = highlightOverlayRoot;
   if (!root || !root.querySelector('.yomup-highlight-underline-segment')) return;
+
+  if (getHighlightProgressRemainingSeconds() <= 0) {
+    restartHighlightLineProgress();
+    return;
+  }
 
   if (highlightProgressSession.paused) {
     resumeHighlightProgress();

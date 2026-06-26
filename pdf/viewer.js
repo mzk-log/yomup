@@ -683,7 +683,8 @@ function startHighlightProgressCountdown() {
     highlightProgressSession.remainingSeconds--;
     if (highlightProgressSession.remainingSeconds <= 0) {
       clearHighlightProgressCountdown();
-      resetHighlightProgressSession();
+      highlightProgressSession.remainingSeconds = 0;
+      highlightProgressSession.paused = false;
     }
   }, 1000);
 }
@@ -811,6 +812,18 @@ function resumeHighlightProgress() {
   highlightProgressSession.paused = false;
 }
 
+function restartHighlightLineProgress() {
+  if (!highlightProgressSession || !isHighlightUnderlineProgressEnabled()) return;
+  const readTime = highlightProgressSession.readTime;
+  if (!readTime || readTime <= 0) return;
+
+  clearHighlightProgressCountdown();
+  highlightProgressSession.paused = false;
+  highlightProgressSession.remainingSeconds = readTime;
+  startHighlightUnderlineProgress(readTime);
+  startHighlightProgressCountdown();
+}
+
 function resetHighlightProgressOnSettingsChange() {
   resetHighlightProgressSession();
   clearHighlightState();
@@ -820,11 +833,15 @@ function handleProgressPauseClick(event) {
   if (!highLightOnOff || !highlightListenersAttached) return;
   if (!isHighlightUnderlineProgressEnabled()) return;
   if (!highlightProgressSession) return;
-  if (getHighlightProgressRemainingSeconds() <= 0) return;
   if (isPdfYomupUiElement(event.target)) return;
 
   const root = highlightOverlayRoot;
   if (!root || !root.querySelector('.yomup-pdf-highlight-underline-segment')) return;
+
+  if (getHighlightProgressRemainingSeconds() <= 0) {
+    restartHighlightLineProgress();
+    return;
+  }
 
   if (highlightProgressSession.paused) {
     resumeHighlightProgress();
@@ -1131,7 +1148,7 @@ function handleMouseMove(event) {
     return;
   }
 
-  if (highlightProgressSession && getHighlightProgressRemainingSeconds() > 0) {
+  if (highlightProgressSession) {
     if (isPointInCurrentHighlightOverlay(event.clientX, event.clientY)) {
       return;
     }
