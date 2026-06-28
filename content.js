@@ -300,21 +300,69 @@ function removeYomupUiFromSubtree(root) {
   if (subPopup) subPopup.remove();
 }
 
+function shouldRejectRubyFuriganaTextNode(node) {
+  const parent = node.parentElement;
+  if (!parent) return false;
+  if (parent.closest('rt, rp')) return true;
+  if (parent.closest('#' + ID_YOMUP_POPUP_CONTAINER + ', #' + ID_SUBPOPUP_CONTAINER)) return true;
+  return false;
+}
+
+function collectTextExcludingRubyFurigana(root) {
+  if (!root) return '';
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+    acceptNode(node) {
+      return shouldRejectRubyFuriganaTextNode(node)
+        ? NodeFilter.FILTER_REJECT
+        : NodeFilter.FILTER_ACCEPT;
+    }
+  });
+  let text = '';
+  while (walker.nextNode()) {
+    text += walker.currentNode.textContent || '';
+  }
+  return text;
+}
+
+function collectRangeTextExcludingRubyFurigana(range) {
+  if (!range || range.collapsed) return '';
+  const root = range.commonAncestorContainer;
+  const rootEl = root.nodeType === Node.ELEMENT_NODE ? root : root.parentElement;
+  if (!rootEl) {
+    try {
+      return (range.toString() || '').trim();
+    } catch (_e) {
+      return '';
+    }
+  }
+  const walker = document.createTreeWalker(rootEl, NodeFilter.SHOW_TEXT, {
+    acceptNode(node) {
+      if (shouldRejectRubyFuriganaTextNode(node)) return NodeFilter.FILTER_REJECT;
+      try {
+        if (typeof range.intersectsNode === 'function' && !range.intersectsNode(node)) {
+          return NodeFilter.FILTER_REJECT;
+        }
+      } catch (_e) {
+        return NodeFilter.FILTER_REJECT;
+      }
+      return NodeFilter.FILTER_ACCEPT;
+    }
+  });
+  let text = '';
+  while (walker.nextNode()) {
+    text += walker.currentNode.textContent || '';
+  }
+  return text;
+}
+
 function getInnerTextExcludingRubyFurigana(rootElement) {
   if (!rootElement) return '';
-  const clone = rootElement.cloneNode(true);
-  removeRubyFuriganaFromSubtree(clone);
-  removeYomupUiFromSubtree(clone);
-  return (clone.innerText || '').trim();
+  return collectTextExcludingRubyFurigana(rootElement).trim();
 }
 
 function getRangeTextExcludingRubyFurigana(range) {
   if (!range || range.collapsed) return '';
-  const fragment = range.cloneContents();
-  removeRubyFuriganaFromSubtree(fragment);
-  const div = document.createElement('div');
-  div.appendChild(fragment);
-  return div.innerText || div.textContent || '';
+  return collectRangeTextExcludingRubyFurigana(range);
 }
 
 function getSelectionTextExcludingRubyFurigana(selection) {
@@ -1827,13 +1875,45 @@ function splitJapaneseTextByBoundary(text, maxLength = MAX_TEXT_LENGTH_FOR_HIGHL
   return chunks.filter((c) => c.trim().length > 0);
 }
 
+// §40 ZN-N2b / §42 JA-1: 句点区切りは文ごとに 1 チャンク（短い複数文を連結しない）
+function splitJapaneseLogicalParts(blockText, maxLength = MAX_TEXT_LENGTH_FOR_HIGHLIGHT) {
+  if (!blockText || !blockText.trim()) return [];
+
+  const sentenceParts = [];
+  let start = 0;
+  for (let i = 0; i < blockText.length; i++) {
+    const ch = blockText[i];
+    if (ch === '。' || ch === '！' || ch === '？' || ch === '．') {
+      sentenceParts.push(blockText.slice(start, i + 1));
+      start = i + 1;
+    }
+  }
+  const tail = blockText.slice(start);
+  if (tail.trim()) sentenceParts.push(tail);
+
+  if (sentenceParts.length <= 1) {
+    return splitJapaneseTextByBoundary(blockText, maxLength);
+  }
+
+  const merged = [];
+  for (const part of sentenceParts) {
+    if (!part.trim()) continue;
+    if (part.trim().length <= maxLength) {
+      merged.push(part);
+    } else {
+      merged.push(...splitJapaneseTextByBoundary(part, maxLength));
+    }
+  }
+  return merged.filter((c) => c.trim().length > 0);
+}
+
 function buildLogicalChunks(blockText, languageMode) {
   const maxUnits = languageMode === LANGUAGE_MODE_EN
     ? MAX_WORDS_FOR_HIGHLIGHT
     : MAX_TEXT_LENGTH_FOR_HIGHLIGHT;
   const parts = languageMode === LANGUAGE_MODE_EN
     ? splitEnglishTextByBoundary(blockText, maxUnits)
-    : splitJapaneseTextByBoundary(blockText, maxUnits);
+    : splitJapaneseLogicalParts(blockText, maxUnits);
 
   const chunks = [];
   let pos = 0;
@@ -1861,6 +1941,10 @@ function coalesceLogicalChunks(chunks, languageMode, maxUnits, blockText) {
   if (lastUnits >= minUnits) return chunks;
 
   const prev = chunks[chunks.length - 2];
+  // §40 ZN-N2b: 句点で区切られた文は coalesce しない（同一 <p> 内の隣接文）
+  if (languageMode === LANGUAGE_MODE_JA && isJapaneseSentenceEndChunk(prev.text)) {
+    return chunks;
+  }
   const mergedText = blockText.slice(prev.start, last.end);
   const mergedUnits = languageMode === LANGUAGE_MODE_EN
     ? countWords(mergedText)
@@ -2035,6 +2119,31 @@ function isTableCellHighlightHost(element) {
   return !!(element && (element.tagName === 'TD' || element.tagName === 'TH'));
 }
 
+// §40 ZN-N2a: 素の td 折り返しは全行。目次型・br・構造子があるセルのみ pointer 行に絞る
+function shouldFilterTableCellOverlayToPointerLine(cell) {
+  if (!cell || !isTableCellHighlightHost(cell)) return false;
+  if (isLayoutTableCell(cell)) return true;
+  for (let i = 0; i < cell.children.length; i++) {
+    const child = cell.children[i];
+    if (child.nodeType !== Node.ELEMENT_NODE || !child.tagName) continue;
+    if (TD_CHILD_LINE_BREAK_TAGS.has(child.tagName)) return true;
+    if (child.tagName === 'BR' || child.tagName === 'P' || child.tagName === 'UL' || child.tagName === 'OL') {
+      return true;
+    }
+  }
+  return false;
+}
+
+// §40 ZN-N2a: 素の td は句点分割せずセル全文を 1 チャンク（折り返し全行に下線）
+function shouldUseFullTableCellChunk(highlightBlock) {
+  return (
+    isElementHighlightBlock(highlightBlock) &&
+    highlightBlock.element &&
+    isTableCellHighlightHost(highlightBlock.element) &&
+    !shouldFilterTableCellOverlayToPointerLine(highlightBlock.element)
+  );
+}
+
 function isHeadingHighlightHost(element) {
   return !!(element && element.tagName && isHeadingSectionTag(element.tagName));
 }
@@ -2062,6 +2171,14 @@ function isDefinitionListItemHighlightHost(element) {
 
 // §39 AI-1: br-flow 容器より <p> を優先（県 CMS 等の連続段落）
 function preferParagraphHighlightBlockAtPoint(highlightBlock, clientX, clientY) {
+  // §40 CK-1: <p> 内 strong ラベル（inline-text）は P 全体へ昇格しない
+  if (isInlineTextHighlightBlock(highlightBlock)) {
+    const host = highlightBlock.element;
+    if (host && host.tagName && BLOCK_LABEL_TAGS.has(host.tagName) && isBlockLabelElement(host)) {
+      return highlightBlock;
+    }
+  }
+
   const caretNode = getPointReferenceNode(clientX, clientY);
   if (!caretNode) return highlightBlock;
   let el = caretNode.nodeType === Node.TEXT_NODE ? caretNode.parentElement : caretNode;
@@ -2078,9 +2195,21 @@ function preferParagraphHighlightBlockAtPoint(highlightBlock, clientX, clientY) 
   return highlightBlock;
 }
 
-function getTightenedParagraphClipBounds(hostElement, clipBounds) {
+function getTightenedParagraphClipBounds(hostElement, clipBounds, clientX, clientY) {
   if (!hostElement || hostElement.tagName !== 'P' || !clipBounds) return clipBounds;
+  let top = clipBounds.top;
   let ceiling = clipBounds.bottom;
+
+  if (typeof clientX === 'number' && typeof clientY === 'number') {
+    const split = getParagraphBrLabelSplit(hostElement);
+    if (split && isPointerBelowParagraphBrLabel(hostElement, clientX, clientY)) {
+      const brRect = split.br.getBoundingClientRect();
+      if (brRect.top > 0) {
+        top = Math.max(top, brRect.top - 2);
+      }
+    }
+  }
+
   let sib = hostElement.nextElementSibling;
   while (sib) {
     if (sib.nodeType !== Node.ELEMENT_NODE) {
@@ -2102,14 +2231,14 @@ function getTightenedParagraphClipBounds(hostElement, clipBounds) {
     }
     sib = sib.nextElementSibling;
   }
-  if (!(ceiling < clipBounds.bottom)) return clipBounds;
+  if (!(ceiling < clipBounds.bottom) && !(top > clipBounds.top)) return clipBounds;
   return {
     left: clipBounds.left,
-    top: clipBounds.top,
+    top,
     right: clipBounds.right,
     bottom: ceiling,
     width: clipBounds.right - clipBounds.left,
-    height: ceiling - clipBounds.top
+    height: ceiling - top
   };
 }
 
@@ -2369,6 +2498,92 @@ function isStructuralParagraphLeadingBlockLabel(el, parent, text) {
   return true;
 }
 
+// §40 CK-1: <p><strong>ラベル</strong><br>本文…</p> — strong のみ光らせる
+function isParagraphBrSeparatedBlockLabel(el, parent) {
+  if (!parent || parent.tagName !== 'P') return false;
+  if (!el || !el.tagName || !BLOCK_LABEL_TAGS.has(el.tagName)) return false;
+  if (!isLeadingBlockLabelPosition(parent, el)) return false;
+  const br = el.nextElementSibling;
+  if (!br || br.tagName !== 'BR') return false;
+  return getFollowingSiblingTextLength(parent, el) >= BLOCK_LABEL_MIN_FOLLOWING_CHARS;
+}
+
+function blockLabelAcceptsPointerHit(labelEl, clientX, clientY) {
+  if (getContainingTextRectsForPoint(labelEl, clientX, clientY).length > 0) {
+    return true;
+  }
+  const parent = labelEl.parentElement;
+  if (!isParagraphBrSeparatedBlockLabel(labelEl, parent)) return false;
+  const rect = labelEl.getBoundingClientRect();
+  if (rect.width <= 0 || rect.height <= 0) return false;
+  return (
+    clientX >= rect.left && clientX <= rect.right &&
+    clientY >= rect.top && clientY <= rect.bottom
+  );
+}
+
+function getParagraphBrLabelSplit(p) {
+  if (!p || p.tagName !== 'P') return null;
+  const label = getFirstSignificantChild(p);
+  if (!label || label.nodeType !== Node.ELEMENT_NODE || !BLOCK_LABEL_TAGS.has(label.tagName)) {
+    return null;
+  }
+  if (!isParagraphBrSeparatedBlockLabel(label, p)) return null;
+  const br = label.nextElementSibling;
+  if (!br || br.tagName !== 'BR') return null;
+  return { label, br };
+}
+
+function isNodeAfterParagraphBrLabel(node, br) {
+  if (!node || !br) return false;
+  return !!(br.compareDocumentPosition(node) & Node.DOCUMENT_POSITION_FOLLOWING);
+}
+
+// §42 CK-3: <br> 直下本文 hover では strong ラベル行を塊に含めない
+function isPointerBelowParagraphBrLabel(p, clientX, clientY) {
+  const split = getParagraphBrLabelSplit(p);
+  if (!split) return false;
+  const { label, br } = split;
+  if (blockLabelAcceptsPointerHit(label, clientX, clientY)) return false;
+  const caretNode = getPointReferenceNode(clientX, clientY);
+  if (caretNode && (label === caretNode || label.contains(caretNode))) return false;
+  const brRect = br.getBoundingClientRect();
+  if (brRect.height > 0) {
+    return clientY >= brRect.top - getHighlightUnderlineLineTolerancePx();
+  }
+  return isNodeAfterParagraphBrLabel(caretNode, br);
+}
+
+function collectParagraphBodyAfterBrLabelSegments(p) {
+  const split = getParagraphBrLabelSplit(p);
+  if (!split) return null;
+  const { br } = split;
+  const segments = [];
+  let blockText = '';
+  const walker = document.createTreeWalker(p, NodeFilter.SHOW_TEXT, {
+    acceptNode(node) {
+      if (!shouldIncludeTextNodeInBlock(node, p)) return NodeFilter.FILTER_REJECT;
+      if (!isNodeAfterParagraphBrLabel(node, br)) return NodeFilter.FILTER_REJECT;
+      return NodeFilter.FILTER_ACCEPT;
+    }
+  });
+  while (walker.nextNode()) {
+    const node = walker.currentNode;
+    const text = node.textContent || '';
+    if (!text) continue;
+    const start = blockText.length;
+    blockText += text;
+    segments.push({ node, start, end: blockText.length, text });
+  }
+  if (segments.length === 0) return null;
+  return { blockText, segments };
+}
+
+function resolveParagraphBrLabelBodyTextContext(p, clientX, clientY) {
+  if (!isPointerBelowParagraphBrLabel(p, clientX, clientY)) return null;
+  return collectParagraphBodyAfterBrLabelSegments(p);
+}
+
 function isBlockDisplayLabel(el) {
   const display = window.getComputedStyle(el).display;
   return display === 'block' || display === 'flex' || display === 'list-item' || display === 'grid';
@@ -2448,6 +2663,10 @@ function isBlockLabelElement(el) {
     return true;
   }
 
+  if (isParagraphBrSeparatedBlockLabel(el, parent)) {
+    return true;
+  }
+
   if (text.length > MAX_TEXT_LENGTH_FOR_HIGHLIGHT + HIGHLIGHT_UNIT_SLACK_JA) return false;
 
   if (!isBlockDisplayLabel(el) && !isLabelVisuallySeparatedFromFollowing(el, parent)) {
@@ -2472,7 +2691,7 @@ function findBlockLabelFromPoint(clientX, clientY) {
       continue;
     }
     if (node.tagName && BLOCK_LABEL_TAGS.has(node.tagName) && isBlockLabelElement(node)) {
-      if (getContainingTextRectsForPoint(node, clientX, clientY).length > 0) {
+      if (blockLabelAcceptsPointerHit(node, clientX, clientY)) {
         return node;
       }
       return null;
@@ -5548,12 +5767,30 @@ function resolveHighlightTextContext(highlightBlock, languageMode, clientX, clie
     return lines[findLineIndexAtCaret(lines, clientX, clientY)];
   }
 
-  // §39 AI-1: <p> は <br> 論理行で読み分割しない（段落＝1 塊で chunk 化）
+  // §40 ZN-N2a: 素の td はセル全文（折り返し全行）。行分割しない
+  if (
+    isElementHighlightBlock(highlightBlock) &&
+    highlightBlock.element &&
+    isTableCellHighlightHost(highlightBlock.element) &&
+    !shouldFilterTableCellOverlayToPointerLine(highlightBlock.element)
+  ) {
+    return collectHighlightBlockTextSegments(highlightBlock);
+  }
+
+  // §39 AI-1 / §42 JA-1: <p> は段落全文で segment 化し buildLogicalChunks で句点分割
   if (
     isElementHighlightBlock(highlightBlock) &&
     highlightBlock.element &&
     highlightBlock.element.tagName === 'P'
   ) {
+    if (typeof clientX === 'number' && typeof clientY === 'number') {
+      const brBody = resolveParagraphBrLabelBodyTextContext(
+        highlightBlock.element,
+        clientX,
+        clientY
+      );
+      if (brBody) return brBody;
+    }
     return collectHighlightBlockTextSegments(highlightBlock);
   }
 
@@ -7051,9 +7288,10 @@ function tryHighlightLogicalBlockAtPoint(clientX, clientY) {
         offset = Math.floor(blockText.length / 2);
       }
 
-      chunks = isPreHighlightBlock(highlightBlock)
-        ? [{ start: 0, end: blockText.length, text: blockText }]
-        : buildLogicalChunks(blockText, languageMode);
+      chunks =
+        isPreHighlightBlock(highlightBlock) || shouldUseFullTableCellChunk(highlightBlock)
+          ? [{ start: 0, end: blockText.length, text: blockText }]
+          : buildLogicalChunks(blockText, languageMode);
       chunk = findChunkContainingOffset(chunks, offset);
       if (
         !isAozoraSpecialHighlightBlock(highlightBlock) &&
@@ -7090,7 +7328,9 @@ function tryHighlightLogicalBlockAtPoint(clientX, clientY) {
 
     const clipBounds = getTightenedParagraphClipBounds(
       getHighlightBlockClipElement(highlightBlock),
-      getHighlightBlockClipBounds(highlightBlock)
+      getHighlightBlockClipBounds(highlightBlock),
+      clientX,
+      clientY
     );
     const overlayHostElement = getHighlightBlockClipElement(highlightBlock);
     let overlayRects = chunkRects;
@@ -7099,7 +7339,7 @@ function tryHighlightLogicalBlockAtPoint(clientX, clientY) {
       // §14 NK-1R: ゴースト lead chunk 時は §33 pointer 行絞りを使わない（日経 H2 折り返し全行）
       const filterToPointerLine =
         !useGhostCardLeadChunk &&
-        (isTableCellHighlightHost(hostEl) ||
+        ((isTableCellHighlightHost(hostEl) && shouldFilterTableCellOverlayToPointerLine(hostEl)) ||
           shouldFilterDecoratedBlockOverlayToPointerLine(hostEl, chunkRects));
       if (filterToPointerLine) {
         overlayRects = filterClientRectsToPointerVisualLine(chunkRects, clientX, clientY, {

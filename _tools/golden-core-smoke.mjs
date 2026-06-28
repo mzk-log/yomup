@@ -1,5 +1,5 @@
 /**
- * §7.0 コア G01〜G12 — 拡張ロード済みハイライト・スモーク
+ * §7.0 コア G01〜G14 — 拡張ロード済みハイライト・スモーク
  * 実行: npm run golden:core
  */
 import { chromium } from 'playwright';
@@ -68,7 +68,7 @@ const CASES = [
       { name: 'body-text', locate: locateNikkeiTopCardBody, assertOverlayNearHover: true },
       { name: 'top-card-title', locate: locateNikkeiTopCard }
     ],
-    requireProbe: 'body-text'
+    requireProbe: 'top-card-title'
   },
   {
     id: 'G10',
@@ -111,6 +111,62 @@ const CASES = [
       }
     ],
     requireProbe: 'long-sentence-quote'
+  },
+  {
+    id: 'G13',
+    url: 'https://zenn.dev/nexta_/articles/be13a2395a5d2a',
+    probes: [
+      {
+        name: 'table-symptom-cell',
+        locate: locateZennNextaTableSymptom,
+        assertOverlayMultiLine: true
+      },
+      {
+        name: 'pipeline-paragraph-only',
+        locate: (p) =>
+          locateSnippetPair(p, 'なお、このパイプラインの手前にある', 'そちらの設計オーケストレーター'),
+        assertOverlayNotBelow: true
+      }
+    ],
+    requireProbe: 'table-symptom-cell'
+  },
+  {
+    id: 'G14',
+    url: 'https://clkids.jp/class',
+    probes: [
+      {
+        name: 'course-overview-only',
+        locate: locateClkidsGoldCourseOverview,
+        assertOverlayNotBelow: true
+      },
+      {
+        name: 'silver-body-first-sentence',
+        locate: (p) =>
+          locateClkidsSilverBodySentence(
+            p,
+            'PCでの開発に移行し',
+            '希望者はチームでWROに挑戦'
+          ),
+        assertOverlaySentenceBounds: true
+      },
+      {
+        name: 'silver-body-second-sentence',
+        locate: (p) =>
+          locateClkidsSilverBodySentence(
+            p,
+            '希望者はチームでWROに挑戦',
+            null
+          ),
+        assertOverlaySentenceBounds: true
+      },
+      { name: 'char-count-ready', check: assertPopupCharCountReady }
+    ],
+    requireProbes: [
+      'course-overview-only',
+      'silver-body-first-sentence',
+      'silver-body-second-sentence',
+      'char-count-ready'
+    ]
   }
 ];
 
@@ -275,6 +331,15 @@ async function main() {
 
         let anyPass = false;
         for (const probe of tc.probes) {
+          if (probe.check) {
+            const lit = await probe.check(page);
+            caseResult.probes.push({
+              name: probe.name,
+              status: lit ? 'PASS' : 'FAIL'
+            });
+            if (lit) anyPass = true;
+            continue;
+          }
           const point = await probe.locate(page);
           if (!point) {
             caseResult.probes.push({ name: probe.name, status: 'SKIP', reason: 'probe-not-found' });
@@ -289,7 +354,16 @@ async function main() {
           if (lit && probe.assertOverlayNotBelow) {
             lit = await overlayNotBelowY(page, point);
           }
-          const debugOverlay = probe.assertOverlayNotBelow
+          if (lit && probe.assertOverlayNotAbove) {
+            lit = await overlayNotAboveY(page, point);
+          }
+          if (lit && probe.assertOverlaySentenceBounds) {
+            lit = await overlayWithinSentenceBounds(page, point);
+          }
+          if (lit && probe.assertOverlayMultiLine) {
+            lit = await overlayExtendsBelow(page, point);
+          }
+          const debugOverlay = probe.assertOverlayNotBelow || probe.assertOverlayMultiLine || probe.assertOverlayNotAbove || probe.assertOverlaySentenceBounds
             ? await describeOverlayProbe(page, point)
             : undefined;
           caseResult.probes.push({
@@ -299,11 +373,17 @@ async function main() {
             y: Math.round(point.y),
             hoverTop: point.hoverTop != null ? Math.round(point.hoverTop) : undefined,
             forbidBelowY: point.forbidBelowY != null ? Math.round(point.forbidBelowY) : undefined,
+            minExtendBelowY:
+              point.minExtendBelowY != null ? Math.round(point.minExtendBelowY) : undefined,
             debugOverlay
           });
           if (lit) anyPass = true;
         }
-        if (tc.requireProbe) {
+        if (tc.requireProbes?.length) {
+          caseResult.ok = tc.requireProbes.every(
+            (name) => caseResult.probes.find((p) => p.name === name)?.status === 'PASS'
+          );
+        } else if (tc.requireProbe) {
           const required = caseResult.probes.find((p) => p.name === tc.requireProbe);
           caseResult.ok = required?.status === 'PASS';
         } else {
@@ -351,8 +431,26 @@ async function hasHighlightOverlay(page) {
   });
 }
 
+/** §41 CK-2 — ポップアップ総文字数が取得できている（SVG cloneNode 退行ガード） */
+async function assertPopupCharCountReady(page) {
+  try {
+    await page.locator('#YomuP-popup-container').waitFor({ state: 'attached', timeout: 25000 });
+  } catch (_e) {
+    return false;
+  }
+  await page.waitForTimeout(400);
+  return page.evaluate(() => {
+    const shadow = document.getElementById('YomuP-popup-container')?.shadowRoot;
+    const text = (shadow?.querySelector('.total-info')?.textContent || '').trim();
+    const match = text.match(/(\d[\d,]*)/);
+    if (!match) return false;
+    const count = parseInt(match[1].replace(/,/g, ''), 10);
+    return Number.isFinite(count) && count >= 50;
+  });
+}
+
 async function describeOverlayProbe(page, point) {
-  return page.evaluate(({ forbidBelowY, y, hoverTop }) => {
+  return page.evaluate(({ forbidBelowY, forbidAboveY, forbidRightX, forbidRightLineTop, forbidLeftX, forbidLeftLineTop, y, hoverTop, minExtendBelowY }) => {
     const targetY = typeof hoverTop === 'number' ? hoverTop : y;
     const segs = [
       ...document.querySelectorAll(
@@ -361,9 +459,53 @@ async function describeOverlayProbe(page, point) {
     ];
     const tops = segs.map((s) => Math.round(s.getBoundingClientRect().top));
     const bottoms = segs.map((s) => Math.round(s.getBoundingClientRect().bottom));
+    const rights = segs.map((s) => Math.round(s.getBoundingClientRect().right));
+    const lefts = segs.map((s) => Math.round(s.getBoundingClientRect().left));
     const nearHover = tops.some((t) => Math.abs(t - targetY) < 55);
     const spills = typeof forbidBelowY === 'number' && bottoms.some((b) => b > forbidBelowY);
-    return { segCount: segs.length, tops, bottoms, nearHover, spills, forbidBelowY, hoverTop: targetY };
+    const spillsAbove = typeof forbidAboveY === 'number' && tops.some((t) => t < forbidAboveY - 1);
+    const spillsRight =
+      typeof forbidRightX === 'number' &&
+      rights.some((r, i) => {
+        const lineTop = tops[i];
+        if (typeof forbidRightLineTop === 'number' && Math.abs(lineTop - forbidRightLineTop) > 8) {
+          return false;
+        }
+        return r > forbidRightX + 3;
+      });
+    const spillsLeft =
+      typeof forbidLeftX === 'number' &&
+      lefts.some((l, i) => {
+        const lineTop = tops[i];
+        if (typeof forbidLeftLineTop === 'number' && Math.abs(lineTop - forbidLeftLineTop) > 8) {
+          return false;
+        }
+        return l < forbidLeftX - 3;
+      });
+    const extendsBelow =
+      typeof minExtendBelowY === 'number' &&
+      Math.max(...bottoms, 0) >= Math.round(minExtendBelowY) - 4;
+    return {
+      segCount: segs.length,
+      tops,
+      bottoms,
+      rights,
+      lefts,
+      nearHover,
+      spills,
+      spillsAbove,
+      spillsRight,
+      spillsLeft,
+      extendsBelow,
+      forbidBelowY,
+      forbidAboveY,
+      forbidRightX,
+      forbidRightLineTop,
+      forbidLeftX,
+      forbidLeftLineTop,
+      minExtendBelowY,
+      hoverTop: targetY
+    };
   }, point);
 }
 
@@ -381,6 +523,75 @@ async function overlayNotBelowY(page, point) {
     const nearHover = segs.some((s) => Math.abs(s.getBoundingClientRect().top - targetY) < 55);
     const spills = segs.some((s) => s.getBoundingClientRect().bottom > forbidBelowY);
     return nearHover && !spills;
+  }, point);
+}
+
+/** CK-3 / JA-1: 同一行に並ぶ句点塊は X 境界も検証（Y のみでは誤判定） */
+async function overlayWithinSentenceBounds(page, point) {
+  return page.evaluate(({ forbidBelowY, forbidAboveY, forbidRightX, forbidRightLineTop, forbidLeftX, forbidLeftLineTop, y, hoverTop }) => {
+    const targetY = typeof hoverTop === 'number' ? hoverTop : y;
+    const segs = [
+      ...document.querySelectorAll(
+        '#yomup-highlight-overlay-root .yomup-highlight-underline-segment, #yomup-highlight-overlay-root .yomup-highlight-underline'
+      )
+    ];
+    if (segs.length === 0) return false;
+    const nearHover = segs.some((s) => Math.abs(s.getBoundingClientRect().top - targetY) < 55);
+    if (!nearHover) return false;
+    for (const s of segs) {
+      const r = s.getBoundingClientRect();
+      if (typeof forbidBelowY === 'number' && r.bottom > forbidBelowY + 1) return false;
+      if (typeof forbidAboveY === 'number' && r.top < forbidAboveY - 1) return false;
+      if (
+        typeof forbidRightX === 'number' &&
+        (typeof forbidRightLineTop !== 'number' || Math.abs(r.top - forbidRightLineTop) <= 8) &&
+        r.right > forbidRightX + 3
+      ) {
+        return false;
+      }
+      if (
+        typeof forbidLeftX === 'number' &&
+        (typeof forbidLeftLineTop !== 'number' || Math.abs(r.top - forbidLeftLineTop) <= 8) &&
+        r.left < forbidLeftX - 3
+      ) {
+        return false;
+      }
+    }
+    return true;
+  }, point);
+}
+
+/** CK-3: 下線が上側ラベル行にまたがらないこと */
+async function overlayNotAboveY(page, point) {
+  return page.evaluate(({ forbidAboveY, y, hoverTop }) => {
+    if (typeof forbidAboveY !== 'number') return false;
+    const targetY = typeof hoverTop === 'number' ? hoverTop : y;
+    const segs = [
+      ...document.querySelectorAll(
+        '#yomup-highlight-overlay-root .yomup-highlight-underline-segment, #yomup-highlight-overlay-root .yomup-highlight-underline'
+      )
+    ];
+    if (segs.length === 0) return false;
+    const nearHover = segs.some((s) => Math.abs(s.getBoundingClientRect().top - targetY) < 55);
+    const spillsAbove = segs.some((s) => s.getBoundingClientRect().top < forbidAboveY - 1);
+    return nearHover && !spillsAbove;
+  }, point);
+}
+
+/** ZN-N2: 表セル内の折り返し全文に下線が届くこと */
+async function overlayExtendsBelow(page, point) {
+  return page.evaluate(({ hoverTop, minExtendBelowY }) => {
+    if (typeof minExtendBelowY !== 'number') return false;
+    const targetY = typeof hoverTop === 'number' ? hoverTop : 0;
+    const segs = [
+      ...document.querySelectorAll(
+        '#yomup-highlight-overlay-root .yomup-highlight-underline-segment, #yomup-highlight-overlay-root .yomup-highlight-underline'
+      )
+    ];
+    if (segs.length === 0) return false;
+    const nearHover = segs.some((s) => Math.abs(s.getBoundingClientRect().top - targetY) < 55);
+    const maxBottom = Math.max(...segs.map((s) => s.getBoundingClientRect().bottom));
+    return nearHover && maxBottom >= minExtendBelowY - 4;
   }, point);
 }
 
@@ -858,6 +1069,336 @@ async function locateAichiPair(page, hoverSnippet, nextSnippet) {
       forbidBelowY: nRect.top - 6
     };
   }, { hoverSnippet, nextSnippet });
+}
+
+/** スニペットペア — hover 行と、下線が届いてはいけない次ブロック先頭 */
+async function locateSnippetPair(page, hoverSnippet, nextSnippet) {
+  return page.evaluate(({ hoverSnippet, nextSnippet }) => {
+    const root = document.querySelector('article, main, [role="main"]') || document.body;
+
+    function collectSnippetHits(snippet) {
+      const hits = [];
+      const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+      while (walker.nextNode()) {
+        const node = walker.currentNode;
+        const full = node.textContent || '';
+        if (node.parentElement?.closest('nav, header, footer, script, style, noscript, code, pre')) {
+          continue;
+        }
+        const idx = full.indexOf(snippet);
+        if (idx < 0) continue;
+        const range = document.createRange();
+        range.setStart(node, idx);
+        range.setEnd(node, Math.min(idx + snippet.length, full.length));
+        const rect = range.getBoundingClientRect();
+        if (rect.width <= 0 || rect.height <= 0) continue;
+        hits.push({
+          range,
+          rect,
+          absTop: rect.top + window.scrollY,
+          paragraph: node.parentElement?.closest('p')
+        });
+      }
+      hits.sort((a, b) => a.absTop - b.absTop);
+      return hits;
+    }
+
+    function pickPrimaryHit(hits) {
+      if (hits.length === 0) return null;
+      for (let i = 0; i < hits.length; i++) {
+        if (hits[i].absTop < 5000) return hits[i];
+      }
+      return hits[0];
+    }
+
+    const hoverHits = collectSnippetHits(hoverSnippet);
+    const hover = pickPrimaryHit(hoverHits);
+    if (!hover) return null;
+
+    const hoverP = hover.paragraph;
+    let nextHits = collectSnippetHits(nextSnippet).filter((hit) => hoverP && hit.paragraph === hoverP);
+    if (nextHits.length === 0) nextHits = collectSnippetHits(nextSnippet);
+    const next = pickPrimaryHit(nextHits);
+    if (!next) return null;
+
+    hoverP?.scrollIntoView({ block: 'center', inline: 'nearest' });
+
+    const remeasure = (hit) => {
+      const rect = hit.range.getBoundingClientRect();
+      return rect.width > 0 && rect.height > 0 ? rect : hit.rect;
+    };
+    const hRect = remeasure(hover);
+    const nRect = remeasure(next);
+
+    return {
+      x: hRect.left + Math.min(24, hRect.width * 0.3),
+      y: hRect.top + hRect.height / 2,
+      hoverTop: hRect.top,
+      forbidBelowY: nRect.top - 6
+    };
+  }, { hoverSnippet, nextSnippet });
+}
+
+/** Zenn Nexta — 背景表「具体的な症状」セル（折り返し2行） */
+async function locateZennNextaTableSymptom(page) {
+  const hoverLoc = page.getByText('AIが出すケースは正常系に偏りがち', { exact: false }).first();
+  if ((await hoverLoc.count()) === 0) return null;
+  await hoverLoc.scrollIntoViewIfNeeded();
+  await page.waitForTimeout(250);
+  return page.evaluate(() => {
+    const snippet = 'AIが出すケースは正常系に偏りがち';
+    const snippet2 = 'いと抜ける';
+    const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+    while (walker.nextNode()) {
+      const node = walker.currentNode;
+      const full = node.textContent || '';
+      if (!full.includes(snippet)) continue;
+      const cell = node.parentElement?.closest('td, th');
+      if (!cell) continue;
+      const idx = full.indexOf(snippet);
+      const range = document.createRange();
+      range.setStart(node, idx);
+      range.setEnd(node, Math.min(idx + 10, full.length));
+      const hRect = range.getBoundingClientRect();
+      if (hRect.width <= 0 || hRect.height <= 0) continue;
+
+      let minExtendBelowY = hRect.bottom + 14;
+      const w2 = document.createTreeWalker(cell, NodeFilter.SHOW_TEXT);
+      while (w2.nextNode()) {
+        const n2 = w2.currentNode;
+        const t2 = n2.textContent || '';
+        const i2 = t2.indexOf(snippet2);
+        if (i2 < 0) continue;
+        const r2 = document.createRange();
+        r2.setStart(n2, i2);
+        r2.setEnd(n2, Math.min(i2 + snippet2.length, t2.length));
+        const rect2 = r2.getBoundingClientRect();
+        if (rect2.top > hRect.top + 4) {
+          minExtendBelowY = rect2.bottom - 2;
+          break;
+        }
+      }
+
+      return {
+        x: hRect.left + Math.min(24, hRect.width * 0.35),
+        y: hRect.top + hRect.height / 2,
+        hoverTop: hRect.top,
+        minExtendBelowY
+      };
+    }
+    return null;
+  });
+}
+
+/** clkids シルバー — <strong>コース概要</strong><br> 本文の句点単位ハイライト（CK-3 / JA-1） */
+async function locateClkidsSilverBodySentence(page, hoverSnippet, nextSnippet) {
+  const anchor = page.getByText('シルバーコース（2年目）', { exact: false }).first();
+  if ((await anchor.count()) === 0) {
+    const fallback = page.getByText('シルバーコース', { exact: false }).first();
+    if ((await fallback.count()) === 0) return null;
+    await fallback.scrollIntoViewIfNeeded();
+  } else {
+    await anchor.scrollIntoViewIfNeeded();
+  }
+  await page.waitForTimeout(300);
+
+  const locatePoint = () =>
+    page.evaluate(({ hoverSnippet, nextSnippet }) => {
+    const labelSnippet = 'コース概要';
+    const bodyNeedle = 'PCでの開発に移行し';
+
+    const silverH4 = [...document.querySelectorAll('h4')].find((h) =>
+      (h.textContent || '').includes('シルバーコース')
+    );
+    if (!silverH4) return null;
+
+    const allowedPs = [];
+    let sib = silverH4.nextElementSibling;
+    while (sib && sib.tagName !== 'H4') {
+      if (sib.tagName === 'P') allowedPs.push(sib);
+      allowedPs.push(...sib.querySelectorAll('p'));
+      sib = sib.nextElementSibling;
+    }
+    if (allowedPs.length === 0) return null;
+
+    function pointInAllowedPs(snippet) {
+      for (const p of allowedPs) {
+        if (!(p.textContent || '').includes(snippet)) continue;
+        const walker = document.createTreeWalker(p, NodeFilter.SHOW_TEXT);
+        while (walker.nextNode()) {
+          const node = walker.currentNode;
+          const full = node.textContent || '';
+          const idx = full.indexOf(snippet);
+          if (idx < 0) continue;
+          const range = document.createRange();
+          range.setStart(node, idx);
+          range.setEnd(node, Math.min(idx + snippet.length, full.length));
+          const rect = range.getBoundingClientRect();
+          if (rect.width > 0 && rect.height > 0) {
+            return { range, rect, p };
+          }
+        }
+      }
+      return null;
+    }
+
+    function sentenceRectsInP(p, snippet) {
+      const walker = document.createTreeWalker(p, NodeFilter.SHOW_TEXT);
+      while (walker.nextNode()) {
+        const node = walker.currentNode;
+        const full = node.textContent || '';
+        const start = full.indexOf(snippet);
+        if (start < 0) continue;
+        const periodIdx = full.indexOf('。', start);
+        const end = periodIdx >= 0 ? periodIdx + 1 : Math.min(start + snippet.length, full.length);
+        const range = document.createRange();
+        range.setStart(node, start);
+        range.setEnd(node, end);
+        const rects = [...range.getClientRects()].filter((r) => r.width > 0 && r.height > 0);
+        if (rects.length === 0) continue;
+        return rects;
+      }
+      return null;
+    }
+
+    const hover = pointInAllowedPs(hoverSnippet);
+    if (!hover || !(hover.p.textContent || '').includes(bodyNeedle)) return null;
+
+    let labelBottom = null;
+    const strongs = hover.p.querySelectorAll('strong, b');
+    for (const s of strongs) {
+      if (!(s.textContent || '').includes(labelSnippet)) continue;
+      const w = document.createTreeWalker(s, NodeFilter.SHOW_TEXT);
+      while (w.nextNode()) {
+        const t = w.currentNode.textContent || '';
+        const i = t.indexOf(labelSnippet);
+        if (i < 0) continue;
+        const r = document.createRange();
+        r.setStart(w.currentNode, i);
+        r.setEnd(w.currentNode, i + labelSnippet.length);
+        labelBottom = r.getBoundingClientRect().bottom;
+        break;
+      }
+      if (labelBottom != null) break;
+    }
+
+    let forbidAboveY = labelBottom != null ? labelBottom + 2 : undefined;
+    let forbidBelowY;
+    let forbidRightX;
+    let forbidRightLineTop;
+    let forbidLeftX;
+    let forbidLeftLineTop;
+
+    const firstRects = sentenceRectsInP(hover.p, 'PCでの開発に移行し');
+    const secondRects = sentenceRectsInP(hover.p, '希望者はチームでWROに挑戦');
+    if (firstRects && secondRects) {
+      const s1Last = firstRects[firstRects.length - 1];
+      const s2First = secondRects[0];
+      if (hoverSnippet.includes('PCでの開発')) {
+        forbidRightX = s1Last.right;
+        forbidRightLineTop = s1Last.top;
+        if (s2First.top > s1Last.bottom + 4) {
+          forbidBelowY = s2First.top - 6;
+        }
+      } else if (hoverSnippet.includes('希望者は')) {
+        if (Math.abs(s2First.top - s1Last.top) < 8) {
+          forbidLeftX = s2First.left;
+          forbidLeftLineTop = s2First.top;
+        } else {
+          forbidAboveY = Math.max(forbidAboveY || 0, s1Last.bottom + 2);
+        }
+      }
+    }
+
+    const hRect = hover.rect;
+    return {
+      x: hRect.left + Math.min(24, hRect.width * 0.3),
+      y: hRect.top + hRect.height / 2,
+      hoverTop: hRect.top,
+      forbidBelowY,
+      forbidAboveY,
+      forbidRightX,
+      forbidRightLineTop,
+      forbidLeftX,
+      forbidLeftLineTop
+    };
+  }, { hoverSnippet, nextSnippet });
+
+  let point = await locatePoint();
+  if (!point) return null;
+
+  // 前プローブ（ゴールド欄）直後は h4 先頭がビューポート上端に張り付き固定ヘッダー下で不発 → 本文 p を中央へ
+  await page.evaluate(({ hoverSnippet }) => {
+    const silverH4 = [...document.querySelectorAll('h4')].find((h) =>
+      (h.textContent || '').includes('シルバーコース')
+    );
+    if (!silverH4) return;
+    let sib = silverH4.nextElementSibling;
+    while (sib && sib.tagName !== 'H4') {
+      const candidates = [];
+      if (sib.tagName === 'P') candidates.push(sib);
+      candidates.push(...sib.querySelectorAll('p'));
+      for (const p of candidates) {
+        if ((p.textContent || '').includes(hoverSnippet)) {
+          p.scrollIntoView({ block: 'center', inline: 'nearest' });
+          return;
+        }
+      }
+      sib = sib.nextElementSibling;
+    }
+  }, { hoverSnippet });
+  await page.waitForTimeout(350);
+  point = await locatePoint();
+  return point;
+}
+
+/** clkids — ゴールド欄「コース概要」ラベルのみ（直下「より高度な制御…」は除外） */
+async function locateClkidsGoldCourseOverview(page) {
+  const anchor = page.getByText('より高度な制御', { exact: false }).first();
+  if ((await anchor.count()) === 0) return null;
+  await anchor.scrollIntoViewIfNeeded();
+  await page.waitForTimeout(250);
+  return page.evaluate(() => {
+    const bodySnippet = 'より高度な制御';
+    const labelSnippet = 'コース概要';
+    const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+    while (walker.nextNode()) {
+      const bodyNode = walker.currentNode;
+      const bodyText = bodyNode.textContent || '';
+      if (!bodyText.includes(bodySnippet)) continue;
+      let host = bodyNode.parentElement;
+      for (let depth = 0; depth < 10 && host; depth++) {
+        const labels = host.querySelectorAll('strong, b, p, span, div');
+        for (const label of labels) {
+          const lt = (label.textContent || '').trim();
+          if (!lt.includes(labelSnippet) || lt.length > 24) continue;
+          const lw = document.createTreeWalker(label, NodeFilter.SHOW_TEXT);
+          while (lw.nextNode()) {
+            const ln = lw.currentNode;
+            if (!(ln.textContent || '').includes(labelSnippet)) continue;
+            const idx = (ln.textContent || '').indexOf(labelSnippet);
+            const range = document.createRange();
+            range.setStart(ln, idx);
+            range.setEnd(ln, idx + labelSnippet.length);
+            const hRect = range.getBoundingClientRect();
+            const bodyRange = document.createRange();
+            bodyRange.selectNodeContents(bodyNode);
+            const bRect = bodyRange.getBoundingClientRect();
+            if (hRect.width <= 0 || bRect.top < hRect.bottom - 2) continue;
+            if (bRect.top - hRect.bottom > 80) continue;
+            return {
+              x: hRect.left + Math.min(16, hRect.width * 0.35),
+              y: hRect.top + hRect.height / 2,
+              hoverTop: hRect.top,
+              forbidBelowY: bRect.top - 6
+            };
+          }
+        }
+        host = host.parentElement;
+      }
+    }
+    return null;
+  });
 }
 
 async function locateNikkeiTopCardBody(page) {

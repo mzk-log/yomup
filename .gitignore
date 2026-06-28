@@ -1,2 +1,3 @@
 node_modules/
-_tools/.pw-user-data/
+_tools/.pw-*/
+_tools/.chrome-manual-test/
