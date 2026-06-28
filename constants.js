@@ -31,7 +31,7 @@ const PDF_PAGE_MENU = {
 };
 
 // 読むプバージョン（機能変更.不具合修正・改善.申請）
-const YOMUP_VERSION = "3.4.0";
+const YOMUP_VERSION = "3.5.DEV";
 
 // 任意の開発支援（Ko-fi）— ユーザー操作時のみ外部タブで開く
 const DONATION_KOFI_URL = 'https://ko-fi.com/mzk_log';
@@ -39,6 +39,8 @@ const DONATION_KOFI_URL = 'https://ko-fi.com/mzk_log';
 
 // デバッグログ出力の有効/無効（コンパイルスイッチ）
 const ENABLE_DEBUG_LOG = false; // true: 有効, false: 無効（本番環境）
+// フェーズ0: 下線ずれ調査（Ko-fi 等）。P2-QA 完了後 false（N-S1 含む）
+const ENABLE_HIGHLIGHT_UNDERLINE_TRACE = false;
 
 // テキストハイライトの文字数制限（日本語）
 const MAX_TEXT_LENGTH_FOR_HIGHLIGHT = 100;
@@ -132,6 +134,8 @@ if (typeof self !== 'undefined') {
   self.READING_SPEED_CHARS_PER_MIN = READING_SPEED_CHARS_PER_MIN;
   self.HIGHLIGHT_TARGET_TAGS = HIGHLIGHT_TARGET_TAGS;
   self.CONSECUTIVE_GROUP_TAGS = CONSECUTIVE_GROUP_TAGS;
+  self.ENABLE_DEBUG_LOG = ENABLE_DEBUG_LOG;
+  self.ENABLE_HIGHLIGHT_UNDERLINE_TRACE = ENABLE_HIGHLIGHT_UNDERLINE_TRACE;
 }
 
 // グローバルスコープに公開（Content Script用）
@@ -154,6 +158,8 @@ if (typeof window !== 'undefined') {
   window.ENABLE_HIGHLIGHT_UNDERLINE_PROGRESS = ENABLE_HIGHLIGHT_UNDERLINE_PROGRESS;
   window.HIGHLIGHT_UNDERLINE_PROGRESS_MIN_SECONDS = HIGHLIGHT_UNDERLINE_PROGRESS_MIN_SECONDS;
   window.HIGHLIGHT_STICKY_RIGHT_PADDING_PX = HIGHLIGHT_STICKY_RIGHT_PADDING_PX;
+  window.ENABLE_DEBUG_LOG = ENABLE_DEBUG_LOG;
+  window.ENABLE_HIGHLIGHT_UNDERLINE_TRACE = ENABLE_HIGHLIGHT_UNDERLINE_TRACE;
   window.ENABLE_UI_LOCALE_OVERRIDE = ENABLE_UI_LOCALE_OVERRIDE;
   window.LOCALSTRG_UI_LOCALE_OVERRIDE = LOCALSTRG_UI_LOCALE_OVERRIDE;
 }
