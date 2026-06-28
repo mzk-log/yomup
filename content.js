@@ -87,6 +87,12 @@ const RUBY_BR_BLOCK_EXCLUDED_CLASSES = new Set([
   'title', 'author', 'metadata', 'midashi_anchor'
 ]);
 const AOZORA_ORPHAN_TEXT_PARENT_TAGS = new Set(['CENTER', 'BODY']);
+const AOZORA_BR_LINE_MIN_TEXT_LENGTH = 4;
+// 書誌・注記のみ br 直下テキストを 1 行 scoped に（main_text はルビ分割のため対象外）
+const AOZORA_BR_SEPARATED_LINE_CONTAINER_CLASSES = new Set([
+  'bibliographical_information',
+  'notation_notes'
+]);
 // dd 直下のブロック子要素を論理行境界とする（h4 + 概要 div 等の連結防止）
 const DD_CHILD_LINE_BREAK_TAGS = new Set([
   'H1', 'H2', 'H3', 'H4', 'H5', 'H6',
@@ -1544,7 +1550,7 @@ function handleMouseMove(event) {
   lastHighlightClientX = event.clientX;
   lastHighlightClientY = event.clientY;
 
-  if (isPointInCurrentHighlight(event.clientX, event.clientY)) {
+  if (!isRubyBrBlockHost() && isPointInCurrentHighlight(event.clientX, event.clientY)) {
     return;
   }
 
@@ -1564,6 +1570,9 @@ function handleMouseMove(event) {
   try {
     mouseTimeoutForHighlight = setTimeout(() => {
       try {
+        if (tryHighlightLogicalBlockAtPoint(lastHighlightClientX, lastHighlightClientY)) {
+          return;
+        }
         highlightElement(event.target, lastHighlightClientX, lastHighlightClientY);
       } catch (error) {
         debugError('ハイライト処理中にエラーが発生:', error);
@@ -2516,6 +2525,45 @@ function isAnchorTextWrapperSpan(el) {
   return isAnchorWithTextWrapperChildrenOnly(parent);
 }
 
+function countDirectSpanChildrenOfAnchor(anchor) {
+  if (!anchor || anchor.tagName !== 'A') return 0;
+  let count = 0;
+  for (let i = 0; i < anchor.children.length; i++) {
+    if (anchor.children[i].tagName === 'SPAN') count++;
+  }
+  return count;
+}
+
+// §38 N-N1: 日付・カテゴリ・タイトル等、複数 span 列の複合 <a>
+function isMultiSpanCompositeAnchor(anchor) {
+  return countDirectSpanChildrenOfAnchor(anchor) >= 2;
+}
+
+function findCompositeAnchorFromNode(node) {
+  let el = node && node.nodeType === Node.TEXT_NODE ? node.parentElement : node;
+  while (el && el !== document.body && el !== document.documentElement) {
+    if (el.tagName === 'A' && isAnchorWithTextWrapperChildrenOnly(el)) return el;
+    el = el.parentElement;
+  }
+  return null;
+}
+
+function isPointInsideCompositeAnchorWrapper(clientX, clientY) {
+  let node = getPointReferenceNode(clientX, clientY);
+  if (node && node.nodeType === Node.TEXT_NODE) {
+    node = node.parentElement;
+  }
+  if (!node) {
+    node = document.elementFromPoint(clientX, clientY);
+  }
+  return !!findCompositeAnchorFromNode(node);
+}
+
+function isAnchorTextWrapperSpanInMultiSpanAnchor(el) {
+  if (!isAnchorTextWrapperSpan(el)) return false;
+  return isMultiSpanCompositeAnchor(el.parentElement);
+}
+
 function resolveAnchorWrapperInlineTextHost(el, clientX, clientY) {
   if (!el) return null;
 
@@ -2918,6 +2966,10 @@ function inlineTextHostAcceptsHoverPoint(el, clientX, clientY) {
   if (getContainingTextRectsForPoint(el, clientX, clientY).length > 0) {
     return true;
   }
+  // §38 N-N1: 複数列 composite <a> の span はテキスト rect のみ（列間 gap で bbox 誤反応しない）
+  if (isAnchorTextWrapperSpanInMultiSpanAnchor(el)) {
+    return false;
+  }
   // Gemini sequence / leaf-text-div: 行幅 div 内のテキスト右空白（NK-4 相当・領域限定）
   if (isGeminiSequenceTextUnit(el) || isLeafTextDivElement(el) || isAnchorTextWrapperSpan(el)) {
     const rect = el.getBoundingClientRect();
@@ -3082,6 +3134,9 @@ function resolveInnerCardCellTextUnit(cardEl, caretNode, clientX, clientY) {
 }
 
 function findInnerCardCellBlockFromPoint(clientX, clientY) {
+  // §14 NK-1R: 日経 blockLink ゴーストカードでは hit-stack を優先（§29 inner-card 誤判定防止）
+  if (isGhostOverlayAtPoint(clientX, clientY)) return null;
+
   const caretNode = getPointReferenceNode(clientX, clientY);
   let node = caretNode;
   if (node && node.nodeType === Node.TEXT_NODE) {
@@ -3359,6 +3414,9 @@ function normalizeAggregateHighlightBlock(highlightBlock, clientX, clientY) {
   if (!highlightBlock || !isElementHighlightBlock(highlightBlock)) return highlightBlock;
   const el = highlightBlock.element;
   if (!el) return highlightBlock;
+
+  // §16 AZ-1R: 青空 ruby-br / orphan は子要素へ縮小しない（H4 章題誤正規化防止）
+  if (isAozoraSpecialHighlightBlock(highlightBlock)) return highlightBlock;
 
   const caretNode = getPointReferenceNode(clientX, clientY);
   const isFeatureColumn = isKoFiFeatureColumnElement(el) || isAggregateFeatureColumnElement(el);
@@ -3954,12 +4012,214 @@ function findIconTextRowBlockFromPoint(clientX, clientY) {
 }
 
 // §36 B: dt/dd 行 — SVG 上 hover も行矩形で許容（§34 EH-1 と同型）
+function countStatDlUnitsInContainer(container) {
+  if (!container || !container.children) return 0;
+  let count = 0;
+  for (let i = 0; i < container.children.length; i++) {
+    const child = container.children[i];
+    if (child.nodeType !== Node.ELEMENT_NODE) continue;
+    if (child.tagName === 'DL' && child.querySelector('dt')) {
+      count++;
+    } else if (child.tagName === 'DIV' && child.querySelector(':scope > dl')) {
+      count++;
+    }
+  }
+  return count;
+}
+
+function isStatDlGridDirectChildUnit(el) {
+  if (!el || el.nodeType !== Node.ELEMENT_NODE) return false;
+  if (el.tagName === 'DL' && el.querySelector('dt')) return true;
+  return !!(el.tagName === 'DIV' && el.querySelector(':scope > dl'));
+}
+
+function findMultiColumnStatDlGridFromNode(node) {
+  let el = node && node.nodeType === Node.TEXT_NODE ? node.parentElement : node;
+  while (el && el !== document.body && el !== document.documentElement) {
+    if (countStatDlUnitsInContainer(el) >= 2) return el;
+    el = el.parentElement;
+  }
+  return null;
+}
+
+function isPointInsideMultiColumnStatDlGrid(clientX, clientY) {
+  let node = getPointReferenceNode(clientX, clientY);
+  if (node && node.nodeType === Node.TEXT_NODE) {
+    node = node.parentElement;
+  }
+  if (!node) {
+    node = document.elementFromPoint(clientX, clientY);
+  }
+  const grid = findMultiColumnStatDlGridFromNode(node);
+  if (!grid) return false;
+
+  if (node === grid) return true;
+
+  let cur = node;
+  while (cur && cur !== grid) {
+    if (cur.parentElement === grid && !isStatDlGridDirectChildUnit(cur)) {
+      return false;
+    }
+    cur = cur.parentElement;
+  }
+  return true;
+}
+
+function isPointInRubyBrBlockRegion(node) {
+  if (!isRubyBrBlockHost()) return false;
+  let el = node && node.nodeType === Node.TEXT_NODE ? node.parentElement : node;
+  return !!findRubyBrContainerFromNode(el);
+}
+
+function isPointerOnDecorativeMediaInElement(el, clientX, clientY) {
+  if (!el || typeof document.elementsFromPoint !== 'function') return false;
+  const stack = document.elementsFromPoint(clientX, clientY);
+  for (let i = 0; i < stack.length; i++) {
+    const hit = stack[i];
+    if (!el.contains(hit)) continue;
+    if (isDecorativeMediaElement(hit)) return true;
+    const svg = hit.closest && hit.closest('svg');
+    if (svg && el.contains(svg)) return true;
+  }
+  return false;
+}
+
 function definitionListItemAcceptsHoverPoint(el, clientX, clientY) {
-  return brOnlyDivAcceptsHoverPoint(el, clientX, clientY);
+  if (getContainingTextRectsForPoint(el, clientX, clientY).length > 0) {
+    return true;
+  }
+  if (findMultiColumnStatDlGridFromNode(el)) {
+    return isPointerOnDecorativeMediaInElement(el, clientX, clientY);
+  }
+  const rect = el.getBoundingClientRect();
+  return !!(
+    rect.width > 0 && rect.height > 0 &&
+    clientX >= rect.left && clientX <= rect.right &&
+    clientY >= rect.top && clientY <= rect.bottom
+  );
+}
+
+function resolveCompactStatDlUnitAtPoint(clientX, clientY) {
+  let node = getPointReferenceNode(clientX, clientY);
+  if (node && node.nodeType === Node.TEXT_NODE) {
+    node = node.parentElement;
+  }
+  if (!node) {
+    node = document.elementFromPoint(clientX, clientY);
+  }
+  const grid = findMultiColumnStatDlGridFromNode(node);
+  if (!grid) return null;
+
+  if (typeof document.elementsFromPoint === 'function') {
+    const stack = document.elementsFromPoint(clientX, clientY);
+    for (let i = 0; i < stack.length; i++) {
+      const el = stack[i];
+      if (!grid.contains(el)) continue;
+      if (el.tagName !== 'DT' && el.tagName !== 'DD') continue;
+      if (!(el.textContent || '').trim()) continue;
+      if (definitionListItemAcceptsHoverPoint(el, clientX, clientY)) {
+        return el;
+      }
+    }
+  }
+
+  let cur = node;
+  while (cur && grid.contains(cur)) {
+    if (cur.tagName === 'DT' || cur.tagName === 'DD') {
+      if (
+        (cur.textContent || '').trim() &&
+        definitionListItemAcceptsHoverPoint(cur, clientX, clientY)
+      ) {
+        return cur;
+      }
+    }
+    cur = cur.parentElement;
+  }
+  return null;
+}
+
+// §34 EH-1: Enjoy Honda `div.info-box` > `dl.desc` + `p.note`
+function isDlDescCompanionNote(el) {
+  if (!el || el.tagName !== 'P') return false;
+  const prev = el.previousElementSibling;
+  return !!(prev && prev.tagName === 'DL' && prev.querySelector('dt'));
+}
+
+function isPointInsideDlDescInfoBox(clientX, clientY) {
+  let node = getPointReferenceNode(clientX, clientY);
+  if (node && node.nodeType === Node.TEXT_NODE) {
+    node = node.parentElement;
+  }
+  if (!node) {
+    node = document.elementFromPoint(clientX, clientY);
+  }
+  if (!node || !node.closest) return false;
+  const box = node.closest('.info-box');
+  if (!box) return false;
+  const dl = box.querySelector(':scope > dl.desc, :scope > dl');
+  return !!(dl && dl.querySelector('dt'));
+}
+
+function isDlDescAggregateDiv(el) {
+  if (!el || el.tagName !== 'DIV') return false;
+  if (!el.classList || !el.classList.contains('info-box')) return false;
+  const dl = el.querySelector(':scope > dl.desc, :scope > dl');
+  return !!(dl && dl.querySelector('dt'));
+}
+
+function resolveDlDescUnitAtPoint(clientX, clientY) {
+  if (!isPointInsideDlDescInfoBox(clientX, clientY)) return null;
+
+  let node = getPointReferenceNode(clientX, clientY);
+  if (node && node.nodeType === Node.TEXT_NODE) {
+    node = node.parentElement;
+  }
+  if (!node) {
+    node = document.elementFromPoint(clientX, clientY);
+  }
+
+  while (node && node !== document.body && node !== document.documentElement) {
+    if (isYomupUiElement(node) || isEditableElement(node)) return null;
+    if (isHighlightExcludedCodeElement(node)) {
+      node = node.parentElement;
+      continue;
+    }
+    if (node.tagName === 'DT' || node.tagName === 'DD') {
+      if (!(node.textContent || '').trim()) {
+        node = node.parentElement;
+        continue;
+      }
+      if (definitionListItemAcceptsHoverPoint(node, clientX, clientY)) {
+        return node;
+      }
+      node = node.parentElement;
+      continue;
+    }
+    if (node.tagName === 'P' && isDlDescCompanionNote(node)) {
+      if (definitionListItemAcceptsHoverPoint(node, clientX, clientY)) {
+        return node;
+      }
+    }
+    node = node.parentElement;
+  }
+  return null;
 }
 
 function findDefinitionListItemBlockFromPoint(clientX, clientY) {
   if (isGhostOverlayAtPoint(clientX, clientY)) return null;
+
+  const dlDescUnit = resolveDlDescUnitAtPoint(clientX, clientY);
+  if (dlDescUnit) {
+    return { mode: 'element', element: dlDescUnit };
+  }
+
+  if (isPointInsideMultiColumnStatDlGrid(clientX, clientY)) {
+    const compactUnit = resolveCompactStatDlUnitAtPoint(clientX, clientY);
+    if (compactUnit) {
+      return { mode: 'element', element: compactUnit };
+    }
+    return null;
+  }
 
   let node = getPointReferenceNode(clientX, clientY);
   if (node && node.nodeType === Node.TEXT_NODE) {
@@ -4152,15 +4412,74 @@ function findRubyBrBlockFromPoint(clientX, clientY) {
   return { mode: 'element', element: container };
 }
 
+function isAozoraBrSeparatedLineContainer(el) {
+  if (!el || !el.classList || !isRubyBrBlockContainer(el)) return false;
+  for (const cls of AOZORA_BR_SEPARATED_LINE_CONTAINER_CLASSES) {
+    if (el.classList.contains(cls)) return true;
+  }
+  return false;
+}
+
+function findAozoraBrSeparatedTextLineFromPoint(clientX, clientY) {
+  if (!isRubyBrBlockHost()) return null;
+  const caretNode = getPointReferenceNode(clientX, clientY);
+  if (!caretNode || caretNode.nodeType !== Node.TEXT_NODE) return null;
+  if (isNodeInsideTable(caretNode)) return null;
+  if (isWithinUiChromeRegion(caretNode)) return null;
+
+  const parent = caretNode.parentElement;
+  if (!parent || !isAozoraBrSeparatedLineContainer(parent)) return null;
+  if (isYomupUiElement(parent) || isEditableElement(parent)) return null;
+  if (!shouldIncludeTextNodeInBlock(caretNode, parent)) return null;
+
+  const text = (caretNode.textContent || '').trim();
+  if (text.length < AOZORA_BR_LINE_MIN_TEXT_LENGTH) return null;
+  if (text.length > MAX_TEXT_LENGTH_FOR_HIGHLIGHT + HIGHLIGHT_UNIT_SLACK_JA) return null;
+
+  return {
+    mode: 'element',
+    element: parent,
+    scopedTextNode: caretNode
+  };
+}
+
+function findAozoraHighlightBlockFromPoint(clientX, clientY) {
+  if (!isRubyBrBlockHost()) return null;
+  const brLine = findAozoraBrSeparatedTextLineFromPoint(clientX, clientY);
+  if (brLine) return brLine;
+  const rubyBrBlock = findRubyBrBlockFromPoint(clientX, clientY);
+  if (rubyBrBlock) return rubyBrBlock;
+  return findAozoraOrphanTextBlockFromPoint(clientX, clientY);
+}
+
+function isAozoraSpecialHighlightBlock(highlightBlock) {
+  if (!isRubyBrBlockHost() || !highlightBlock) return false;
+  if (highlightBlock.scopedTextNode) return true;
+  return !!(
+    isElementHighlightBlock(highlightBlock) &&
+    highlightBlock.element &&
+    isRubyBrBlockContainer(highlightBlock.element)
+  );
+}
+
+function elementContainsNestedDocumentRoot(el) {
+  if (!el || el.nodeType !== Node.ELEMENT_NODE) return false;
+  if (el.tagName === 'HTML' || el.tagName === 'BODY') return false;
+  return !!(el.querySelector('html, head, body'));
+}
+
 function collectSingleTextNodeSegments(textNode) {
   if (!textNode || textNode.nodeType !== Node.TEXT_NODE) {
     return { blockText: '', segments: [] };
   }
-  const text = textNode.textContent || '';
-  if (!text.trim()) return { blockText: '', segments: [] };
+  const raw = textNode.textContent || '';
+  const lead = raw.length - raw.trimStart().length;
+  const trail = raw.length - raw.trimEnd().length;
+  const trimmed = raw.slice(lead, raw.length - trail);
+  if (!trimmed) return { blockText: '', segments: [] };
   return {
-    blockText: text,
-    segments: [{ node: textNode, start: 0, end: text.length, text }]
+    blockText: trimmed,
+    segments: [{ node: textNode, start: 0, end: trimmed.length, text: trimmed, nodeOffset: lead }]
   };
 }
 
@@ -4316,6 +4635,9 @@ function findBrFlowBlockFromPoint(clientX, clientY) {
 
   if (isNodeInsideTable(caretNode)) return null;
   if (isWithinUiChromeRegion(caretNode)) return null;
+  if (isPointInRubyBrBlockRegion(caretNode)) return null;
+  // §34 EH-1: `dl.desc` info-box は dt/dd/p 専用経路へ
+  if (isPointInsideDlDescInfoBox(clientX, clientY)) return null;
 
   const container = findBrFlowContainerFromNode(caretNode);
   if (!container) return null;
@@ -4341,6 +4663,9 @@ function findHeadingIntervalBlockFromPoint(clientX, clientY) {
 
   // UI クローム（header/footer/nav）内では heading-interval を使わない（§3.7.2）
   if (isWithinUiChromeRegion(caretNode)) return null;
+  if (isPointInRubyBrBlockRegion(caretNode)) return null;
+  // §34 EH-1: `dl.desc` info-box は dt/dd/p 専用経路へ
+  if (isPointInsideDlDescInfoBox(clientX, clientY)) return null;
 
   const root = findHeadingSectionRoot(caretNode);
   if (!root) return null;
@@ -4390,6 +4715,10 @@ function findHighlightBlockFromPoint(clientX, clientY) {
     return { mode: 'element', element: tableCell };
   }
 
+  // §16 AZ-1: 青空は ruby-br / orphan を見出し・dl 系より先（§34〜38 退行防止）
+  const aozoraBlock = findAozoraHighlightBlockFromPoint(clientX, clientY);
+  if (aozoraBlock) return aozoraBlock;
+
   const pointNode = getPointReferenceNode(clientX, clientY) || document.elementFromPoint(clientX, clientY);
 
   // §4.5.2: FAQ — block 祖先（P）より先に faq-answer 経路へ
@@ -4428,9 +4757,30 @@ function findHighlightBlockFromPoint(clientX, clientY) {
   // §36 B: dt/dd 実績行 — inner-card / card-cell より先（§34 EH-1 同型）
   const definitionListItemEarly = findDefinitionListItemBlockFromPoint(clientX, clientY);
   if (definitionListItemEarly) return definitionListItemEarly;
+  if (isPointInsideMultiColumnStatDlGrid(clientX, clientY)) return null;
 
   const innerCardCell = findInnerCardCellBlockFromPoint(clientX, clientY);
   if (innerCardCell) return innerCardCell;
+
+  // §38 N-N1: 複合 <a>（直下 span のみ）— span テキスト上のみ。列間 gap は不発
+  let compositeAnchorNode = pointNode;
+  if (compositeAnchorNode && compositeAnchorNode.nodeType === Node.TEXT_NODE) {
+    compositeAnchorNode = compositeAnchorNode.parentElement;
+  }
+  const compositeAnchor = findCompositeAnchorFromNode(compositeAnchorNode);
+  if (compositeAnchor) {
+    const compositeAnchorInline = resolveAnchorWrapperInlineTextHost(
+      compositeAnchorNode,
+      clientX,
+      clientY
+    );
+    if (compositeAnchorInline) {
+      return { mode: 'inline-text', element: compositeAnchorInline };
+    }
+    if (isMultiSpanCompositeAnchor(compositeAnchor)) {
+      return null;
+    }
+  }
 
   const deepestLi = findDeepestListItemFromPoint(clientX, clientY);
   if (deepestLi) {
@@ -4665,6 +5015,23 @@ function collectBlockTextSegmentLines(block) {
     current = { blockText: '', segments: [] };
   };
 
+  const isCollapsedResponsiveLineBreak = (el) => {
+    if (!el || el.tagName !== 'BR') return false;
+    const cls = String(el.className || '');
+    if (!/(?:^|\s)sp-view(?:\s|$)/.test(cls) && !/(?:^|\s)sp(?:\s|$)/.test(cls)) {
+      return false;
+    }
+    try {
+      const style = getComputedStyle(el);
+      if (style.display === 'none' || style.visibility === 'hidden') return true;
+      const rect = el.getBoundingClientRect();
+      if (rect.height <= 0) return true;
+    } catch (_e) {
+      return false;
+    }
+    return false;
+  };
+
   const appendTextNode = (node) => {
     const text = node.textContent || '';
     if (!text) return;
@@ -4722,7 +5089,9 @@ function collectBlockTextSegmentLines(block) {
   const walkNodes = (parent) => {
     for (const child of parent.childNodes) {
       if (child.nodeType === Node.ELEMENT_NODE && child.tagName === 'BR') {
-        flushLine();
+        if (!isCollapsedResponsiveLineBreak(child)) {
+          flushLine();
+        }
       } else if (child.nodeType === Node.ELEMENT_NODE && LIST_LINE_BREAK_TAGS.has(child.tagName)) {
         // li 直下テキストと子 ul/ol 内 li の連結防止（入れ子リスト）
         flushLine();
@@ -4985,18 +5354,23 @@ function findLineIndexAtCaret(lines, clientX, clientY) {
     } else if (
       container.nodeType === Node.ELEMENT_NODE &&
       container.contains &&
-      !isBrFlowContainer(container)
+      !isBrFlowContainer(container) &&
+      !isRubyBrBlockContainer(container)
     ) {
-      // 葉要素ラッパーのみ（rt_cf_n_body 等の大容器は lines[0] 誤選定を避ける）
+      // 葉要素ラッパーのみ（1 行だけが包含されるときだけ採用）
+      let soleIdx = -1;
+      let matchCount = 0;
       for (let i = 0; i < lines.length; i++) {
         const segs = lines[i].segments;
         if (
           segs.length > 0 &&
           segs.every((seg) => seg.node && container.contains(seg.node))
         ) {
-          return i;
+          soleIdx = i;
+          matchCount++;
         }
       }
+      if (matchCount === 1) return soleIdx;
     }
   }
 
@@ -5072,6 +5446,17 @@ function resolveHighlightTextContext(highlightBlock, languageMode, clientX, clie
   const useLineSplit = languageMode === LANGUAGE_MODE_JA || isPreHighlightBlock(highlightBlock);
   if (!useLineSplit) {
     return collectHighlightBlockTextSegments(highlightBlock);
+  }
+
+  // §16 AZ-1R: 青空は br-flow 迂回なし（d02d369 相当の単純行分割）
+  if (isAozoraSpecialHighlightBlock(highlightBlock)) {
+    const lines = collectHighlightBlockTextSegmentLines(highlightBlock).filter(
+      (line) => line.segments.length > 0 && line.blockText.trim()
+    );
+    if (lines.length <= 1) {
+      return lines[0] || collectHighlightBlockTextSegments(highlightBlock);
+    }
+    return lines[findLineIndexAtCaret(lines, clientX, clientY)];
   }
 
   if (!highlightBlock.scopedTextNode) {
@@ -6497,8 +6882,21 @@ function applyHighlightOverlayUnion(range, clipBounds, clientRectsOverride, host
 function tryHighlightLogicalBlockAtPoint(clientX, clientY) {
   try {
     let highlightBlock = findHighlightBlockFromPoint(clientX, clientY);
-    if (!highlightBlock) return false;
+    if (!highlightBlock) {
+      logUnderlineTrace('block-miss', { x: clientX, y: clientY, reason: 'findHighlightBlockFromPoint' });
+      return false;
+    }
+    logUnderlineTrace('block', summarizeHighlightBlockForTrace(highlightBlock));
     highlightBlock = normalizeAggregateHighlightBlock(highlightBlock, clientX, clientY);
+
+    if (
+      isElementHighlightBlock(highlightBlock) &&
+      isDlDescAggregateDiv(highlightBlock.element)
+    ) {
+      const dlDescUnit = resolveDlDescUnitAtPoint(clientX, clientY);
+      if (!dlDescUnit) return false;
+      highlightBlock = { mode: 'element', element: dlDescUnit };
+    }
 
     if (
       isInlineTextHighlightBlock(highlightBlock) &&
@@ -6508,7 +6906,15 @@ function tryHighlightLogicalBlockAtPoint(clientX, clientY) {
     }
 
     const whole = collectHighlightBlockTextSegments(highlightBlock);
-    if (!whole.blockText.trim() || whole.segments.length === 0) return false;
+    if (!whole.blockText.trim() || whole.segments.length === 0) {
+      logUnderlineTrace('block-miss', {
+        x: clientX,
+        y: clientY,
+        reason: 'empty-blockText-or-segments',
+        host: summarizeHighlightBlockForTrace(highlightBlock)
+      });
+      return false;
+    }
 
     const langContextNode = isElementHighlightBlock(highlightBlock)
       ? highlightBlock.element
@@ -6542,7 +6948,10 @@ function tryHighlightLogicalBlockAtPoint(clientX, clientY) {
         ? [{ start: 0, end: blockText.length, text: blockText }]
         : buildLogicalChunks(blockText, languageMode);
       chunk = findChunkContainingOffset(chunks, offset);
-      if (shouldUseJaSectionFullLineChunk(highlightBlock, blockText, languageMode, clientX, clientY)) {
+      if (
+        !isAozoraSpecialHighlightBlock(highlightBlock) &&
+        shouldUseJaSectionFullLineChunk(highlightBlock, blockText, languageMode, clientX, clientY)
+      ) {
         chunk = { start: 0, end: blockText.length, text: blockText };
         chunks = [chunk];
       }
@@ -6556,10 +6965,19 @@ function tryHighlightLogicalBlockAtPoint(clientX, clientY) {
     const chunkRects = getClientRectsForChunkSegments(segments, chunk.start, chunk.end);
     if (
       !useGhostCardLeadChunk &&
+      !isAozoraSpecialHighlightBlock(highlightBlock) &&
       !clientPointInClientRects(chunkRects, clientX, clientY, {
         lineTolerance: HIGHLIGHT_RECT_MERGE_LINE_TOLERANCE_PX
       })
     ) {
+      logUnderlineTrace('block-miss', {
+        x: clientX,
+        y: clientY,
+        reason: 'pointer-outside-chunkRects',
+        host: summarizeHighlightBlockForTrace(highlightBlock),
+        chunk: chunk.text.slice(0, 80),
+        chunkRectCount: chunkRects.length
+      });
       return false;
     }
 
@@ -6568,9 +6986,11 @@ function tryHighlightLogicalBlockAtPoint(clientX, clientY) {
     let overlayRects = chunkRects;
     if (isElementHighlightBlock(highlightBlock)) {
       const hostEl = highlightBlock.element;
+      // §14 NK-1R: ゴースト lead chunk 時は §33 pointer 行絞りを使わない（日経 H2 折り返し全行）
       const filterToPointerLine =
-        isTableCellHighlightHost(hostEl) ||
-        shouldFilterDecoratedBlockOverlayToPointerLine(hostEl, chunkRects);
+        !useGhostCardLeadChunk &&
+        (isTableCellHighlightHost(hostEl) ||
+          shouldFilterDecoratedBlockOverlayToPointerLine(hostEl, chunkRects));
       if (filterToPointerLine) {
         overlayRects = filterClientRectsToPointerVisualLine(chunkRects, clientX, clientY, {
           hostElement: overlayHostElement,
@@ -6580,8 +7000,10 @@ function tryHighlightLogicalBlockAtPoint(clientX, clientY) {
     }
 
     if (isPointInCurrentHighlight(clientX, clientY)) {
-      logUnderlineTrace('skip-sticky', { x: clientX, y: clientY });
-      return true;
+      if (!isRubyBrBlockHost()) {
+        logUnderlineTrace('skip-sticky', { x: clientX, y: clientY });
+        return true;
+      }
     }
 
     if (highlightProgressSession && isSameHighlightProgressTarget(highlightBlock, chunk)) {
@@ -6749,8 +7171,8 @@ function highlightElement(element, clientX, clientY) {
       return;
     }
 
-    // 要素下に html/head/body がある場合は処理しない（section は HTML5 記事で一般的なため含めない）
-    if (!!(element.querySelector('html,head,body'))) {
+    // 要素下に html/head/body がある場合は処理しない（自身の body/html は除外）
+    if (elementContainsNestedDocumentRoot(element)) {
       debugLog('要素下にhtml,head,bodyがある場合');
       return;
     }

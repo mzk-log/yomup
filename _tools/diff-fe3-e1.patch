@@ -1,0 +1,2693 @@
+diff --git a/content.js b/content.js
+index 343eec6..84dedb3 100644
+--- a/content.js
++++ b/content.js
+@@ -69,12 +69,18 @@ const BR_FLOW_CONTAINER_TAGS = new Set(['DIV', 'ARTICLE', 'SECTION', 'MAIN']);
+ const BR_FLOW_BOUNDARY_TAGS = new Set(['H2', 'H3']);
+ // Tailwind 等の div カード（grid 内セル）: 親は構造判定、ブロックは直下テキスト div
+ const CARD_CELL_MIN_TEXT_DIVS = 2;
+ const CARD_CELL_MAX_DIRECT_CHILDREN = 8;
+ const CARD_CELL_MIN_SIBLING_DIVS = 3;
++// §29 inner-card-cell: 見出し div + 本文 div（MSG box03 等）
++const INNER_CARD_CELL_TEXT_DIV_COUNT = 2;
++// §30 flow-step-li: 見出し div 内の子 div 最小数（Step ラベル + タイトル）
++const FLOW_STEP_MIN_HEADER_CHILD_DIVS = 2;
+ // Ko-fi 料金プラン等: H2/H3 + 直下テキスト div（card-cell の 2-div 要件を満たさない行）
+ const CARD_CELL_PRICING_ROW_HEADING_TAGS = new Set(['H2', 'H3']);
++// Ko-fi feature grid 等: img + h3 + p のアイコン付きカード1枚
++const FEATURE_ICON_CARD_MEDIA_TAGS = new Set(['IMG', 'SVG', 'PICTURE']);
+ // ruby-br-block（§16）: 青空ホスト + DIV + br 区切り構造（ruby / クラス名は不問）
+ const RUBY_BR_BLOCK_HOST = 'aozora.gr.jp';
+ const RUBY_BR_BLOCK_MIN_BR_COUNT = 2;
+ const RUBY_BR_BLOCK_MIN_TEXT_LENGTH = 30;
+ const RUBY_BR_BLOCK_EXCLUDED_CLASSES = new Set([
+@@ -106,10 +112,15 @@ const BLOCK_LABEL_MAX_COLON_CHARS = 40;
+ const BLOCK_LABEL_MAX_LEADING_PREFIX_CHARS = 4;
+ let highlightOverlayRoot = null;
+ let currentHighlightRange = null;
+ let currentHighlightRects = null;
+ 
++function getDominantVisualLineTopFromRects(rects, lineTolerance) {
++  const tops = getVisualLineTopsFromClientRects(rects, lineTolerance);
++  return tops.length === 1 ? tops[0] : null;
++}
++
+ function isPointInCurrentHighlight(clientX, clientY) {
+   if (currentHighlightRects && currentHighlightRects.length > 0) {
+     const rightPad = typeof HIGHLIGHT_STICKY_RIGHT_PADDING_PX !== 'undefined'
+       ? HIGHLIGHT_STICKY_RIGHT_PADDING_PX
+       : 0;
+@@ -143,10 +154,12 @@ function isPointInCurrentHighlightOverlay(clientX, clientY) {
+ 
+ // getClientRects の矩形をマージして枠の細片化を抑える（テストNG時は false に戻す）
+ const ENABLE_HIGHLIGHT_OVERLAY_RECT_MERGE = true;
+ const HIGHLIGHT_RECT_MERGE_LINE_TOLERANCE_PX = 6;
+ const HIGHLIGHT_RECT_MERGE_GAP_TOLERANCE_PX = 12;
++// 大フォント折り返し行 ClientRect（行同士 Y 重なり）の下線: top + lh + gap
++const HIGHLIGHT_UNDERLINE_WRAPPED_LINE_GAP_PX = 4;
+ // 日経型: 全面 <a> のヒット矩形が直下テキスト矩形より明らかに大きいときだけゴースト扱い
+ const GHOST_OVERLAY_MIN_AREA_RATIO = 2.5;
+ const GHOST_OVERLAY_MIN_WIDTH_RATIO = 1.8;
+ const GHOST_OVERLAY_MIN_HEIGHT_RATIO = 1.8;
+ 
+@@ -1534,11 +1547,11 @@ function handleMouseMove(event) {
+   if (isPointInCurrentHighlight(event.clientX, event.clientY)) {
+     return;
+   }
+ 
+   // §19: ライン進行中は下線オーバーレイ上の移動で再描画しない
+-  if (highlightProgressSession && getHighlightProgressRemainingSeconds() > 0) {
++  if (highlightProgressSession) {
+     if (isPointInCurrentHighlightOverlay(event.clientX, event.clientY)) {
+       return;
+     }
+   }
+ 
+@@ -1987,10 +2000,70 @@ function isLayoutTableCell(cell) {
+   if (cell.querySelectorAll('a[href]').length < LAYOUT_TABLE_CELL_MIN_LINKS) return false;
+   if (cell.querySelectorAll('br').length < LAYOUT_TABLE_CELL_MIN_BRS) return false;
+   return true;
+ }
+ 
++function isTableCellHighlightHost(element) {
++  return !!(element && (element.tagName === 'TD' || element.tagName === 'TH'));
++}
++
++function isHeadingHighlightHost(element) {
++  return !!(element && element.tagName && isHeadingSectionTag(element.tagName));
++}
++
++// §33 CW-1: h1 + span.subtitle 等 — 子要素で複数視覚行になる見出しのみ pointer 行に絞る
++function shouldFilterHeadingOverlayToPointerLine(headingElement, chunkRects) {
++  if (!isHeadingHighlightHost(headingElement) || !chunkRects || chunkRects.length <= 1) {
++    return false;
++  }
++  let hasElementChild = false;
++  for (let i = 0; i < headingElement.children.length; i++) {
++    if (headingElement.children[i].nodeType === Node.ELEMENT_NODE) {
++      hasElementChild = true;
++      break;
++    }
++  }
++  if (!hasElementChild) return false;
++  const lineTolerance = getHighlightUnderlineLineTolerancePx();
++  return getVisualLineTopsFromClientRects(chunkRects, lineTolerance).length > 1;
++}
++
++function isDefinitionListItemHighlightHost(element) {
++  return !!(element && (element.tagName === 'DT' || element.tagName === 'DD'));
++}
++
++// §36 CW-2: dt/dd・SVG+テキスト行 — 複数 chunk rect / 折り返し時は pointer 視覚行に絞る
++function shouldFilterDecoratedBlockOverlayToPointerLine(hostElement, chunkRects) {
++  if (shouldFilterHeadingOverlayToPointerLine(hostElement, chunkRects)) {
++    return true;
++  }
++  if (!hostElement || !chunkRects || chunkRects.length === 0) return false;
++
++  const isDecoratedRow =
++    isDefinitionListItemHighlightHost(hostElement) ||
++    (hostElement.tagName === 'DIV' && isIconTextRowDiv(hostElement));
++  if (!isDecoratedRow) return false;
++
++  const lineTolerance = getHighlightUnderlineLineTolerancePx();
++  if (getVisualLineTopsFromClientRects(chunkRects, lineTolerance).length > 1) {
++    return true;
++  }
++  if (chunkRects.length <= 1) return false;
++
++  for (let i = 0; i < hostElement.children.length; i++) {
++    if (hostElement.children[i].nodeType === Node.ELEMENT_NODE) {
++      return true;
++    }
++  }
++  return false;
++}
++
++function isCompactStatRowHighlightHost(element) {
++  if (isDefinitionListItemHighlightHost(element)) return true;
++  return !!(element && element.tagName === 'DIV' && isIconTextRowDiv(element));
++}
++
+ function findLayoutTableCellInnerBlockFromPoint(clientX, clientY, tableCell) {
+   if (!tableCell || !isLayoutTableCell(tableCell)) return null;
+ 
+   const heading = findHeadingBlockFromPoint(clientX, clientY);
+   if (heading && tableCell.contains(heading)) {
+@@ -2032,10 +2105,12 @@ function findDeepestListItemFromPoint(clientX, clientY) {
+ }
+ 
+ function findBlockAncestorFromPoint(clientX, clientY) {
+   const pointNode = getPointReferenceNode(clientX, clientY) || document.elementFromPoint(clientX, clientY);
+   if (isLikelyNikkeiPrAdRoot(pointNode)) return null;
++  // §4.5.2: FAQ 内は findFaqAnswerBlockFromPoint に委ねる（P 祖先より先）
++  if (isWithinFaqAnswerRegion(pointNode)) return null;
+ 
+   const deepestLi = findDeepestListItemFromPoint(clientX, clientY);
+   if (deepestLi) return deepestLi;
+ 
+   let node = getPointReferenceNode(clientX, clientY);
+@@ -2385,13 +2460,20 @@ function findHeadingIntervalBoundaries(headings, caretNode) {
+ function isWithinUiChromeRegion(node) {
+   const el = node && node.nodeType === Node.TEXT_NODE ? node.parentElement : node;
+   return !!(el && el.closest && el.closest('header, footer, nav'));
+ }
+ 
++function isWithinFaqAnswerRegion(node) {
++  const el = node && node.nodeType === Node.TEXT_NODE ? node.parentElement : node;
++  return !!(el && el.closest && el.closest('.faq-answer'));
++}
++
+ function isInlineTextHostElement(el) {
+   if (!el || !el.tagName || !INLINE_TEXT_HOST_TAGS.has(el.tagName)) return false;
+   if (isYomupUiElement(el) || isEditableElement(el)) return false;
++  // §4.5.2: FAQ 回答は faq-answer 経路（直下 div）を優先 — 内側 span 等を inline-text にしない
++  if (el.closest && el.closest('.faq-answer')) return false;
+   // アイコン等を含む複合 <a> は inline-text 対象外（日経 PR バナー等）
+   if (el.tagName === 'A' && hasDirectElementChild(el)) return false;
+   // pre 外の短文 code のみ inline-text 対象（pre 内は findPreBlockFromPoint に任せる）
+   if (el.tagName === 'CODE') {
+     if (el.closest && el.closest('pre')) return false;
+@@ -2401,10 +2483,71 @@ function isInlineTextHostElement(el) {
+   const text = (el.textContent || '').trim();
+   if (!text) return false;
+   return text.length <= MAX_TEXT_LENGTH_FOR_HIGHLIGHT + HIGHLIGHT_UNIT_SLACK_JA;
+ }
+ 
++// §36 A': <a> 直下がラッパー span のみ（日経 PR 等の複合 <a> は除外）
++function isAnchorWithTextWrapperChildrenOnly(a) {
++  if (!a || a.tagName !== 'A') return false;
++  if (isYomupUiElement(a) || isEditableElement(a)) return false;
++  if (isLikelyNikkeiPrAdRoot(a)) return false;
++  if (isGhostOverlayLink(a)) return false;
++
++  let hasWrapperSpan = false;
++  for (let i = 0; i < a.childNodes.length; i++) {
++    const child = a.childNodes[i];
++    if (child.nodeType === Node.TEXT_NODE) {
++      if ((child.textContent || '').trim()) return false;
++      continue;
++    }
++    if (child.nodeType !== Node.ELEMENT_NODE) return false;
++    if (child.tagName !== 'SPAN') return false;
++    if (child.querySelector('a, div, p, li, dl, dt, dd, table, h1, h2, h3, h4, img, picture')) {
++      return false;
++    }
++    hasWrapperSpan = true;
++  }
++  return hasWrapperSpan;
++}
++
++function isAnchorTextWrapperSpan(el) {
++  if (!el || el.tagName !== 'SPAN') return false;
++  const parent = el.parentElement;
++  if (!parent || parent.tagName !== 'A') return false;
++  return isAnchorWithTextWrapperChildrenOnly(parent);
++}
++
++function resolveAnchorWrapperInlineTextHost(el, clientX, clientY) {
++  if (!el) return null;
++
++  if (el.tagName === 'SPAN' && isAnchorTextWrapperSpan(el) && isInlineTextHostElement(el)) {
++    if (scoreInlineTextHostCandidate(el, clientX, clientY)) return el;
++  }
++
++  const anchor = el.tagName === 'A' ? el : (el.closest && el.closest('a'));
++  if (!anchor || !isAnchorWithTextWrapperChildrenOnly(anchor)) return null;
++
++  if (typeof document.elementsFromPoint === 'function') {
++    const stack = document.elementsFromPoint(clientX, clientY);
++    for (let i = 0; i < stack.length; i++) {
++      const hit = stack[i];
++      if (!anchor.contains(hit)) continue;
++      if (hit.tagName !== 'SPAN' || !isAnchorTextWrapperSpan(hit)) continue;
++      if (!isInlineTextHostElement(hit)) continue;
++      if (scoreInlineTextHostCandidate(hit, clientX, clientY)) return hit;
++    }
++  }
++
++  for (let i = 0; i < anchor.children.length; i++) {
++    const span = anchor.children[i];
++    if (span.tagName !== 'SPAN' || !isAnchorTextWrapperSpan(span)) continue;
++    if (!isInlineTextHostElement(span)) continue;
++    if (scoreInlineTextHostCandidate(span, clientX, clientY)) return span;
++  }
++  return null;
++}
++
+ function collectTextClientRects(el) {
+   const rects = [];
+   if (!el) return rects;
+ 
+   const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+@@ -2696,10 +2839,18 @@ function isBetterInlineTextHostCandidate(score, stackIndex, bestScore, bestStack
+ }
+ 
+ function considerInlineTextHostCandidate(el, clientX, clientY, stackIndex, state) {
+   if (!el || isYomupUiElement(el) || isEditableElement(el)) return;
+   if (isGhostOverlayLink(el)) return;
++
++  const resolved = resolveAnchorWrapperInlineTextHost(el, clientX, clientY);
++  if (resolved) {
++    el = resolved;
++  } else if (el.tagName === 'A' && isAnchorWithTextWrapperChildrenOnly(el)) {
++    return;
++  }
++
+   if (!isInlineTextHostElement(el)) return;
+ 
+   const score = scoreInlineTextHostCandidate(el, clientX, clientY);
+   if (!score) return;
+ 
+@@ -2766,11 +2917,11 @@ function isGeminiSequenceTextUnit(el) {
+ function inlineTextHostAcceptsHoverPoint(el, clientX, clientY) {
+   if (getContainingTextRectsForPoint(el, clientX, clientY).length > 0) {
+     return true;
+   }
+   // Gemini sequence / leaf-text-div: 行幅 div 内のテキスト右空白（NK-4 相当・領域限定）
+-  if (isGeminiSequenceTextUnit(el) || isLeafTextDivElement(el)) {
++  if (isGeminiSequenceTextUnit(el) || isLeafTextDivElement(el) || isAnchorTextWrapperSpan(el)) {
+     const rect = el.getBoundingClientRect();
+     if (
+       rect.width > 0 && rect.height > 0 &&
+       clientX >= rect.left && clientX <= rect.right &&
+       clientY >= rect.top && clientY <= rect.bottom
+@@ -2850,70 +3001,67 @@ function getDirectTextDivChildren(el) {
+ 
+ function isCardCellTextUnit(el) {
+   if (!el || el.tagName !== 'DIV') return false;
+   if (isYomupUiElement(el) || isEditableElement(el)) return false;
+   if (isHighlightExcludedCodeElement(el)) return false;
++  // §32: feature 列 / 料金行 / 複数 feature 卡は card-cell unit にしない
++  if (isAggregateFeatureColumnElement(el)) return false;
++  if (containsNestedFeatureIconCardBlocks(el)) return false;
++  if (isCardCellPricingRow(el)) return false;
+   const text = (el.textContent || '').trim();
+   if (!text) return false;
+   if (text.length > MAX_TEXT_LENGTH_FOR_HIGHLIGHT + HIGHLIGHT_UNIT_SLACK_JA) return false;
+   if (countWords(text) > MAX_WORDS_FOR_HIGHLIGHT + HIGHLIGHT_UNIT_SLACK_EN) return false;
+   return true;
+ }
+ 
+-// grid 内カード親: 構造のみ（全文の字数上限は子 div で判定）
+-function isCardCellStructure(el) {
++// §29/§30: 構造判定用（字数上限は chunk 分割時に適用）
++function isInnerCardCellTextDiv(el) {
+   if (!el || el.tagName !== 'DIV') return false;
+   if (isYomupUiElement(el) || isEditableElement(el)) return false;
+   if (isHighlightExcludedCodeElement(el)) return false;
+-  if (hasDirectHeadingChild(el)) return false;
+-  const textDivChildren = getDirectTextDivChildren(el);
+-  for (let i = 0; i < textDivChildren.length; i++) {
+-    if (isBrOnlyDivElement(textDivChildren[i])) return false;
+-  }
+-  if (textDivChildren.length < CARD_CELL_MIN_TEXT_DIVS) return false;
+-  if (el.children.length > CARD_CELL_MAX_DIRECT_CHILDREN) return false;
+-  return countSiblingDivsWithText(el) >= CARD_CELL_MIN_SIBLING_DIVS;
++  return !!(el.textContent || '').trim();
+ }
+ 
+-function hasOnlyCardCellPricingRowDirectChildren(el) {
++function hasOnlyInnerCardCellAllowedExtraDirectChildren(el) {
+   for (let i = 0; i < el.children.length; i++) {
+     const child = el.children[i];
+     if (child.nodeType !== Node.ELEMENT_NODE) continue;
+     const tag = child.tagName;
+-    if (CARD_CELL_PRICING_ROW_HEADING_TAGS.has(tag)) continue;
+     if (tag === 'DIV' && (child.textContent || '').trim()) continue;
++    if (tag === 'A') continue;
+     if (!(child.textContent || '').trim()) continue;
+     return false;
+   }
+   return true;
+ }
+ 
+-// H2/H3 + 直下テキスト div 1 つ以上（例: Ko-fi pricing の $12/month + fee 行）
+-function isCardCellPricingRow(el) {
++// §29: 内側2段カード（見出し div + 本文 div）
++function isInnerCardCellStructure(el) {
+   if (!el || el.tagName !== 'DIV') return false;
+   if (isYomupUiElement(el) || isEditableElement(el)) return false;
+   if (isHighlightExcludedCodeElement(el)) return false;
++  if (hasDirectHeadingChild(el)) return false;
+   if (el.children.length > CARD_CELL_MAX_DIRECT_CHILDREN) return false;
+-
+-  let headingCount = 0;
+-  let textDivCount = 0;
+-  for (let i = 0; i < el.children.length; i++) {
+-    const child = el.children[i];
+-    if (child.nodeType !== Node.ELEMENT_NODE) continue;
+-    if (CARD_CELL_PRICING_ROW_HEADING_TAGS.has(child.tagName)) {
+-      headingCount++;
+-    } else if (child.tagName === 'DIV' && (child.textContent || '').trim()) {
+-      textDivCount++;
+-    }
++  // §32: Ko-fi mb-8 等 — feature 列 + 料金 grid の複合容器は inner-card にしない
++  if (containsNestedFeatureIconCardBlocks(el)) return false;
++  const textDivChildren = getDirectTextDivChildren(el);
++  if (textDivChildren.length !== INNER_CARD_CELL_TEXT_DIV_COUNT) return false;
++  if (!hasOnlyInnerCardCellAllowedExtraDirectChildren(el)) return false;
++  for (let i = 0; i < textDivChildren.length; i++) {
++    const child = textDivChildren[i];
++    if (!isInnerCardCellTextDiv(child)) return false;
++    if (isAggregateFeatureColumnElement(child)) return false;
++    if (containsNestedFeatureIconCardBlocks(child)) return false;
++    if (containsCardCellPricingRows(child)) return false;
+   }
+-  if (headingCount < 1 || textDivCount < 1) return false;
+-  return hasOnlyCardCellPricingRowDirectChildren(el);
++  return true;
+ }
+ 
+-function resolveCardCellPricingRowUnit(rowEl, caretNode, clientX, clientY) {
+-  const textDivs = getDirectTextDivChildren(rowEl).filter(isCardCellTextUnit);
+-  if (textDivs.length === 0) return null;
++function resolveInnerCardCellTextUnit(cardEl, caretNode, clientX, clientY) {
++  const textDivs = getDirectTextDivChildren(cardEl).filter(isInnerCardCellTextDiv);
++  if (textDivs.length !== INNER_CARD_CELL_TEXT_DIV_COUNT) return null;
+ 
+   let ref = caretNode;
+   if (ref && ref.nodeType === Node.TEXT_NODE) {
+     ref = ref.parentElement;
+   }
+@@ -2931,160 +3079,764 @@ function resolveCardCellPricingRowUnit(rowEl, caretNode, clientX, clientY) {
+   }
+ 
+   return pickNearestCardTextUnit(textDivs, clientX, clientY);
+ }
+ 
+-function pickNearestCardTextUnit(textDivs, clientX, clientY) {
+-  if (textDivs.length === 0) return null;
+-  if (textDivs.length === 1) return textDivs[0];
+-  if (typeof clientX !== 'number' || typeof clientY !== 'number') {
+-    return textDivs[0];
++function findInnerCardCellBlockFromPoint(clientX, clientY) {
++  const caretNode = getPointReferenceNode(clientX, clientY);
++  let node = caretNode;
++  if (node && node.nodeType === Node.TEXT_NODE) {
++    node = node.parentElement;
+   }
++  if (!node) {
++    node = document.elementFromPoint(clientX, clientY);
++  }
++  if (isNodeInsideTable(node)) return null;
+ 
+-  for (let i = 0; i < textDivs.length; i++) {
+-    const rect = textDivs[i].getBoundingClientRect();
+-    if (
+-      clientX >= rect.left && clientX <= rect.right &&
+-      clientY >= rect.top && clientY <= rect.bottom
+-    ) {
+-      return textDivs[i];
++  while (node && node !== document.body && node !== document.documentElement) {
++    if (isYomupUiElement(node) || isEditableElement(node)) return null;
++    if (isInnerCardCellStructure(node)) {
++      const unit = resolveInnerCardCellTextUnit(node, caretNode || node, clientX, clientY);
++      if (unit) {
++        return { mode: 'element', element: unit };
++      }
+     }
++    node = node.parentElement;
+   }
++  return null;
++}
+ 
+-  let best = textDivs[0];
+-  let bestDist = Infinity;
+-  for (let i = 0; i < textDivs.length; i++) {
+-    const rect = textDivs[i].getBoundingClientRect();
+-    const cx = rect.left + rect.width / 2;
+-    const cy = rect.top + rect.height / 2;
+-    const d = (cx - clientX) ** 2 + (cy - clientY) ** 2;
+-    if (d < bestDist) {
+-      bestDist = d;
+-      best = textDivs[i];
+-    }
++function countDirectChildDivsWithText(el) {
++  let count = 0;
++  for (let i = 0; i < el.children.length; i++) {
++    const child = el.children[i];
++    if (child.tagName === 'DIV' && (child.textContent || '').trim()) count++;
+   }
+-  return best;
++  return count;
+ }
+ 
+-function resolveCardCellTextUnit(cardEl, caretNode, clientX, clientY) {
+-  const textDivs = getDirectTextDivChildren(cardEl).filter(isCardCellTextUnit);
+-  if (textDivs.length === 0) return null;
++// §30: 入学フロー Step リスト（見出し div + 本文 div）
++function isFlowStepListItemStructure(el) {
++  if (!el || el.tagName !== 'LI') return false;
++  if (isYomupUiElement(el) || isEditableElement(el)) return false;
++  if (!el.closest || !el.closest('#page.flow, .flow')) return false;
++
++  const textDivs = getDirectTextDivChildren(el);
++  if (textDivs.length !== INNER_CARD_CELL_TEXT_DIV_COUNT) return false;
++
++  const headerDiv = textDivs[0];
++  const bodyDiv = textDivs[1];
++  if (!isInnerCardCellTextDiv(headerDiv) || !isInnerCardCellTextDiv(bodyDiv)) return false;
++  if (countDirectChildDivsWithText(headerDiv) < FLOW_STEP_MIN_HEADER_CHILD_DIVS) return false;
++  return true;
++}
++
++function isFlowStepListItem(el) {
++  return isFlowStepListItemStructure(el);
++}
++
++function resolveFlowStepUnit(liEl, caretNode, clientX, clientY) {
++  const textDivs = getDirectTextDivChildren(liEl);
++  if (textDivs.length !== INNER_CARD_CELL_TEXT_DIV_COUNT) return null;
++  const headerDiv = textDivs[0];
++  const bodyDiv = textDivs[1];
+ 
+   let ref = caretNode;
+   if (ref && ref.nodeType === Node.TEXT_NODE) {
+     ref = ref.parentElement;
+   }
+   if (!ref) {
+     ref = document.elementFromPoint(clientX, clientY);
+   }
++  if (!ref) return null;
+ 
+-  if (ref) {
+-    for (let i = 0; i < textDivs.length; i++) {
+-      const div = textDivs[i];
+-      if (div === ref || div.contains(ref)) {
+-        return div;
+-      }
+-    }
+-
+-    const allDirectDivs = getDirectTextDivChildren(cardEl);
+-    for (let i = 0; i < allDirectDivs.length; i++) {
+-      const child = allDirectDivs[i];
+-      if (!child.contains(ref)) continue;
+-      if (isCardCellPricingRow(child)) {
+-        const unit = resolveCardCellPricingRowUnit(child, caretNode, clientX, clientY);
+-        if (unit) return unit;
+-      }
+-    }
+-  }
+-
+-  return pickNearestCardTextUnit(textDivs, clientX, clientY);
++  if (headerDiv === ref || headerDiv.contains(ref)) return headerDiv;
++  if (bodyDiv === ref || bodyDiv.contains(ref)) return bodyDiv;
++  return null;
+ }
+ 
+-function findCardCellBlockFromPoint(clientX, clientY) {
++function findFlowStepBlockFromPoint(clientX, clientY) {
++  const deepestLi = findDeepestListItemFromPoint(clientX, clientY);
++  if (!deepestLi || !isFlowStepListItemStructure(deepestLi)) return null;
+   const caretNode = getPointReferenceNode(clientX, clientY);
+-  let node = caretNode;
++  const unit = resolveFlowStepUnit(deepestLi, caretNode, clientX, clientY);
++  if (!unit) return null;
++  return { mode: 'element', element: unit };
++}
++
++function liContainsInnerCardCellAtPoint(liEl, clientX, clientY) {
++  if (!liEl) return false;
++  let node = getPointReferenceNode(clientX, clientY);
+   if (node && node.nodeType === Node.TEXT_NODE) {
+     node = node.parentElement;
+   }
+   if (!node) {
+     node = document.elementFromPoint(clientX, clientY);
+   }
+-  if (isNodeInsideTable(node)) return null;
+-
+-  while (node && node !== document.body && node !== document.documentElement) {
+-    if (isYomupUiElement(node) || isEditableElement(node)) return null;
+-    if (isCardCellPricingRow(node)) {
+-      const unit = resolveCardCellPricingRowUnit(node, caretNode || node, clientX, clientY);
+-      if (unit) {
+-        return { mode: 'element', element: unit };
+-      }
+-    }
+-    if (isCardCellStructure(node)) {
+-      const unit = resolveCardCellTextUnit(node, caretNode || node, clientX, clientY);
+-      if (unit) {
+-        return { mode: 'element', element: unit };
+-      }
+-    }
++  while (node && node !== liEl) {
++    if (isInnerCardCellStructure(node)) return true;
+     node = node.parentElement;
+   }
+-  return null;
++  return false;
+ }
+ 
+-function findFaqAnswerBlockFromPoint(clientX, clientY) {
+-  let node = getPointReferenceNode(clientX, clientY);
+-  if (node && node.nodeType === Node.TEXT_NODE) {
+-    node = node.parentElement;
+-  }
+-  if (!node) {
+-    node = document.elementFromPoint(clientX, clientY);
++// grid 内カード親: 構造のみ（全文の字数上限は子 div で判定）
++function isCardCellStructure(el) {
++  if (!el || el.tagName !== 'DIV') return false;
++  if (isInnerCardCellStructure(el)) return false;
++  if (isFeatureIconCardBlock(el)) return false;
++  if (isAggregateFeatureColumnElement(el)) return false;
++  if (containsNestedFeatureIconCardBlocks(el)) return false;
++  if (isYomupUiElement(el) || isEditableElement(el)) return false;
++  if (isHighlightExcludedCodeElement(el)) return false;
++  if (hasDirectHeadingChild(el)) return false;
++  // §36 CW-2: 実績 grid（直下 dl 混在）は card-cell にしない
++  for (let i = 0; i < el.children.length; i++) {
++    const child = el.children[i];
++    if (child.nodeType === Node.ELEMENT_NODE && child.tagName === 'DL') return false;
+   }
+-  if (!node || isNodeInsideTable(node)) return null;
+-
+-  const answer = node.closest && node.closest('.faq-answer');
+-  if (!answer || isYomupUiElement(answer) || isEditableElement(answer)) return null;
+-
+-  let block = null;
+-  for (let i = 0; i < answer.children.length; i++) {
+-    const child = answer.children[i];
+-    if (child.tagName !== 'DIV') continue;
+-    if (child === node || child.contains(node)) {
+-      block = child;
+-      break;
+-    }
++  const textDivChildren = getDirectTextDivChildren(el);
++  for (let i = 0; i < textDivChildren.length; i++) {
++    if (isBrOnlyDivElement(textDivChildren[i])) return false;
++    const cls = String(textDivChildren[i].className || '');
++    if (cls.includes('col-span') || cls.includes('space-y-')) return false;
++    if (isAggregateFeatureColumnElement(textDivChildren[i])) return false;
+   }
+-  if (!block || isYomupUiElement(block) || isEditableElement(block)) return null;
+-  if (isHighlightExcludedCodeElement(block)) return null;
+-  if (!(block.textContent || '').trim()) return null;
++  if (textDivChildren.length < CARD_CELL_MIN_TEXT_DIVS) return false;
++  if (el.children.length > CARD_CELL_MAX_DIRECT_CHILDREN) return false;
++  return countSiblingDivsWithText(el) >= CARD_CELL_MIN_SIBLING_DIVS;
++}
+ 
+-  return { mode: 'element', element: block };
++function isFeatureIconCardMediaElement(el) {
++  if (!el || el.nodeType !== Node.ELEMENT_NODE || !el.tagName) return false;
++  return FEATURE_ICON_CARD_MEDIA_TAGS.has(el.tagName);
+ }
+ 
+-function hasOnlyBrDirectElementChildren(el) {
+-  if (!el) return false;
+-  let brCount = 0;
+-  for (let i = 0; i < el.childNodes.length; i++) {
+-    const child = el.childNodes[i];
+-    if (child.nodeType !== Node.ELEMENT_NODE) continue;
+-    if (child.tagName !== 'BR') return false;
+-    brCount++;
++// Ko-fi pricing feature grid: div > img + h3 + p
++function isFeatureIconCardTextBlock(el) {
++  if (!el || el.nodeType !== Node.ELEMENT_NODE) return false;
++  if (HEADING_SECTION_TAGS.has(el.tagName)) return false;
++  if (!(el.textContent || '').trim()) return false;
++  if (el.tagName === 'P') return true;
++  if (el.tagName === 'DIV' && !hasDirectHeadingChild(el)) {
++    return !el.querySelector('div');
+   }
+-  return brCount >= 1;
++  return false;
+ }
+ 
+-function isBrOnlyDivElement(el) {
++function isFeatureIconCardBlock(el) {
+   if (!el || el.tagName !== 'DIV') return false;
+   if (isYomupUiElement(el) || isEditableElement(el)) return false;
+   if (isHighlightExcludedCodeElement(el)) return false;
+-  if (!hasOnlyBrDirectElementChildren(el)) return false;
+-  const text = (el.textContent || '').trim();
+-  if (!text) return false;
+-  if (isBrFlowContainer(el)) return false;
+-  return true;
+-}
++  if (el.children.length < 2 || el.children.length > CARD_CELL_MAX_DIRECT_CHILDREN) return false;
+ 
+-function isBrOnlyDivExcludedContext(el) {
+-  if (!el) return true;
++  let headingCount = 0;
++  let textBlockCount = 0;
++  for (let i = 0; i < el.children.length; i++) {
++    const child = el.children[i];
++    if (child.nodeType !== Node.ELEMENT_NODE) continue;
++    if (isFeatureIconCardMediaElement(child)) continue;
++    if (HEADING_SECTION_TAGS.has(child.tagName)) {
++      headingCount++;
++      continue;
++    }
++    if (isFeatureIconCardTextBlock(child)) {
++      textBlockCount++;
++      continue;
++    }
++    if (!(child.textContent || '').trim()) continue;
++    return false;
++  }
++  return headingCount === 1 && textBlockCount === 1;
++}
++
++function isAggregateFeatureColumnElement(el) {
++  if (!el || el.tagName !== 'DIV') return false;
++  const cls = String(el.className || '');
++  if (cls.includes('col-span') && cls.includes('space-y')) return true;
++  if (containsNestedFeatureIconCardBlocks(el)) return true;
++  let cardLikeChildCount = 0;
++  for (let i = 0; i < el.children.length; i++) {
++    const child = el.children[i];
++    if (child.nodeType !== Node.ELEMENT_NODE || child.tagName !== 'DIV') continue;
++    if (isFeatureIconCardBlock(child)) {
++      cardLikeChildCount++;
++      continue;
++    }
++    if (child.querySelector && child.querySelector(':scope > h1, :scope > h2, :scope > h3, :scope > h4')) {
++      cardLikeChildCount++;
++    }
++  }
++  return cardLikeChildCount >= 2;
++}
++
++function findDeepestHighlightTextBlockWithin(containerEl, clientX, clientY) {
++  if (!containerEl || typeof containerEl.contains !== 'function') return null;
++
++  const range = caretRangeFromClientXY(clientX, clientY);
++  if (range) {
++    let node = range.startContainer;
++    if (node.nodeType === Node.TEXT_NODE) {
++      node = node.parentElement;
++    } else if (node.nodeType !== Node.ELEMENT_NODE) {
++      node = null;
++    }
++    if (node && containerEl.contains(node)) {
++      let bestBlock = null;
++      let bestHeading = null;
++      let n = node;
++      while (n && n !== containerEl) {
++        if (isBlockHighlightContainer(n)) {
++          bestBlock = n;
++        }
++        if (HEADING_SECTION_TAGS.has(n.tagName)) {
++          bestHeading = n;
++        }
++        n = n.parentElement;
++      }
++      if (bestBlock || bestHeading) {
++        return bestBlock || bestHeading;
++      }
++    }
++  }
++
++  if (typeof document.elementsFromPoint === 'function') {
++    const stack = document.elementsFromPoint(clientX, clientY);
++    for (let i = 0; i < stack.length; i++) {
++      const hit = stack[i];
++      if (!hit || hit === containerEl || !containerEl.contains(hit)) continue;
++      if (isBlockHighlightContainer(hit)) return hit;
++      if (HEADING_SECTION_TAGS.has(hit.tagName)) return hit;
++    }
++  }
++
++  let hit = document.elementFromPoint(clientX, clientY);
++  while (hit && hit !== containerEl && containerEl.contains(hit)) {
++    if (isBlockHighlightContainer(hit)) return hit;
++    if (HEADING_SECTION_TAGS.has(hit.tagName)) return hit;
++    hit = hit.parentElement;
++  }
++  return null;
++}
++
++function collectFeatureColumnTextUnits(columnEl) {
++  const units = [];
++  if (!columnEl) return units;
++  for (let i = 0; i < columnEl.children.length; i++) {
++    const wrapper = columnEl.children[i];
++    if (!wrapper || wrapper.nodeType !== Node.ELEMENT_NODE) continue;
++    for (let j = 0; j < wrapper.children.length; j++) {
++      const child = wrapper.children[j];
++      if (!child || child.nodeType !== Node.ELEMENT_NODE) continue;
++      if (HEADING_SECTION_TAGS.has(child.tagName) || isFeatureIconCardTextBlock(child)) {
++        units.push(child);
++      }
++    }
++  }
++  if (units.length === 0 && columnEl.querySelectorAll) {
++    const nodes = columnEl.querySelectorAll('h1,h2,h3,h4,p');
++    for (let k = 0; k < nodes.length; k++) {
++      const node = nodes[k];
++      if (node && columnEl.contains(node)) {
++        units.push(node);
++      }
++    }
++  }
++  return units;
++}
++
++function findNearestFeatureColumnTextUnit(columnEl, clientX, clientY) {
++  const units = collectFeatureColumnTextUnits(columnEl);
++  if (units.length === 0) return null;
++  return pickNearestCardTextUnit(units, clientX, clientY);
++}
++
++function isKoFiFeatureColumnElement(el) {
++  if (!el || el.tagName !== 'DIV') return false;
++  return String(el.className || '').includes('col-span');
++}
++
++function normalizeAggregateHighlightBlock(highlightBlock, clientX, clientY) {
++  if (!highlightBlock || !isElementHighlightBlock(highlightBlock)) return highlightBlock;
++  const el = highlightBlock.element;
++  if (!el) return highlightBlock;
++
++  const caretNode = getPointReferenceNode(clientX, clientY);
++  const isFeatureColumn = isKoFiFeatureColumnElement(el) || isAggregateFeatureColumnElement(el);
++
++  if (isFeatureColumn) {
++    const replacement =
++      findNearestFeatureColumnTextUnit(el, clientX, clientY) ||
++      resolveFeatureIconCardUnitUnderAggregate(el, caretNode, clientX, clientY) ||
++      findDeepestHighlightTextBlockWithin(el, clientX, clientY);
++    if (replacement && replacement !== el) {
++      logUnderlineTrace('normalize', {
++        from: String(el.className || '').slice(0, 60),
++        to: replacement.tagName + ':' + String(replacement.textContent || '').trim().slice(0, 40)
++      });
++      return { mode: 'element', element: replacement };
++    }
++    logUnderlineTrace('normalize-failed', {
++      cls: String(el.className || '').slice(0, 80),
++      x: clientX,
++      y: clientY,
++      unitCount: collectFeatureColumnTextUnits(el).length
++    });
++    return highlightBlock;
++  }
++
++  const featureUnit = resolveFeatureIconCardUnitUnderAggregate(el, caretNode, clientX, clientY);
++  if (featureUnit && featureUnit !== el) {
++    return { mode: 'element', element: featureUnit };
++  }
++  return highlightBlock;
++}
++
++function containsNestedFeatureIconCardBlocks(el) {
++  const cards = [];
++  collectFeatureIconCardBlocks(el, cards);
++  return cards.length > 0;
++}
++
++function collectFeatureIconCardBlocks(root, out) {
++  if (!root || root.nodeType !== Node.ELEMENT_NODE) return;
++  if (isFeatureIconCardBlock(root)) {
++    out.push(root);
++    return;
++  }
++  for (let i = 0; i < root.children.length; i++) {
++    collectFeatureIconCardBlocks(root.children[i], out);
++  }
++}
++
++function findFeatureIconCardContainingPoint(root, clientX, clientY) {
++  if (!root || typeof clientX !== 'number' || typeof clientY !== 'number') return null;
++  const cards = [];
++  collectFeatureIconCardBlocks(root, cards);
++  for (let i = 0; i < cards.length; i++) {
++    const rect = cards[i].getBoundingClientRect();
++    if (
++      clientX >= rect.left && clientX <= rect.right &&
++      clientY >= rect.top && clientY <= rect.bottom
++    ) {
++      return cards[i];
++    }
++  }
++  return null;
++}
++
++function findNearestFeatureIconCardUnder(root, clientX, clientY) {
++  const cards = [];
++  collectFeatureIconCardBlocks(root, cards);
++  if (cards.length === 0) return null;
++  return pickNearestCardTextUnit(cards, clientX, clientY);
++}
++
++function resolveFeatureIconCardUnitUnderAggregate(containerEl, caretNode, clientX, clientY) {
++  if (!containerEl) return null;
++  if (isFeatureIconCardBlock(containerEl)) {
++    return resolveFeatureIconCardBlockUnit(containerEl, caretNode, clientX, clientY);
++  }
++  const innerCard = findFeatureIconCardContainingPoint(containerEl, clientX, clientY)
++    || findNearestFeatureIconCardUnder(containerEl, clientX, clientY);
++  if (!innerCard) return null;
++  return resolveFeatureIconCardBlockUnit(innerCard, caretNode, clientX, clientY);
++}
++
++function resolveCardCellUnitOrFeatureDrill(unit, caretNode, clientX, clientY) {
++  if (!unit) return null;
++  const featureUnit = resolveFeatureIconCardUnitUnderAggregate(unit, caretNode, clientX, clientY);
++  if (featureUnit) return featureUnit;
++  return unit;
++}
++
++function resolveFeatureIconCardBlockUnit(cardEl, caretNode, clientX, clientY) {
++  let ref = caretNode;
++  if (ref && ref.nodeType === Node.TEXT_NODE) {
++    ref = ref.parentElement;
++  }
++  if (!ref) {
++    ref = document.elementFromPoint(clientX, clientY);
++  }
++
++  const textUnits = [];
++  for (let i = 0; i < cardEl.children.length; i++) {
++    const child = cardEl.children[i];
++    if (child.nodeType !== Node.ELEMENT_NODE) continue;
++    if (HEADING_SECTION_TAGS.has(child.tagName) || isFeatureIconCardTextBlock(child)) {
++      textUnits.push(child);
++    }
++  }
++  if (textUnits.length === 0) return null;
++
++  if (ref) {
++    for (let i = 0; i < textUnits.length; i++) {
++      const unit = textUnits[i];
++      if (unit === ref || unit.contains(ref)) {
++        return unit;
++      }
++    }
++  }
++
++  return pickNearestCardTextUnit(textUnits, clientX, clientY);
++}
++
++function findFeatureIconCardBlockFromPoint(clientX, clientY) {
++  const caretNode = getPointReferenceNode(clientX, clientY);
++  let node = caretNode;
++  if (node && node.nodeType === Node.TEXT_NODE) {
++    node = node.parentElement;
++  }
++  if (!node) {
++    node = document.elementFromPoint(clientX, clientY);
++  }
++  if (!node || isNodeInsideTable(node)) return null;
++
++  while (node && node !== document.body && node !== document.documentElement) {
++    if (isYomupUiElement(node) || isEditableElement(node)) return null;
++
++    const innerCard = findFeatureIconCardContainingPoint(node, clientX, clientY)
++      || (isFeatureIconCardBlock(node) ? node : null);
++    if (innerCard) {
++      const unit = resolveFeatureIconCardBlockUnit(innerCard, caretNode || node, clientX, clientY);
++      if (unit) {
++        return { mode: 'element', element: unit };
++      }
++    }
++
++    node = node.parentElement;
++  }
++  return null;
++}
++
++function hasOnlyCardCellPricingRowDirectChildren(el) {
++  for (let i = 0; i < el.children.length; i++) {
++    const child = el.children[i];
++    if (child.nodeType !== Node.ELEMENT_NODE) continue;
++    const tag = child.tagName;
++    if (CARD_CELL_PRICING_ROW_HEADING_TAGS.has(tag)) continue;
++    if (tag === 'DIV' && (child.textContent || '').trim()) continue;
++    if (!(child.textContent || '').trim()) continue;
++    return false;
++  }
++  return true;
++}
++
++// H2/H3 + 直下テキスト div 1 つ以上（例: Ko-fi pricing の $12/month + fee 行）
++function isCardCellPricingRow(el) {
++  if (!el || el.tagName !== 'DIV') return false;
++  if (isYomupUiElement(el) || isEditableElement(el)) return false;
++  if (isHighlightExcludedCodeElement(el)) return false;
++  if (el.children.length > CARD_CELL_MAX_DIRECT_CHILDREN) return false;
++
++  let headingCount = 0;
++  let textDivCount = 0;
++  for (let i = 0; i < el.children.length; i++) {
++    const child = el.children[i];
++    if (child.nodeType !== Node.ELEMENT_NODE) continue;
++    if (CARD_CELL_PRICING_ROW_HEADING_TAGS.has(child.tagName)) {
++      headingCount++;
++    } else if (child.tagName === 'DIV' && (child.textContent || '').trim()) {
++      textDivCount++;
++    }
++  }
++  if (headingCount < 1 || textDivCount < 1) return false;
++  return hasOnlyCardCellPricingRowDirectChildren(el);
++}
++
++function containsCardCellPricingRows(el) {
++  if (!el || el.nodeType !== Node.ELEMENT_NODE) return false;
++  if (isCardCellPricingRow(el)) return true;
++  for (let i = 0; i < el.children.length; i++) {
++    if (containsCardCellPricingRows(el.children[i])) return true;
++  }
++  return false;
++}
++
++function resolveCardCellPricingRowUnit(rowEl, caretNode, clientX, clientY) {
++  let ref = caretNode;
++  if (ref && ref.nodeType === Node.TEXT_NODE) {
++    ref = ref.parentElement;
++  }
++  if (!ref) {
++    ref = document.elementFromPoint(clientX, clientY);
++  }
++
++  if (ref) {
++    for (let i = 0; i < rowEl.children.length; i++) {
++      const child = rowEl.children[i];
++      if (child.nodeType !== Node.ELEMENT_NODE) continue;
++      if (!CARD_CELL_PRICING_ROW_HEADING_TAGS.has(child.tagName)) continue;
++      if (child === ref || child.contains(ref)) {
++        return child;
++      }
++    }
++  }
++
++  const textDivs = getDirectTextDivChildren(rowEl).filter(isCardCellTextUnit);
++  if (textDivs.length === 0) return null;
++
++  if (ref) {
++    for (let i = 0; i < textDivs.length; i++) {
++      const div = textDivs[i];
++      if (div === ref || div.contains(ref)) {
++        return div;
++      }
++    }
++  }
++
++  return pickNearestCardTextUnit(textDivs, clientX, clientY);
++}
++
++function pickNearestCardTextUnit(textDivs, clientX, clientY) {
++  if (textDivs.length === 0) return null;
++  if (textDivs.length === 1) return textDivs[0];
++  if (typeof clientX !== 'number' || typeof clientY !== 'number') {
++    return textDivs[0];
++  }
++
++  for (let i = 0; i < textDivs.length; i++) {
++    const rect = textDivs[i].getBoundingClientRect();
++    if (
++      clientX >= rect.left && clientX <= rect.right &&
++      clientY >= rect.top && clientY <= rect.bottom
++    ) {
++      return textDivs[i];
++    }
++  }
++
++  let best = textDivs[0];
++  let bestDist = Infinity;
++  for (let i = 0; i < textDivs.length; i++) {
++    const rect = textDivs[i].getBoundingClientRect();
++    const cx = rect.left + rect.width / 2;
++    const cy = rect.top + rect.height / 2;
++    const d = (cx - clientX) ** 2 + (cy - clientY) ** 2;
++    if (d < bestDist) {
++      bestDist = d;
++      best = textDivs[i];
++    }
++  }
++  return best;
++}
++
++function resolveCardCellTextUnit(cardEl, caretNode, clientX, clientY) {
++  const textDivs = getDirectTextDivChildren(cardEl).filter(isCardCellTextUnit);
++  if (textDivs.length === 0) return null;
++
++  let ref = caretNode;
++  if (ref && ref.nodeType === Node.TEXT_NODE) {
++    ref = ref.parentElement;
++  }
++  if (!ref) {
++    ref = document.elementFromPoint(clientX, clientY);
++  }
++
++  if (ref) {
++    for (let i = 0; i < textDivs.length; i++) {
++      const div = textDivs[i];
++      if (div === ref || div.contains(ref)) {
++        return resolveCardCellUnitOrFeatureDrill(div, caretNode, clientX, clientY);
++      }
++    }
++
++    const allDirectDivs = getDirectTextDivChildren(cardEl);
++    for (let i = 0; i < allDirectDivs.length; i++) {
++      const child = allDirectDivs[i];
++      if (!child.contains(ref)) continue;
++      const featureUnit = resolveFeatureIconCardUnitUnderAggregate(child, caretNode, clientX, clientY);
++      if (featureUnit) return featureUnit;
++      if (isCardCellPricingRow(child)) {
++        const unit = resolveCardCellPricingRowUnit(child, caretNode, clientX, clientY);
++        if (unit) return unit;
++      }
++    }
++  }
++
++  return resolveCardCellUnitOrFeatureDrill(
++    pickNearestCardTextUnit(textDivs, clientX, clientY),
++    caretNode,
++    clientX,
++    clientY
++  );
++}
++
++function findCardCellPricingRowBlockFromPoint(clientX, clientY) {
++  const caretNode = getPointReferenceNode(clientX, clientY);
++  let node = caretNode;
++  if (node && node.nodeType === Node.TEXT_NODE) {
++    node = node.parentElement;
++  }
++  if (!node) {
++    node = document.elementFromPoint(clientX, clientY);
++  }
++  if (isNodeInsideTable(node)) return null;
++
++  while (node && node !== document.body && node !== document.documentElement) {
++    if (isYomupUiElement(node) || isEditableElement(node)) return null;
++    if (isCardCellPricingRow(node)) {
++      const unit = resolveCardCellPricingRowUnit(node, caretNode || node, clientX, clientY);
++      if (unit) {
++        return { mode: 'element', element: unit };
++      }
++    }
++    node = node.parentElement;
++  }
++  return null;
++}
++
++function findCardCellBlockFromPoint(clientX, clientY) {
++  const caretNode = getPointReferenceNode(clientX, clientY);
++  let node = caretNode;
++  if (node && node.nodeType === Node.TEXT_NODE) {
++    node = node.parentElement;
++  }
++  if (!node) {
++    node = document.elementFromPoint(clientX, clientY);
++  }
++  if (isNodeInsideTable(node)) return null;
++
++  while (node && node !== document.body && node !== document.documentElement) {
++    if (isYomupUiElement(node) || isEditableElement(node)) return null;
++    if (isCardCellStructure(node)) {
++      const unit = resolveCardCellTextUnit(node, caretNode || node, clientX, clientY);
++      if (unit) {
++        return { mode: 'element', element: unit };
++      }
++    }
++    node = node.parentElement;
++  }
++  return null;
++}
++
++function resolveFaqAnswerTextUnit(blockEl, caretNode, clientX, clientY) {
++  if (typeof document.elementsFromPoint === 'function') {
++    const stack = document.elementsFromPoint(clientX, clientY);
++    for (let i = 0; i < stack.length; i++) {
++      const el = stack[i];
++      if (!el || !el.tagName || el === blockEl || !blockEl.contains(el)) continue;
++      const tag = el.tagName;
++      if (tag !== 'SPAN' && tag !== 'P') continue;
++      if (!(el.textContent || '').trim()) continue;
++      if (isYomupUiElement(el) || isEditableElement(el) || isHighlightExcludedCodeElement(el)) continue;
++      if (getContainingTextRectsForPoint(el, clientX, clientY).length > 0) {
++        return el;
++      }
++    }
++  }
++
++  const range = caretRangeFromClientXY(clientX, clientY);
++  if (range && range.startContainer && blockEl.contains(range.startContainer)) {
++    let n = range.startContainer;
++    if (n.nodeType === Node.TEXT_NODE) {
++      n = n.parentElement;
++    }
++    while (n && n !== blockEl) {
++      const tag = n.tagName;
++      if ((tag === 'SPAN' || tag === 'P') && (n.textContent || '').trim()) {
++        if (!isYomupUiElement(n) && !isEditableElement(n) && !isHighlightExcludedCodeElement(n)) {
++          return n;
++        }
++      }
++      n = n.parentElement;
++    }
++  }
++
++  let ref = caretNode;
++  if (ref && ref.nodeType === Node.TEXT_NODE) {
++    ref = ref.parentElement;
++  }
++  if (!ref) {
++    ref = document.elementFromPoint(clientX, clientY);
++  }
++  if (ref && blockEl.contains(ref)) {
++    let n = ref;
++    while (n && n !== blockEl) {
++      const tag = n.tagName;
++      if ((tag === 'SPAN' || tag === 'P') && (n.textContent || '').trim()) {
++        if (!isYomupUiElement(n) && !isEditableElement(n) && !isHighlightExcludedCodeElement(n)) {
++          return n;
++        }
++      }
++      n = n.parentElement;
++    }
++
++    let section = ref;
++    while (section && section.parentElement && section.parentElement !== blockEl) {
++      section = section.parentElement;
++    }
++    if (
++      section &&
++      section !== blockEl &&
++      section.parentElement === blockEl &&
++      section.tagName === 'DIV' &&
++      (section.textContent || '').trim()
++    ) {
++      return section;
++    }
++  }
++  return blockEl;
++}
++
++function findFaqAnswerBlockFromPoint(clientX, clientY) {
++  const caretNode = getPointReferenceNode(clientX, clientY);
++  let node = caretNode;
++  if (node && node.nodeType === Node.TEXT_NODE) {
++    node = node.parentElement;
++  }
++  if (!node) {
++    node = document.elementFromPoint(clientX, clientY);
++  }
++  if (!node || isNodeInsideTable(node)) return null;
++
++  const answer = node.closest && node.closest('.faq-answer');
++  if (!answer || isYomupUiElement(answer) || isEditableElement(answer)) return null;
++
++  let block = null;
++  for (let i = 0; i < answer.children.length; i++) {
++    const child = answer.children[i];
++    if (child.tagName !== 'DIV') continue;
++    if (child === node || child.contains(node)) {
++      block = child;
++      break;
++    }
++  }
++  if (!block || isYomupUiElement(block) || isEditableElement(block)) return null;
++  if (isHighlightExcludedCodeElement(block)) return null;
++  if (!(block.textContent || '').trim()) return null;
++
++  const unit = resolveFaqAnswerTextUnit(block, caretNode || node, clientX, clientY);
++  if (!unit || !(unit.textContent || '').trim()) return null;
++
++  return { mode: 'element', element: unit };
++}
++
++function hasOnlyBrDirectElementChildren(el) {
++  if (!el) return false;
++  let brCount = 0;
++  for (let i = 0; i < el.childNodes.length; i++) {
++    const child = el.childNodes[i];
++    if (child.nodeType !== Node.ELEMENT_NODE) continue;
++    if (child.tagName !== 'BR') return false;
++    brCount++;
++  }
++  return brCount >= 1;
++}
++
++function isBrOnlyDivElement(el) {
++  if (!el || el.tagName !== 'DIV') return false;
++  if (isYomupUiElement(el) || isEditableElement(el)) return false;
++  if (isHighlightExcludedCodeElement(el)) return false;
++  if (!hasOnlyBrDirectElementChildren(el)) return false;
++  const text = (el.textContent || '').trim();
++  if (!text) return false;
++  if (isBrFlowContainer(el)) return false;
++  return true;
++}
++
++function isBrOnlyDivExcludedContext(el) {
++  if (!el) return true;
+   if (isNodeInsideTable(el)) return true;
+   if (isWithinUiChromeRegion(el)) return true;
+ 
+   let ancestor = el.parentElement;
+   while (ancestor && ancestor !== document.body && ancestor !== document.documentElement) {
+@@ -3102,10 +3854,19 @@ function isBrOnlyDivExcludedContext(el) {
+   }
+ 
+   if (el.closest && el.closest('.faq-answer')) return true;
+   if (isGhostOverlayLink(el)) return true;
+   if (isCardCellStructure(el)) return true;
++  if (isInnerCardCellStructure(el)) return true;
++
++  let cardAncestor = el.parentElement;
++  while (cardAncestor && cardAncestor !== document.body && cardAncestor !== document.documentElement) {
++    if (isCardCellStructure(cardAncestor) || isInnerCardCellStructure(cardAncestor)) {
++      return !(cardAncestor === el.parentElement && el.tagName === 'DIV');
++    }
++    cardAncestor = cardAncestor.parentElement;
++  }
+ 
+   return false;
+ }
+ 
+ function brOnlyDivAcceptsHoverPoint(el, clientX, clientY) {
+@@ -3118,10 +3879,120 @@ function brOnlyDivAcceptsHoverPoint(el, clientX, clientY) {
+     clientX >= rect.left && clientX <= rect.right &&
+     clientY >= rect.top && clientY <= rect.bottom
+   );
+ }
+ 
++// §36 C': SVG/img + テキスト行 div（CrowdWorks ステータス行等。class パッチ禁止）
++function isIconTextRowDiv(el) {
++  if (!el || el.tagName !== 'DIV') return false;
++  if (isYomupUiElement(el) || isEditableElement(el)) return false;
++  if (isHighlightExcludedCodeElement(el)) return false;
++  if (!el.querySelector('svg, img, picture')) return false;
++  if (el.querySelector('dl, dt, dd')) return false;
++  if (hasDirectHeadingChild(el)) return false;
++
++  const text = (el.textContent || '').trim();
++  if (!text) return false;
++  if (text.length > MAX_TEXT_LENGTH_FOR_HIGHLIGHT + HIGHLIGHT_UNIT_SLACK_JA) return false;
++
++  for (let i = 0; i < el.children.length; i++) {
++    const child = el.children[i];
++    if (child.nodeType !== Node.ELEMENT_NODE) continue;
++    const tag = child.tagName;
++    if (isDecorativeMediaElement(child)) continue;
++    if (tag === 'SPAN' || tag === 'A') continue;
++    if (tag === 'DIV') return false;
++    if (BLOCK_ANCESTOR_TAGS.has(tag) || HEADING_SECTION_TAGS.has(tag)) return false;
++  }
++
++  if (countDirectTextDivChildren(el) >= CARD_CELL_MIN_TEXT_DIVS) return false;
++  return true;
++}
++
++function isIconTextRowExcludedContext(el) {
++  if (!el) return true;
++  if (isNodeInsideTable(el)) return true;
++  if (isWithinUiChromeRegion(el)) return true;
++  if (isBrFlowContainer(el)) return true;
++  if (isCardCellStructure(el) || isInnerCardCellStructure(el)) return true;
++  if (isGhostOverlayLink(el)) return true;
++  if (el.closest && el.closest('.faq-answer')) return true;
++  return false;
++}
++
++function iconTextRowAcceptsHoverPoint(el, clientX, clientY) {
++  return brOnlyDivAcceptsHoverPoint(el, clientX, clientY);
++}
++
++function findIconTextRowBlockFromPoint(clientX, clientY) {
++  if (isGhostOverlayAtPoint(clientX, clientY)) return null;
++
++  let node = getPointReferenceNode(clientX, clientY);
++  if (node && node.nodeType === Node.TEXT_NODE) {
++    node = node.parentElement;
++  }
++  if (!node) {
++    node = document.elementFromPoint(clientX, clientY);
++  }
++
++  while (node && node !== document.body && node !== document.documentElement) {
++    if (isYomupUiElement(node) || isEditableElement(node)) return null;
++    if (isHighlightExcludedCodeElement(node)) {
++      node = node.parentElement;
++      continue;
++    }
++    if (node.tagName === 'DIV') {
++      if (isIconTextRowDiv(node) && !isIconTextRowExcludedContext(node)) {
++        if (iconTextRowAcceptsHoverPoint(node, clientX, clientY)) {
++          return { mode: 'element', element: node };
++        }
++        return null;
++      }
++    }
++    node = node.parentElement;
++  }
++  return null;
++}
++
++// §36 B: dt/dd 行 — SVG 上 hover も行矩形で許容（§34 EH-1 と同型）
++function definitionListItemAcceptsHoverPoint(el, clientX, clientY) {
++  return brOnlyDivAcceptsHoverPoint(el, clientX, clientY);
++}
++
++function findDefinitionListItemBlockFromPoint(clientX, clientY) {
++  if (isGhostOverlayAtPoint(clientX, clientY)) return null;
++
++  let node = getPointReferenceNode(clientX, clientY);
++  if (node && node.nodeType === Node.TEXT_NODE) {
++    node = node.parentElement;
++  }
++  if (!node) {
++    node = document.elementFromPoint(clientX, clientY);
++  }
++
++  while (node && node !== document.body && node !== document.documentElement) {
++    if (isYomupUiElement(node) || isEditableElement(node)) return null;
++    if (isHighlightExcludedCodeElement(node)) {
++      node = node.parentElement;
++      continue;
++    }
++    if (node.tagName === 'DT' || node.tagName === 'DD') {
++      if (!(node.textContent || '').trim()) {
++        node = node.parentElement;
++        continue;
++      }
++      if (definitionListItemAcceptsHoverPoint(node, clientX, clientY)) {
++        return { mode: 'element', element: node };
++      }
++      node = node.parentElement;
++      continue;
++    }
++    node = node.parentElement;
++  }
++  return null;
++}
++
+ function findBrOnlyDivBlockFromPoint(clientX, clientY) {
+   if (isGhostOverlayAtPoint(clientX, clientY)) return null;
+ 
+   let node = getPointReferenceNode(clientX, clientY);
+   if (node && node.nodeType === Node.TEXT_NODE) {
+@@ -3152,11 +4023,11 @@ function findBrOnlyDivBlockFromPoint(clientX, clientY) {
+ 
+ function isLeafTextDivElement(el) {
+   if (!el || el.tagName !== 'DIV') return false;
+   if (isYomupUiElement(el) || isEditableElement(el)) return false;
+   if (isHighlightExcludedCodeElement(el)) return false;
+-  if (hasDirectElementChild(el)) return false;
++  if (hasDirectElementChild(el) && !hasOnlyDecorativeMediaElementChildren(el)) return false;
+   const text = (el.textContent || '').trim();
+   if (!text) return false;
+   if (text.length > MAX_TEXT_LENGTH_FOR_HIGHLIGHT + HIGHLIGHT_UNIT_SLACK_JA) return false;
+   if (countWords(text) > MAX_WORDS_FOR_HIGHLIGHT + HIGHLIGHT_UNIT_SLACK_EN) return false;
+   return true;
+@@ -3182,15 +4053,18 @@ function isLeafTextDivExcludedContext(el) {
+     }
+   }
+ 
+   if (el.closest && el.closest('.faq-answer')) return true;
+   if (isGhostOverlayLink(el)) return true;
++  if (isAggregateFeatureColumnElement(el)) return true;
++  if (containsNestedFeatureIconCardBlocks(el)) return true;
+   if (isCardCellStructure(el)) return true;
++  if (isInnerCardCellStructure(el)) return true;
+ 
+   let cardAncestor = el.parentElement;
+   while (cardAncestor && cardAncestor !== document.body && cardAncestor !== document.documentElement) {
+-    if (isCardCellStructure(cardAncestor)) {
++    if (isCardCellStructure(cardAncestor) || isInnerCardCellStructure(cardAncestor)) {
+       return !(cardAncestor === el.parentElement && el.tagName === 'DIV');
+     }
+     cardAncestor = cardAncestor.parentElement;
+   }
+ 
+@@ -3329,10 +4203,32 @@ function hasDirectElementChild(el) {
+     if (el.childNodes[i].nodeType === Node.ELEMENT_NODE) return true;
+   }
+   return false;
+ }
+ 
++function isDecorativeMediaElement(el) {
++  if (!el || el.nodeType !== Node.ELEMENT_NODE) return false;
++  const tag = el.tagName;
++  return tag === 'IMG' || tag === 'SVG' || tag === 'PICTURE';
++}
++
++// Ko-fi 大見出し等: テキスト + コイン img のみの div を leaf-text 対象に含める
++function hasOnlyDecorativeMediaElementChildren(el) {
++  if (!el) return false;
++  let hasText = false;
++  for (let i = 0; i < el.childNodes.length; i++) {
++    const child = el.childNodes[i];
++    if (child.nodeType === Node.TEXT_NODE) {
++      if ((child.textContent || '').trim()) hasText = true;
++      continue;
++    }
++    if (child.nodeType !== Node.ELEMENT_NODE) return false;
++    if (!isDecorativeMediaElement(child)) return false;
++  }
++  return hasText;
++}
++
+ function getSectionBlockRoot(block) {
+   if (block.mode === 'br-flow') return block.container;
+   if (block.mode === 'heading-interval') return block.root;
+   return null;
+ }
+@@ -3354,10 +4250,22 @@ function isBrFlowContainer(el) {
+     }
+   }
+   return hasDirectHeading && hasDirectBody;
+ }
+ 
++// br-flow 本文 vs 目次 `<a>` 等 — SPAN 細切れ（N-S1）を防ぎ list リンクは inline 維持
++function shouldPreferInlineTextOverBrFlow(inlineHost) {
++  if (!inlineHost || !inlineHost.tagName) return false;
++  if (inlineHost.tagName === 'A') {
++    return !!(inlineHost.closest && inlineHost.closest('li, nav, header, footer'));
++  }
++  if (inlineHost.tagName === 'TIME' || inlineHost.tagName === 'BUTTON' || inlineHost.tagName === 'LABEL') {
++    return true;
++  }
++  return false;
++}
++
+ function getDirectChildBrFlowHeadings(container) {
+   const headings = [];
+   for (let i = 0; i < container.childNodes.length; i++) {
+     const child = container.childNodes[i];
+     if (child.nodeType !== Node.ELEMENT_NODE || !child.tagName) continue;
+@@ -3480,12 +4388,19 @@ function findHighlightBlockFromPoint(clientX, clientY) {
+     const layoutInner = findLayoutTableCellInnerBlockFromPoint(clientX, clientY, tableCell);
+     if (layoutInner) return layoutInner;
+     return { mode: 'element', element: tableCell };
+   }
+ 
+-  // header/footer/nav 内では LI よりインライン短文を優先（§3.7.2）
+   const pointNode = getPointReferenceNode(clientX, clientY) || document.elementFromPoint(clientX, clientY);
++
++  // §4.5.2: FAQ — block 祖先（P）より先に faq-answer 経路へ
++  if (isWithinFaqAnswerRegion(pointNode)) {
++    const faqAnswerEarly = findFaqAnswerBlockFromPoint(clientX, clientY);
++    if (faqAnswerEarly) return faqAnswerEarly;
++  }
++
++  // header/footer/nav 内では LI よりインライン短文を優先（§3.7.2）
+   if (isWithinUiChromeRegion(pointNode)) {
+     const chromeInlineHost = findBestInlineTextHostFromPoint(clientX, clientY);
+     if (chromeInlineHost) {
+       return { mode: 'inline-text', element: chromeInlineHost };
+     }
+@@ -3505,26 +4420,58 @@ function findHighlightBlockFromPoint(clientX, clientY) {
+   const blockLabel = findBlockLabelFromPoint(clientX, clientY);
+   if (blockLabel) {
+     return { mode: 'inline-text', element: blockLabel };
+   }
+ 
++  const flowStep = findFlowStepBlockFromPoint(clientX, clientY);
++  if (flowStep) return flowStep;
++
++  // §36 B: dt/dd 実績行 — inner-card / card-cell より先（§34 EH-1 同型）
++  const definitionListItemEarly = findDefinitionListItemBlockFromPoint(clientX, clientY);
++  if (definitionListItemEarly) return definitionListItemEarly;
++
++  const innerCardCell = findInnerCardCellBlockFromPoint(clientX, clientY);
++  if (innerCardCell) return innerCardCell;
++
+   const deepestLi = findDeepestListItemFromPoint(clientX, clientY);
+   if (deepestLi) {
+-    return { mode: 'element', element: deepestLi };
++    if (
++      !isFlowStepListItemStructure(deepestLi) &&
++      !liContainsInnerCardCellAtPoint(deepestLi, clientX, clientY)
++    ) {
++      return { mode: 'element', element: deepestLi };
++    }
+   }
+ 
+   if (isGhostOverlayAtPoint(clientX, clientY)) {
+     const ghostStackBlock = findBlockInHitStackFromPoint(clientX, clientY);
+     if (ghostStackBlock) return ghostStackBlock;
+   }
+ 
++  // §32 P1: Ko-fi 料金プラン（H2 + fee 行）→ feature 単卡 → block 祖先 → card-cell
++  const cardCellPricingRow = findCardCellPricingRowBlockFromPoint(clientX, clientY);
++  if (cardCellPricingRow) return cardCellPricingRow;
++
++  const featureIconCard = findFeatureIconCardBlockFromPoint(clientX, clientY);
++  if (featureIconCard) return featureIconCard;
++
++  // §36 C': SVG + テキスト行 div（ステータス行）
++  const iconTextRow = findIconTextRowBlockFromPoint(clientX, clientY);
++  if (iconTextRow) return iconTextRow;
++
++  // N-S1: br-flow を block 祖先より先に（西川 rt_cf_n_body 等の `<br>` 論理行）
++  const brFlow = findBrFlowBlockFromPoint(clientX, clientY);
++  const inlineHost = findBestInlineTextHostFromPoint(clientX, clientY);
++  if (brFlow && (!inlineHost || !shouldPreferInlineTextOverBrFlow(inlineHost))) {
++    return brFlow;
++  }
++
+   const element = findBlockAncestorFromPoint(clientX, clientY);
+   if (element) {
+     return { mode: 'element', element };
+   }
+ 
+-  const inlineHost = findBestInlineTextHostFromPoint(clientX, clientY);
+   if (inlineHost) {
+     return { mode: 'inline-text', element: inlineHost };
+   }
+ 
+   const brOnlyDiv = findBrOnlyDivBlockFromPoint(clientX, clientY);
+@@ -3543,13 +4490,10 @@ function findHighlightBlockFromPoint(clientX, clientY) {
+   if (rubyBrBlock) return rubyBrBlock;
+ 
+   const aozoraOrphanText = findAozoraOrphanTextBlockFromPoint(clientX, clientY);
+   if (aozoraOrphanText) return aozoraOrphanText;
+ 
+-  const brFlow = findBrFlowBlockFromPoint(clientX, clientY);
+-  if (brFlow) return brFlow;
+-
+   const interval = findHeadingIntervalBlockFromPoint(clientX, clientY);
+   if (interval) return interval;
+ 
+   const stackBlock = findBlockInHitStackFromPoint(clientX, clientY);
+   if (stackBlock) return stackBlock;
+@@ -3694,10 +4638,18 @@ function collectHighlightBlockTextSegments(highlightBlock) {
+     highlightBlock.startHeading,
+     highlightBlock.endHeading
+   );
+ }
+ 
++function shouldFlushAfterBlockDirectTextDiv(block, child, parent) {
++  if (parent !== block) return false;
++  if (!child || child.tagName !== 'DIV') return false;
++  if (!(child.textContent || '').trim()) return false;
++  if (isInnerCardCellStructure(block)) return false;
++  return getDirectTextDivChildren(block).length >= 2;
++}
++
+ // 日本語: <br> / pre 内 \n / p 内 \n\n+ / リスト境界を論理行としてテキストを連結（DOM は変更しない）
+ function collectBlockTextSegmentLines(block) {
+   const lines = [];
+   let current = { blockText: '', segments: [] };
+   const isPreBlock = block.tagName === 'PRE';
+@@ -3805,31 +4757,90 @@ function collectBlockTextSegmentLines(block) {
+         BLOCK_LABEL_PARENT_TAGS.has(parent.tagName) &&
+         isBlockLabelElement(child)
+       ) {
+         walkNodes(child);
+         flushLine();
++      } else if (
++        child.nodeType === Node.ELEMENT_NODE &&
++        HEADING_SECTION_TAGS.has(child.tagName)
++      ) {
++        flushLine();
++        walkNodes(child);
++        flushLine();
+       } else if (child.nodeType === Node.TEXT_NODE) {
+         if (shouldIncludeTextNodeInBlock(child, block)) {
+           appendTextNode(child);
+         }
+       } else if (child.nodeType === Node.ELEMENT_NODE) {
+         if (isYomupUiElement(child) || isEditableElement(child)) continue;
+         if (child.tagName === 'SCRIPT' || child.tagName === 'STYLE' || child.tagName === 'NOSCRIPT') {
+           continue;
+         }
+-        walkNodes(child);
++        walkNodes(child);
++        if (shouldFlushAfterBlockDirectTextDiv(block, child, parent)) {
++          flushLine();
++        }
++      }
++    }
++  };
++
++  walkNodes(block);
++  flushLine();
++
++  if (lines.length === 0) {
++    return [collectBlockTextSegments(block)];
++  }
++  return mergeShortJapaneseParenLogicalLines(lines);
++}
++
++function isIndependentJapaneseLogicalLine(text) {
++  const t = (text || '').trim();
++  return /^[・•\-※■]/.test(t);
++}
++
++function mergeShortJapaneseParenLogicalLines(lines) {
++  if (!lines || lines.length < 2) return lines;
++  const merged = [];
++  let i = 0;
++  while (i < lines.length) {
++    const cur = lines[i];
++    const curText = (cur.blockText || '').trim();
++    if (
++      i + 1 < lines.length &&
++      curText.length > 0 &&
++      curText.length < COALESCE_MIN_CHARS_JA &&
++      /[）\)]$/.test(curText)
++    ) {
++      const next = lines[i + 1];
++      const nextText = (next.blockText || '').trim();
++      if (
++        !isIndependentJapaneseLogicalLine(curText) &&
++        !isIndependentJapaneseLogicalLine(nextText)
++      ) {
++        const combinedLen = cur.blockText.length + next.blockText.length;
++        if (combinedLen <= MAX_TEXT_LENGTH_FOR_HIGHLIGHT + HIGHLIGHT_UNIT_SLACK_JA) {
++          const offset = cur.blockText.length;
++          const nextSegments = next.segments.map((seg) => ({
++            node: seg.node,
++            start: seg.start + offset,
++            end: seg.end + offset,
++            text: seg.text,
++            nodeOffset: seg.nodeOffset
++          }));
++          merged.push({
++            blockText: cur.blockText + next.blockText,
++            segments: cur.segments.concat(nextSegments)
++          });
++          i += 2;
++          continue;
++        }
+       }
+     }
+-  };
+-
+-  walkNodes(block);
+-  flushLine();
+-
+-  if (lines.length === 0) {
+-    return [collectBlockTextSegments(block)];
++    merged.push(cur);
++    i++;
+   }
+-  return lines;
++  return merged;
+ }
+ 
+ function collectSectionTextSegmentLines(sectionRoot, startHeading, endHeading) {
+   const lines = [];
+   let current = { blockText: '', segments: [] };
+@@ -3969,13 +4980,22 @@ function findLineIndexAtCaret(lines, clientX, clientY) {
+       for (let i = 0; i < lines.length; i++) {
+         if (lines[i].segments.some((seg) => segmentContainsDomOffset(seg, container, domOffset))) {
+           return i;
+         }
+       }
+-    } else if (container.nodeType === Node.ELEMENT_NODE && container.contains) {
++    } else if (
++      container.nodeType === Node.ELEMENT_NODE &&
++      container.contains &&
++      !isBrFlowContainer(container)
++    ) {
++      // 葉要素ラッパーのみ（rt_cf_n_body 等の大容器は lines[0] 誤選定を避ける）
+       for (let i = 0; i < lines.length; i++) {
+-        if (lines[i].segments.some((seg) => seg.node && container.contains(seg.node))) {
++        const segs = lines[i].segments;
++        if (
++          segs.length > 0 &&
++          segs.every((seg) => seg.node && container.contains(seg.node))
++        ) {
+           return i;
+         }
+       }
+     }
+   }
+@@ -3993,19 +5013,22 @@ function findLineIndexAtCaret(lines, clientX, clientY) {
+         }
+       }
+     }
+   }
+ 
++  const lineTolerance = getHighlightUnderlineLineTolerancePx();
++  const maxYDist = lineTolerance * 4;
+   let bestIdx = 0;
+   let bestDist = Infinity;
+   for (let i = 0; i < lines.length; i++) {
+     for (const seg of lines[i].segments) {
+       try {
+         const rects = getClientRectsForSegment(seg);
+         for (let j = 0; j < rects.length; j++) {
+           const rect = rects[j];
+           const cy = rect.top + rect.height / 2;
++          if (Math.abs(cy - clientY) > maxYDist) continue;
+           const d = (cy - clientY) ** 2 + (rect.left - clientX) ** 2;
+           if (d < bestDist) {
+             bestDist = d;
+             bestIdx = i;
+           }
+@@ -4016,10 +5039,31 @@ function findLineIndexAtCaret(lines, clientX, clientY) {
+     }
+   }
+   return bestIdx;
+ }
+ 
++function shouldUseJaSectionFullLineChunk(highlightBlock, blockText, languageMode, clientX, clientY) {
++  if (languageMode !== LANGUAGE_MODE_JA || !blockText) return false;
++  if (blockText.trim().length > MAX_TEXT_LENGTH_FOR_HIGHLIGHT + HIGHLIGHT_UNIT_SLACK_JA) return false;
++  if (highlightBlock.mode === 'br-flow' || highlightBlock.mode === 'heading-interval') return true;
++  if (typeof clientX === 'number' && typeof clientY === 'number') {
++    const caretNode = getPointReferenceNode(clientX, clientY);
++    if (findBrFlowContainerFromNode(caretNode)) return true;
++  }
++  return false;
++}
++
++// N-S1: br-flow 容器内の `<br>` 論理行（collectBlockTextSegmentLines = h2 境界付き）
++function resolveBrFlowContainerLogicalLineAtPoint(container, clientX, clientY) {
++  if (!container || !isBrFlowContainer(container)) return null;
++  const lines = collectBlockTextSegmentLines(container).filter(
++    (line) => line.segments.length > 0 && line.blockText.trim()
++  );
++  if (lines.length === 0) return null;
++  return lines[findLineIndexAtCaret(lines, clientX, clientY)];
++}
++
+ function isPreHighlightBlock(highlightBlock) {
+   return isElementHighlightBlock(highlightBlock) &&
+     highlightBlock.element &&
+     highlightBlock.element.tagName === 'PRE';
+ }
+@@ -4028,15 +5072,31 @@ function resolveHighlightTextContext(highlightBlock, languageMode, clientX, clie
+   const useLineSplit = languageMode === LANGUAGE_MODE_JA || isPreHighlightBlock(highlightBlock);
+   if (!useLineSplit) {
+     return collectHighlightBlockTextSegments(highlightBlock);
+   }
+ 
++  if (!highlightBlock.scopedTextNode) {
++    const caretNode = getPointReferenceNode(clientX, clientY);
++    const brContainer = findBrFlowContainerFromNode(caretNode);
++    if (brContainer) {
++      const brLine = resolveBrFlowContainerLogicalLineAtPoint(brContainer, clientX, clientY);
++      if (brLine) return brLine;
++    }
++  }
++
+   const lines = collectHighlightBlockTextSegmentLines(highlightBlock).filter(
+     (line) => line.segments.length > 0 && line.blockText.trim()
+   );
+   if (lines.length <= 1) {
+-    return lines[0] || collectHighlightBlockTextSegments(highlightBlock);
++    if (lines[0]) return lines[0];
++    const caretNode = getPointReferenceNode(clientX, clientY);
++    const brContainer = findBrFlowContainerFromNode(caretNode);
++    if (brContainer) {
++      const brLine = resolveBrFlowContainerLogicalLineAtPoint(brContainer, clientX, clientY);
++      if (brLine) return brLine;
++    }
++    return collectHighlightBlockTextSegments(highlightBlock);
+   }
+ 
+   return lines[findLineIndexAtCaret(lines, clientX, clientY)];
+ }
+ 
+@@ -4107,10 +5167,13 @@ function getCaretOffsetInBlock(highlightBlock, segments, clientX, clientY) {
+       if (off >= 0) return off;
+     }
+   }
+ 
+   if (isInlineTextHighlightBlock(highlightBlock)) {
++    if (inlineTextHostAcceptsHoverPoint(highlightBlock.element, clientX, clientY)) {
++      return findNearestTextOffsetInBlock(highlightBlock, segments, clientX, clientY);
++    }
+     return -1;
+   }
+ 
+   return findNearestTextOffsetInBlock(highlightBlock, segments, clientX, clientY);
+ }
+@@ -4313,30 +5376,277 @@ function isHighlightUnderlineProgressEnabled() {
+ function getHighlightRectBottom(rect) {
+   if (typeof rect.bottom === 'number') return rect.bottom;
+   return rect.top + rect.height;
+ }
+ 
+-function getHighlightUnderlineAnchorBottom(rect, hostElement) {
+-  let bottom = getHighlightRectBottom(rect);
+-  if (!hostElement || typeof hostElement.getBoundingClientRect !== 'function') return bottom;
++function shouldPreferRectBottomUnderlineAnchor(hostElement, rects) {
++  if (!hostElement || !rects || rects.length === 0) return false;
++  try {
++    const lineTolerance = getHighlightUnderlineLineTolerancePx();
++    if (countVisualLinesInClientRects(rects, lineTolerance) === 1) {
++      const lh = parseFloat(getComputedStyle(hostElement).lineHeight);
++      const sample = rects.find((r) => r.width > 0 && r.height > 0);
++      if (sample && Number.isFinite(lh) && lh > 0 && sample.height < lh * 2) {
++        return true;
++      }
++    }
++    const lh = parseFloat(getComputedStyle(hostElement).lineHeight);
++    if (!Number.isFinite(lh) || lh <= 0) return false;
++    const sample = rects.find((r) => r.width > 0 && r.height > 0);
++    return !!(sample && sample.height <= lh * 1.5);
++  } catch (_e) {
++    return false;
++  }
++}
++
++function getHighlightUnderlineWrappedLineGapPx() {
++  return typeof HIGHLIGHT_UNDERLINE_WRAPPED_LINE_GAP_PX !== 'undefined'
++    ? HIGHLIGHT_UNDERLINE_WRAPPED_LINE_GAP_PX
++    : 4;
++}
++
++function isWrappedVisualLineClientRect(rect, lh) {
++  return !!(rect && Number.isFinite(lh) && lh > 0 &&
++    rect.height > lh * 1.05 && rect.height <= lh * 2.1);
++}
++
++function estimateSingleLineHeightForUnderlineRect(rect, hostLh) {
++  if (!rect || !Number.isFinite(hostLh) || hostLh <= 0) return hostLh;
++  if (isWrappedVisualLineClientRect(rect, hostLh)) return hostLh;
++  if (rect.height > hostLh * 1.5) return rect.height;
++  return hostLh;
++}
++
++function clientRectsHaveVerticalOverlap(rects) {
++  if (!rects || rects.length < 2) return false;
++  for (let i = 0; i < rects.length; i++) {
++    const aBottom = getHighlightRectBottom(rects[i]);
++    for (let j = i + 1; j < rects.length; j++) {
++      const bBottom = getHighlightRectBottom(rects[j]);
++      if (rects[i].top < bBottom && rects[j].top < aBottom) return true;
++    }
++  }
++  return false;
++}
++
++function matchRectToVisualLineTop(rect, lineTops, tolerance) {
++  if (!rect || !lineTops || lineTops.length === 0) return null;
++  let bestTop = null;
++  let bestDist = Infinity;
++  for (let i = 0; i < lineTops.length; i++) {
++    const dist = Math.abs(rect.top - lineTops[i]);
++    if (dist <= tolerance && dist < bestDist) {
++      bestDist = dist;
++      bestTop = lineTops[i];
++    }
++  }
++  return bestTop;
++}
++
++function buildWrappedLineRhythmAnchors(rects, hostElement) {
++  if (!rects || rects.length < 2 || !hostElement) return null;
++  try {
++    const lh = parseFloat(getComputedStyle(hostElement).lineHeight);
++    if (!Number.isFinite(lh) || lh <= 0) return null;
++
++    const validRects = [];
++    for (let i = 0; i < rects.length; i++) {
++      const r = rects[i];
++      if (r.width > 0 && r.height > 0) validRects.push(r);
++    }
++    if (validRects.length < 2) return null;
++
++    let wrappedCount = 0;
++    for (let i = 0; i < validRects.length; i++) {
++      if (isWrappedVisualLineClientRect(validRects[i], lh)) wrappedCount++;
++    }
++    if (wrappedCount < 2 || !clientRectsHaveVerticalOverlap(validRects)) return null;
++
++    const matchTolerance = Math.max(getHighlightUnderlineLineTolerancePx(), lh * 0.35);
++    const lineTops = getVisualLineTopsFromClientRects(validRects, matchTolerance);
++    if (lineTops.length === 0) return null;
++    lineTops.sort((a, b) => a - b);
++    const gap = getHighlightUnderlineWrappedLineGapPx();
++    const firstTop = lineTops[0];
++
++    // §32.4 B: ClientRect Y 重なり（Ko-fi .bogue-font 等）— top が1つでも centerY で行 index
++    if (lineTops.length < 2) {
++      return {
++        lh,
++        lineTops,
++        overlapRhythm: true,
++        firstTop,
++        gap,
++        matchTolerance
++      };
++    }
++
++    const anchorByLineTop = {};
++    for (let i = 0; i < lineTops.length; i++) {
++      anchorByLineTop[lineTops[i]] = firstTop + (i + 1) * lh + gap;
++    }
++    return { lh, lineTops, anchorByLineTop, firstTop, gap, matchTolerance };
++  } catch (_e) {
++    return null;
++  }
++}
++
++function capUnderlineAnchorAbovePeerRects(rect, anchorBottom, peerRects) {
++  if (!rect || !Number.isFinite(anchorBottom) || !peerRects || peerRects.length < 2) {
++    return anchorBottom;
++  }
++  let capped = anchorBottom;
++  for (let i = 0; i < peerRects.length; i++) {
++    const peer = peerRects[i];
++    if (!peer || peer === rect || peer.top <= rect.top + 1) continue;
++    if (peer.top < capped) {
++      capped = peer.top - 1;
++    }
++  }
++  return capped;
++}
++
++function enrichHighlightUnderlineOptions(hostElement, rects, underlineOptions) {
++  const opts = underlineOptions ? Object.assign({}, underlineOptions) : {};
++  if (!isHighlightUnderlineOverlayStyle()) return opts;
++  // §32.4 / YT-T1: 表セルは rhythm・peer cap を使わず各 rect.bottom（compact 表の隣接 rect 誤 cap 防止）
++  if (isTableCellHighlightHost(hostElement)) {
++    opts.tableCellUnderlineAnchor = true;
++    opts.preferRectBottomForSingleVisualLine = true;
++    return opts;
++  }
++  // §36 CW-2: dt/dd・SVG+テキスト行 — peer cap / rhythm 無効（rect.bottom のみ）
++  if (isCompactStatRowHighlightHost(hostElement)) {
++    opts.compactStatRowUnderlineAnchor = true;
++    opts.preferRectBottomForSingleVisualLine = true;
++    return opts;
++  }
++  opts.peerRects = rects;
++  const rhythm = buildWrappedLineRhythmAnchors(rects, hostElement);
++  if (rhythm) opts.lineRhythmAnchors = rhythm;
++  return opts;
++}
++
++function getUnderlineRhythmAnchorBottom(rect, rhythm, peerRects) {
++  if (!rhythm || !rect) return null;
++  const gap = rhythm.gap != null ? rhythm.gap : getHighlightUnderlineWrappedLineGapPx();
++  if (rhythm.overlapRhythm) {
++    const centerY = rect.top + rect.height / 2;
++    const lineIndex = Math.max(0, Math.floor((centerY - rhythm.firstTop) / rhythm.lh));
++    const anchor = rhythm.firstTop + (lineIndex + 1) * rhythm.lh + gap;
++    return capUnderlineAnchorAbovePeerRects(rect, anchor, peerRects);
++  }
++  const matchedTop = matchRectToVisualLineTop(rect, rhythm.lineTops, rhythm.matchTolerance);
++  if (matchedTop != null && rhythm.anchorByLineTop && rhythm.anchorByLineTop[matchedTop] != null) {
++    return capUnderlineAnchorAbovePeerRects(rect, rhythm.anchorByLineTop[matchedTop], peerRects);
++  }
++  return null;
++}
++
++function getHighlightUnderlineAnchorBottom(rect, hostElement, options) {
++  const bottom = getHighlightRectBottom(rect);
++  const opts = options || {};
++
++  if (opts.tableCellUnderlineAnchor || opts.compactStatRowUnderlineAnchor) {
++    return bottom;
++  }
++
++  const rhythmAnchor = getUnderlineRhythmAnchorBottom(rect, opts.lineRhythmAnchors, opts.peerRects);
++  if (rhythmAnchor != null) {
++    return rhythmAnchor;
++  }
++
++  if (!hostElement || typeof hostElement.getBoundingClientRect !== 'function') {
++    return bottom;
++  }
+   try {
+-    const style = window.getComputedStyle(hostElement);
+-    const lh = parseFloat(style.lineHeight);
+-    if (Number.isFinite(lh) && lh > 0 && rect.height > lh * 1.15) {
+-      bottom = rect.top + lh;
++    const hostLh = parseFloat(getComputedStyle(hostElement).lineHeight);
++    if (!Number.isFinite(hostLh) || hostLh <= 0) return bottom;
++    const gap = getHighlightUnderlineWrappedLineGapPx();
++    const lineTolerance = getHighlightUnderlineLineTolerancePx();
++    const effectiveLh = estimateSingleLineHeightForUnderlineRect(rect, hostLh);
++
++    // §32.4 A / §31 A2: 単一視覚行 → rect.bottom（MSG nav 等。F1 より先）
++    if (
++      countVisualLinesInClientRects([rect], lineTolerance) === 1 &&
++      rect.height < hostLh * 2
++    ) {
++      return capUnderlineAnchorAbovePeerRects(rect, bottom, opts.peerRects);
++    }
++
++    // §32.4 B: 折り返し各行 rect（Y 非重なり単行箱）→ top + lh + gap
++    if (isWrappedVisualLineClientRect(rect, hostLh)) {
++      return capUnderlineAnchorAbovePeerRects(rect, rect.top + hostLh + gap, opts.peerRects);
++    }
++
++    if (opts.preferRectBottomForSingleVisualLine) {
++      return capUnderlineAnchorAbovePeerRects(rect, bottom, opts.peerRects);
++    }
++
++    // §32.4 E: 容器 lh ≠ 文字 lh（料金 H2 等）→ 行箱下端 + peer cap
++    if (effectiveLh > hostLh * 1.5 && rect.height <= effectiveLh * 1.25) {
++      const lineBoxBottom = rect.top + effectiveLh + gap;
++      const anchor = Math.min(bottom, lineBoxBottom);
++      return capUnderlineAnchorAbovePeerRects(rect, anchor, opts.peerRects);
++    }
++
++    if (rect.height > effectiveLh * 1.85 && typeof opts.pointerClientY === 'number') {
++      const y = Math.max(rect.top, Math.min(opts.pointerClientY, bottom));
++      const lineIndex = Math.max(0, Math.floor((y - rect.top) / effectiveLh));
++      return capUnderlineAnchorAbovePeerRects(
++        rect,
++        Math.min(rect.top + effectiveLh * (lineIndex + 1) + gap, bottom),
++        opts.peerRects
++      );
+     }
+   } catch (_e) {
+     // ignore
+   }
+-  return bottom;
++  return capUnderlineAnchorAbovePeerRects(rect, bottom, opts.peerRects);
+ }
+ 
+-function getHighlightUnderlineTop(rect, hostElement) {
++function getHighlightUnderlineTop(rect, hostElement, options) {
+   const thickness = typeof HIGHLIGHT_UNDERLINE_THICKNESS_PX !== 'undefined'
+     ? HIGHLIGHT_UNDERLINE_THICKNESS_PX
+     : 2;
+-  return getHighlightUnderlineAnchorBottom(rect, hostElement) - thickness;
++  return getHighlightUnderlineAnchorBottom(rect, hostElement, options) - thickness;
++}
++
++function isHighlightUnderlineTraceEnabled() {
++  return typeof ENABLE_HIGHLIGHT_UNDERLINE_TRACE !== 'undefined' && ENABLE_HIGHLIGHT_UNDERLINE_TRACE;
++}
++
++function summarizeHighlightClientRect(rect) {
++  if (!rect) return null;
++  return {
++    top: Math.round(rect.top * 10) / 10,
++    bottom: Math.round(rect.bottom * 10) / 10,
++    left: Math.round(rect.left * 10) / 10,
++    width: Math.round(rect.width * 10) / 10,
++    height: Math.round(rect.height * 10) / 10
++  };
++}
++
++function summarizeHighlightBlockForTrace(block) {
++  if (!block) return null;
++  const el = block.element;
++  return {
++    mode: block.mode,
++    tag: el && el.tagName,
++    cls: el && String(el.className || '').slice(0, 100),
++    text: el && String(el.textContent || '').trim().slice(0, 80)
++  };
++}
++
++function logUnderlineTrace(phase, payload) {
++  if (!isHighlightUnderlineTraceEnabled()) return;
++  console.log('[YomuP:underline]', phase, payload);
++}
++
++function logUnderlineTraceDrawSnapshot(snapshot) {
++  if (!isHighlightUnderlineTraceEnabled()) return;
++  console.log('[YomuP:underline] draw', snapshot);
+ }
+ 
+ function filterClientRectsAtPointer(rects, clientX, clientY, options) {
+   if (!rects || rects.length <= 1) return rects;
+   const opts = options || {};
+@@ -4358,10 +5668,178 @@ function filterClientRectsAtPointer(rects, clientX, clientY, options) {
+     }
+   }
+   return filtered.length > 0 ? filtered : rects;
+ }
+ 
++function getVisualLineTopsFromClientRects(rects, lineTolerance) {
++  const tol = typeof lineTolerance === 'number'
++    ? lineTolerance
++    : getHighlightUnderlineLineTolerancePx();
++  const lineTops = [];
++  for (let i = 0; i < rects.length; i++) {
++    const rect = rects[i];
++    if (rect.width <= 0 || rect.height <= 0) continue;
++    let placed = false;
++    for (let j = 0; j < lineTops.length; j++) {
++      if (Math.abs(rect.top - lineTops[j]) <= tol) {
++        placed = true;
++        break;
++      }
++    }
++    if (!placed) lineTops.push(rect.top);
++  }
++  return lineTops;
++}
++
++function pickVisualLineTopForPointer(rects, clientX, clientY, lineTolerance) {
++  const tol = typeof lineTolerance === 'number'
++    ? lineTolerance
++    : getHighlightUnderlineLineTolerancePx();
++  let bestTop = null;
++  for (let i = 0; i < rects.length; i++) {
++    const r = rects[i];
++    if (r.width <= 0 || r.height <= 0) continue;
++    if (clientY < r.top - tol || clientY > r.bottom + tol) continue;
++    if (clientX >= r.left && clientX <= r.right) {
++      if (bestTop === null || r.top > bestTop) {
++        bestTop = r.top;
++      }
++    }
++  }
++  if (bestTop !== null) return bestTop;
++
++  const lineTops = getVisualLineTopsFromClientRects(rects, tol);
++  if (lineTops.length === 0) return null;
++  if (lineTops.length === 1) return lineTops[0];
++
++  let bestDist = Infinity;
++  for (let i = 0; i < lineTops.length; i++) {
++    const lineTop = lineTops[i];
++    let lineBottom = lineTop;
++    for (let j = 0; j < rects.length; j++) {
++      const r = rects[j];
++      if (r.width <= 0 || r.height <= 0) continue;
++      if (Math.abs(r.top - lineTop) <= tol) {
++        lineBottom = Math.max(lineBottom, r.bottom);
++      }
++    }
++    const dist = Math.abs(clientY - (lineTop + (lineBottom - lineTop) / 2));
++    if (dist < bestDist) {
++      bestDist = dist;
++      bestTop = lineTop;
++    }
++  }
++  return bestTop;
++}
++
++function filterRectsToVisualLineTop(rects, targetTop, lineTolerance) {
++  const tol = typeof lineTolerance === 'number'
++    ? lineTolerance
++    : getHighlightUnderlineLineTolerancePx();
++  const filtered = [];
++  for (let i = 0; i < rects.length; i++) {
++    const rect = rects[i];
++    if (rect.width <= 0 || rect.height <= 0) continue;
++    if (Math.abs(rect.top - targetTop) <= tol) {
++      filtered.push(rect);
++    }
++  }
++  return filtered;
++}
++
++function clientRectSpansMultipleVisualLines(rect, hostElement) {
++  if (!rect || !hostElement) return false;
++  try {
++    const lh = parseFloat(getComputedStyle(hostElement).lineHeight);
++    return Number.isFinite(lh) && lh > 0 && rect.height > lh * 1.85;
++  } catch (_e) {
++    return false;
++  }
++}
++
++function synthesizeSingleVisualLineClientRect(tallRect, targetTop, hostElement) {
++  if (!tallRect || targetTop == null || !hostElement) return tallRect;
++  try {
++    const lh = parseFloat(getComputedStyle(hostElement).lineHeight);
++    if (!Number.isFinite(lh) || lh <= 0) return tallRect;
++    const lineTop = targetTop;
++    const lineBottom = Math.min(lineTop + lh, getHighlightRectBottom(tallRect));
++    const height = Math.max(0, lineBottom - lineTop);
++    if (height <= 0) return tallRect;
++    return {
++      left: tallRect.left,
++      top: lineTop,
++      right: tallRect.right,
++      bottom: lineBottom,
++      width: tallRect.width,
++      height
++    };
++  } catch (_e) {
++    return tallRect;
++  }
++}
++
++function normalizeOverlayRectsToVisualLineTop(rects, targetTop, hostElement, lineTolerance) {
++  if (targetTop == null || !rects || rects.length === 0) return rects;
++  const filtered = filterRectsToVisualLineTop(rects, targetTop, lineTolerance);
++  const source = filtered.length > 0 ? filtered : rects;
++  if (source.length === 1 && clientRectSpansMultipleVisualLines(source[0], hostElement)) {
++    return [synthesizeSingleVisualLineClientRect(source[0], targetTop, hostElement)];
++  }
++  return source;
++}
++
++function isPlausibleHighlightUnderlineRect(rect, underlineTop) {
++  if (!rect || rect.width <= 0) return false;
++  if (!Number.isFinite(underlineTop)) return false;
++  const vh = typeof window.innerHeight === 'number' ? window.innerHeight : 800;
++  const vw = typeof window.innerWidth === 'number' ? window.innerWidth : 1200;
++  if (underlineTop < 4 || underlineTop > vh + 40) return false;
++  if (rect.right < -20 || rect.left > vw + 20) return false;
++  return true;
++}
++
++// §28.9 F2 補強: 大フォント折り返しで前後行 rect が Y 範囲重なっても視覚行単位に絞る
++function filterClientRectsToPointerVisualLine(rects, clientX, clientY, options) {
++  if (!rects || rects.length <= 1) {
++    if (!rects || rects.length !== 1) return rects;
++    const opts = options || {};
++    const hostElement = opts.hostElement || null;
++    if (!hostElement || !clientRectSpansMultipleVisualLines(rects[0], hostElement)) {
++      return rects;
++    }
++    const lineTolerance = typeof opts.lineTolerance === 'number'
++      ? opts.lineTolerance
++      : getHighlightUnderlineLineTolerancePx();
++    const targetTop = pickVisualLineTopForPointer(rects, clientX, clientY, lineTolerance);
++    if (targetTop == null) return rects;
++    return normalizeOverlayRectsToVisualLineTop(rects, targetTop, hostElement, lineTolerance);
++  }
++  const opts = options || {};
++  const lineTolerance = typeof opts.lineTolerance === 'number'
++    ? opts.lineTolerance
++    : getHighlightUnderlineLineTolerancePx();
++  const hostElement = opts.hostElement || null;
++  const lineTops = getVisualLineTopsFromClientRects(rects, lineTolerance);
++  if (lineTops.length <= 1) {
++    const narrowed = filterClientRectsAtPointer(rects, clientX, clientY, options);
++    if (lineTops.length === 1 && hostElement) {
++      return normalizeOverlayRectsToVisualLineTop(narrowed, lineTops[0], hostElement, lineTolerance);
++    }
++    return narrowed;
++  }
++  const targetTop = pickVisualLineTopForPointer(rects, clientX, clientY, lineTolerance);
++  if (targetTop == null) {
++    return filterClientRectsAtPointer(rects, clientX, clientY, options);
++  }
++  return normalizeOverlayRectsToVisualLineTop(rects, targetTop, hostElement, lineTolerance);
++}
++
++function overlayRectsSpanSingleVisualLine(rects, lineTolerance) {
++  return getVisualLineTopsFromClientRects(rects, lineTolerance).length <= 1;
++}
++
+ function countVisualLinesInClientRects(rects, lineTolerance) {
+   if (!rects || rects.length === 0) return 0;
+   const tol = typeof lineTolerance === 'number'
+     ? lineTolerance
+     : getHighlightUnderlineLineTolerancePx();
+@@ -4493,16 +5971,23 @@ function getHighlightUnderlineProgressColor() {
+ 
+ function getHighlightUnderlineProgressEl(segment) {
+   return segment.querySelector('.yomup-highlight-underline-progress');
+ }
+ 
+-function createHighlightOverlayBox(rect, hostElement) {
++function createHighlightOverlayBox(rect, hostElement, underlineOptions) {
+   if (isHighlightUnderlineOverlayStyle()) {
+     const thickness = typeof HIGHLIGHT_UNDERLINE_THICKNESS_PX !== 'undefined'
+       ? HIGHLIGHT_UNDERLINE_THICKNESS_PX
+       : 2;
+-    const underlineTop = getHighlightUnderlineTop(rect, hostElement);
++    const underlineTop = getHighlightUnderlineTop(rect, hostElement, underlineOptions);
++    if (!isPlausibleHighlightUnderlineRect(rect, underlineTop)) {
++      logUnderlineTrace('reject-plausible', {
++        rect: summarizeHighlightClientRect(rect),
++        underlineTop
++      });
++      return null;
++    }
+     const useSegmentLayer = usesHighlightUnderlineSegmentLayer();
+ 
+     if (!useSegmentLayer) {
+       const box = document.createElement('div');
+       box.className = 'yomup-highlight-underline';
+@@ -4530,10 +6015,15 @@ function createHighlightOverlayBox(rect, hostElement) {
+     progress.style.cssText =
+       `position:absolute;left:0;top:0;width:0;height:100%;background:${getHighlightUnderlineProgressColor()};`;
+ 
+     segment.appendChild(goal);
+     segment.appendChild(progress);
++    logUnderlineTrace('segment', {
++      rect: summarizeHighlightClientRect(rect),
++      underlineTop,
++      thickness
++    });
+     return segment;
+   }
+ 
+   const box = document.createElement('div');
+   box.className = 'yomup-highlight-outline';
+@@ -4574,11 +6064,12 @@ function startHighlightProgressCountdown() {
+   highlightProgressCountdownInterval = setInterval(() => {
+     if (!highlightProgressSession || highlightProgressSession.paused) return;
+     highlightProgressSession.remainingSeconds--;
+     if (highlightProgressSession.remainingSeconds <= 0) {
+       clearHighlightProgressCountdown();
+-      resetHighlightProgressSession();
++      highlightProgressSession.remainingSeconds = 0;
++      highlightProgressSession.paused = false;
+     }
+   }, 1000);
+ }
+ 
+ function startHighlightLineProgress(unitCount, languageMode, progressTarget = null) {
+@@ -4777,25 +6268,42 @@ function resumeHighlightProgress() {
+   startHighlightProgressCountdown();
+   highlightProgressSession.paused = false;
+   debugLog('ライン進行を再開しました');
+ }
+ 
++function restartHighlightLineProgress() {
++  if (!highlightProgressSession || !isHighlightUnderlineProgressMode()) return;
++  const readTime = highlightProgressSession.readTime;
++  if (!readTime || readTime <= 0) return;
++
++  clearHighlightProgressCountdown();
++  highlightProgressSession.paused = false;
++  highlightProgressSession.remainingSeconds = readTime;
++  startHighlightUnderlineProgress(readTime);
++  startHighlightProgressCountdown();
++  debugLog('ライン進行を最初から再開しました');
++}
++
+ function resetHighlightProgressOnSettingsChange() {
+   resetHighlightProgressSession();
+   clearCurrentHighlight();
+ }
+ 
+ function handleProgressPauseClick(event) {
+   if (!highLightOnOff) return;
+   if (!isHighlightUnderlineProgressMode()) return;
+   if (!highlightProgressSession) return;
+-  if (getHighlightProgressRemainingSeconds() <= 0) return;
+   if (isYomupUiElement(event.target)) return;
+ 
+   const root = highlightOverlayRoot;
+   if (!root || !root.querySelector('.yomup-highlight-underline-segment')) return;
+ 
++  if (getHighlightProgressRemainingSeconds() <= 0) {
++    restartHighlightLineProgress();
++    return;
++  }
++
+   if (highlightProgressSession.paused) {
+     resumeHighlightProgress();
+   } else {
+     pauseHighlightProgress();
+   }
+@@ -4901,27 +6409,43 @@ function startHighlightUnderlineProgress(durationSeconds) {
+     }
+     delay += lineDuration;
+   }
+ }
+ 
+-function applyHighlightOverlay(range, clipBounds, clientRectsOverride, hostElement) {
++function applyHighlightOverlay(range, clipBounds, clientRectsOverride, hostElement, underlineOptions) {
+   clearHighlightOverlay();
+   const root = ensureHighlightOverlayRoot();
+   const rawRects = clientRectsOverride
+     ? clientRectsOverride.slice()
+     : Array.from(range.getClientRects());
+   let rects = filterHighlightClientRects(rawRects, clipBounds);
+-  if (ENABLE_HIGHLIGHT_OVERLAY_RECT_MERGE) {
++  if (ENABLE_HIGHLIGHT_OVERLAY_RECT_MERGE && !isTableCellHighlightHost(hostElement)) {
+     rects = mergeHighlightClientRects(rects);
+   }
+   if (rects.length === 0) return false;
+ 
++  logUnderlineTrace('apply', {
++    rawCount: rawRects.length,
++    mergedCount: rects.length,
++    rects: rects.map(summarizeHighlightClientRect)
++  });
++
++  const drawUnderlineOptions = enrichHighlightUnderlineOptions(hostElement, rects, underlineOptions);
++  if (drawUnderlineOptions.lineRhythmAnchors) {
++    logUnderlineTrace('rhythm', drawUnderlineOptions.lineRhythmAnchors);
++  }
++
++  let overlayApplied = false;
+   for (let i = 0; i < rects.length; i++) {
+     const rect = rects[i];
+     if (!isValidHighlightClientRect(rect)) continue;
+-    root.appendChild(createHighlightOverlayBox(rect, hostElement));
++    const box = createHighlightOverlayBox(rect, hostElement, drawUnderlineOptions);
++    if (!box) continue;
++    root.appendChild(box);
++    overlayApplied = true;
+   }
++  if (!overlayApplied) return false;
+   currentHighlightRange = range;
+   currentHighlightRects = rects.slice();
+   return true;
+ }
+ 
+@@ -4941,18 +6465,19 @@ function countValidRangeClientRects(range) {
+   return count;
+ }
+ 
+ // 1チャンク全文かつ折り返し複数行のときだけ外接1矩形（表セル等の二重枠防止）
+ function shouldUseSingleBlockUnionOverlay(chunks, blockText, chunk, range) {
++  if (isHighlightUnderlineOverlayStyle()) return false;
+   if (!isSingleFullBlockLogicalChunk(chunks, blockText, chunk)) return false;
+   return countValidRangeClientRects(range) > 1;
+ }
+ 
+-function applyHighlightOverlayUnion(range, clipBounds, clientRectsOverride, hostElement) {
++function applyHighlightOverlayUnion(range, clipBounds, clientRectsOverride, hostElement, underlineOptions) {
+   // 下線は行ごとの矩形が必要なため、union（外接1矩形）は使わない
+   if (isHighlightUnderlineOverlayStyle()) {
+-    return applyHighlightOverlay(range, clipBounds, clientRectsOverride, hostElement);
++    return applyHighlightOverlay(range, clipBounds, clientRectsOverride, hostElement, underlineOptions);
+   }
+ 
+   clearHighlightOverlay();
+   const root = ensureHighlightOverlayRoot();
+   let rect = range.getBoundingClientRect();
+@@ -4969,12 +6494,13 @@ function applyHighlightOverlayUnion(range, clipBounds, clientRectsOverride, host
+   return true;
+ }
+ 
+ function tryHighlightLogicalBlockAtPoint(clientX, clientY) {
+   try {
+-    const highlightBlock = findHighlightBlockFromPoint(clientX, clientY);
++    let highlightBlock = findHighlightBlockFromPoint(clientX, clientY);
+     if (!highlightBlock) return false;
++    highlightBlock = normalizeAggregateHighlightBlock(highlightBlock, clientX, clientY);
+ 
+     if (
+       isInlineTextHighlightBlock(highlightBlock) &&
+       !inlineTextHostAcceptsHoverPoint(highlightBlock.element, clientX, clientY)
+     ) {
+@@ -5014,10 +6540,14 @@ function tryHighlightLogicalBlockAtPoint(clientX, clientY) {
+ 
+       chunks = isPreHighlightBlock(highlightBlock)
+         ? [{ start: 0, end: blockText.length, text: blockText }]
+         : buildLogicalChunks(blockText, languageMode);
+       chunk = findChunkContainingOffset(chunks, offset);
++      if (shouldUseJaSectionFullLineChunk(highlightBlock, blockText, languageMode, clientX, clientY)) {
++        chunk = { start: 0, end: blockText.length, text: blockText };
++        chunks = [chunk];
++      }
+     }
+ 
+     if (!chunk || !chunk.text.trim()) return false;
+     if (!withinHighlightLimit(chunk.text, languageMode)) return false;
+ 
+@@ -5031,70 +6561,106 @@ function tryHighlightLogicalBlockAtPoint(clientX, clientY) {
+       })
+     ) {
+       return false;
+     }
+ 
++    const clipBounds = getHighlightBlockClipBounds(highlightBlock);
++    const overlayHostElement = getHighlightBlockClipElement(highlightBlock);
++    let overlayRects = chunkRects;
++    if (isElementHighlightBlock(highlightBlock)) {
++      const hostEl = highlightBlock.element;
++      const filterToPointerLine =
++        isTableCellHighlightHost(hostEl) ||
++        shouldFilterDecoratedBlockOverlayToPointerLine(hostEl, chunkRects);
++      if (filterToPointerLine) {
++        overlayRects = filterClientRectsToPointerVisualLine(chunkRects, clientX, clientY, {
++          hostElement: overlayHostElement,
++          lineTolerance: HIGHLIGHT_RECT_MERGE_LINE_TOLERANCE_PX
++        });
++      }
++    }
++
+     if (isPointInCurrentHighlight(clientX, clientY)) {
++      logUnderlineTrace('skip-sticky', { x: clientX, y: clientY });
+       return true;
+     }
+ 
+     if (highlightProgressSession && isSameHighlightProgressTarget(highlightBlock, chunk)) {
++      logUnderlineTrace('skip-progress-session', {
++        chunk: chunk.text.slice(0, 60)
++      });
+       return true;
+     }
++    const underlineOptions = enrichHighlightUnderlineOptions(overlayHostElement, overlayRects, {
++      pointerClientY: clientY,
++      preferRectBottomForSingleVisualLine: shouldPreferRectBottomUnderlineAnchor(
++        overlayHostElement,
++        overlayRects
++      )
++    });
+ 
+-    const clipBounds = getHighlightBlockClipBounds(highlightBlock);
+-    const overlayHostElement = getHighlightBlockClipElement(highlightBlock);
+-    let overlayRects = chunkRects;
+-    let displayChunk = chunk;
+-    let displayRange = range;
+-    const lineTolerance = getHighlightUnderlineLineTolerancePx();
+-    const chunkSpansMultipleVisualLines = countVisualLinesInClientRects(chunkRects, lineTolerance) > 1;
+-    const shouldNarrowOverlayToHoverVisualLine =
+-      !useGhostCardLeadChunk &&
+-      isHighlightUnderlineOverlayStyle() &&
+-      languageMode === LANGUAGE_MODE_EN &&
+-      isSingleFullBlockLogicalChunk(chunks, blockText, chunk) &&
+-      chunkSpansMultipleVisualLines &&
+-      overlayRects.length > 1;
+-    if (shouldNarrowOverlayToHoverVisualLine) {
+-      overlayRects = filterClientRectsAtPointer(overlayRects, clientX, clientY, {
+-        lineTolerance
+-      });
+-      if (overlayRects.length > 0 && overlayRects.length < chunkRects.length) {
+-        const narrowed = narrowChunkToClientRects(segments, blockText, chunk, overlayRects);
+-        if (narrowed.start !== chunk.start || narrowed.end !== chunk.end) {
+-          displayChunk = narrowed;
+-          const narrowedRange = createRangeForChunk(segments, displayChunk.start, displayChunk.end);
+-          if (narrowedRange) displayRange = narrowedRange;
+-        }
++    let hostLineHeight = null;
++    if (isHighlightUnderlineTraceEnabled() && overlayHostElement) {
++      try {
++        hostLineHeight = parseFloat(getComputedStyle(overlayHostElement).lineHeight);
++      } catch (_e) {
++        hostLineHeight = null;
+       }
+     }
++    logUnderlineTraceDrawSnapshot({
++      host: summarizeHighlightBlockForTrace(highlightBlock),
++      chunk: {
++        start: chunk.start,
++        end: chunk.end,
++        text: chunk.text,
++        units: countUnits(chunk.text, languageMode)
++      },
++      chunkRects: chunkRects.map(summarizeHighlightClientRect),
++      overlayRects: overlayRects.map(summarizeHighlightClientRect),
++      lh: hostLineHeight,
++      underlineOptions,
++      anchors: overlayRects.map((r) => ({
++        rect: summarizeHighlightClientRect(r),
++        wrapped: hostLineHeight != null && isWrappedVisualLineClientRect(r, hostLineHeight),
++        rhythmLineTop: underlineOptions.lineRhythmAnchors
++          ? matchRectToVisualLineTop(
++            r,
++            underlineOptions.lineRhythmAnchors.lineTops,
++            underlineOptions.lineRhythmAnchors.matchTolerance
++          )
++          : null,
++        anchorBottom: getHighlightUnderlineAnchorBottom(r, overlayHostElement, underlineOptions),
++        underlineTop: getHighlightUnderlineTop(r, overlayHostElement, underlineOptions)
++      })),
++      pointer: { x: clientX, y: clientY },
++      viewport: { w: window.innerWidth, h: window.innerHeight }
++    });
+ 
+     clearCurrentHighlight();
+     let overlayApplied = false;
+     if (
+       !useGhostCardLeadChunk &&
+       shouldUseSingleBlockUnionOverlay(chunks, blockText, chunk, range)
+     ) {
+-      overlayApplied = applyHighlightOverlayUnion(displayRange, clipBounds, overlayRects, overlayHostElement);
++      overlayApplied = applyHighlightOverlayUnion(range, clipBounds, overlayRects, overlayHostElement, underlineOptions);
+     } else {
+-      overlayApplied = applyHighlightOverlay(displayRange, clipBounds, overlayRects, overlayHostElement);
++      overlayApplied = applyHighlightOverlay(range, clipBounds, overlayRects, overlayHostElement, underlineOptions);
+     }
+     if (!overlayApplied) return false;
+ 
+-    const units = countUnits(displayChunk.text, languageMode);
+-    const progressTarget = captureHighlightProgressTarget(highlightBlock, displayChunk);
++    const units = countUnits(chunk.text, languageMode);
++    const progressTarget = captureHighlightProgressTarget(highlightBlock, chunk);
+     if (subPopupOnOff) {
+       startCountdownSubPopup(units, languageMode);
+     }
+     startHighlightLineProgress(units, languageMode, progressTarget);
+     debugLog(
+       'logical chunk',
+       highlightBlock.mode,
+       languageMode,
+-      displayChunk.start,
+-      displayChunk.end,
++      chunk.start,
++      chunk.end,
+       units
+     );
+     return true;
+   } catch (err) {
+     debugError('tryHighlightLogicalBlockAtPoint:', err);
+@@ -6215,22 +7781,38 @@ function startCountdownSubPopup(unitCount, languageMode = LANGUAGE_MODE_JA) {
+   }
+ } //end startCountdownSubPopup
+ 
+ 
+ // === サブポップアップモードをトグルする関数 =================================
++function getHourglassIcon() {
++  const popupMain = document.getElementById(ID_YOMUP_POPUP_CONTAINER);
++  if (!popupMain || !popupMain.shadowRoot) return null;
++  return popupMain.shadowRoot.querySelector('.hourglass-button img');
++}
++
++function closeSubPopupFromUi() {
++  subPopupOnOff = false;
++  localStorage.setItem(LOCALSTRG_SUBPOPUP_ONOFF, 'false');
++  hideSubPopup();
++  const hourglassIcon = getHourglassIcon();
++  if (hourglassIcon) {
++    hourglassIcon.classList.remove('active');
++  }
++  debugLog('サブポップアップを閉じました');
++}
++
+ function toggleSubPopup() {
+   subPopupOnOff = !subPopupOnOff; // 状態を反転
+   localStorage.setItem(LOCALSTRG_SUBPOPUP_ONOFF, subPopupOnOff.toString());
+ 
+   debugLog('サブポップアップモード:', subPopupOnOff);
+ 
+   if (subPopupOnOff) {
+     // ポップアップを表示
+     showSubPopup();
+   } else {
+-    // ポップアップを非表示
+-    hideSubPopup();
++    closeSubPopupFromUi();
+   }
+ } //end toggleSubPopup
+ 
+ 
+ // === サブポップアップを表示する関数 ===========================================
+@@ -6320,10 +7902,11 @@ function showSubPopup() {
+     'サブポップアップ位置の復元に失敗しました:'
+   );
+ 
+   // ドラッグ移動機能を追加
+   addDragFunctionality(subpopup);
++  addSubPopupDblClickToClose(subpopup);
+ 
+   debugLog('ポップアップを表示しました');
+ } //end showSubPopup
+ 
+ 
+@@ -6515,10 +8098,18 @@ function addClickToCloseFunctionality(popup) {
+     e.preventDefault();
+     hideYomuPPopup();
+   });
+ }
+ 
++function addSubPopupDblClickToClose(subpopup) {
++  subpopup.addEventListener('dblclick', function (e) {
++    e.preventDefault();
++    e.stopPropagation();
++    closeSubPopupFromUi();
++  });
++}
++
+ // === processedElementCacheをクリアする関数 =================================
+ function clearProcessedElementCache() {
+   processedElementCache.clear();
+ }
+ 
