@@ -106,8 +106,8 @@ const TD_CHILD_LINE_BREAK_TAGS = new Set(['H1', 'H2', 'H3']);
 const LAYOUT_TABLE_CELL_MIN_HEADINGS = 2;
 const LAYOUT_TABLE_CELL_MIN_LINKS = 3;
 const LAYOUT_TABLE_CELL_MIN_BRS = 3;
-// 見出し専用 Range（ブロック祖先には含めない）。H1–H4 をテキスト幅のみ光らせる
-const HEADING_SECTION_TAGS = new Set(['H1', 'H2', 'H3', 'H4']);
+// 見出し専用 Range（ブロック祖先には含めない）。H1–H6 をテキスト幅のみ光らせる
+const HEADING_SECTION_TAGS = new Set(['H1', 'H2', 'H3', 'H4', 'H5', 'H6']);
 // p/li/dd 先頭の b/strong ラベル（Gemini「結果：」型）。§3.7 inline 経路でテキスト幅のみ光らせる
 const BLOCK_LABEL_TAGS = new Set(['B', 'STRONG']);
 const BLOCK_LABEL_PARENT_TAGS = new Set(['P', 'LI', 'DD']);
@@ -1771,6 +1771,11 @@ function findBestJapaneseBoundary(text, start, targetEnd, maxLength) {
   const chunkLength = targetEnd - start;
   const allowComma = chunkLength > maxLength * 1.2;
   const maxChunkEnd = start + maxLength + HIGHLIGHT_UNIT_SLACK_JA;
+  // 句点（priority 1）は括弧より先に、探索窓ぶんだけ上限を緩めて採用（§39 AI-1）
+  const maxSentenceEnd = Math.min(
+    text.length,
+    start + maxLength + HIGHLIGHT_UNIT_SLACK_JA + JA_BOUNDARY_SEARCH_WINDOW_FORWARD
+  );
 
   let best = null;
   let bestPriority = 999;
@@ -1778,7 +1783,9 @@ function findBestJapaneseBoundary(text, start, targetEnd, maxLength) {
 
   for (let i = searchEnd; i >= searchStart; i--) {
     const boundary = classifyJapaneseBoundary(text, i, allowComma);
-    if (!boundary || boundary.cutAfter > maxChunkEnd) continue;
+    if (!boundary) continue;
+    const limit = boundary.priority === 1 ? maxSentenceEnd : maxChunkEnd;
+    if (boundary.cutAfter > limit) continue;
     const distance = Math.abs(i - targetEnd);
     if (
       boundary.priority < bestPriority ||
@@ -1872,11 +1879,24 @@ function coalesceLogicalChunks(chunks, languageMode, maxUnits, blockText) {
   return chunks;
 }
 
+function isJapaneseSentenceEndChunk(text) {
+  const t = (text || '').trim();
+  return t.length > 0 && /[。！？．]$/.test(t);
+}
+
+function getJapaneseHighlightMaxLength(text) {
+  const base = MAX_TEXT_LENGTH_FOR_HIGHLIGHT + HIGHLIGHT_UNIT_SLACK_JA;
+  if (isJapaneseSentenceEndChunk(text)) {
+    return base + JA_BOUNDARY_SEARCH_WINDOW_FORWARD;
+  }
+  return base;
+}
+
 function withinHighlightLimit(text, languageMode) {
   if (languageMode === LANGUAGE_MODE_EN) {
     return countWords(text) <= MAX_WORDS_FOR_HIGHLIGHT + HIGHLIGHT_UNIT_SLACK_EN;
   }
-  return text.trim().length <= MAX_TEXT_LENGTH_FOR_HIGHLIGHT + HIGHLIGHT_UNIT_SLACK_JA;
+  return text.trim().length <= getJapaneseHighlightMaxLength(text);
 }
 
 function findChunkContainingOffset(chunks, offset) {
@@ -2038,6 +2058,59 @@ function shouldFilterHeadingOverlayToPointerLine(headingElement, chunkRects) {
 
 function isDefinitionListItemHighlightHost(element) {
   return !!(element && (element.tagName === 'DT' || element.tagName === 'DD'));
+}
+
+// §39 AI-1: br-flow 容器より <p> を優先（県 CMS 等の連続段落）
+function preferParagraphHighlightBlockAtPoint(highlightBlock, clientX, clientY) {
+  const caretNode = getPointReferenceNode(clientX, clientY);
+  if (!caretNode) return highlightBlock;
+  let el = caretNode.nodeType === Node.TEXT_NODE ? caretNode.parentElement : caretNode;
+  while (el && el !== document.body && el !== document.documentElement) {
+    if (isYomupUiElement(el) || isEditableElement(el)) return highlightBlock;
+    if (el.tagName === 'P' && isBlockHighlightContainer(el)) {
+      if (isElementHighlightBlock(highlightBlock) && highlightBlock.element === el) {
+        return highlightBlock;
+      }
+      return { mode: 'element', element: el };
+    }
+    el = el.parentElement;
+  }
+  return highlightBlock;
+}
+
+function getTightenedParagraphClipBounds(hostElement, clipBounds) {
+  if (!hostElement || hostElement.tagName !== 'P' || !clipBounds) return clipBounds;
+  let ceiling = clipBounds.bottom;
+  let sib = hostElement.nextElementSibling;
+  while (sib) {
+    if (sib.nodeType !== Node.ELEMENT_NODE) {
+      sib = sib.nextElementSibling;
+      continue;
+    }
+    const tag = sib.tagName;
+    if (
+      BLOCK_ANCESTOR_TAGS.has(tag) ||
+      HEADING_SECTION_TAGS.has(tag) ||
+      tag === 'DIV' ||
+      tag === 'IMG'
+    ) {
+      const top = sib.getBoundingClientRect().top;
+      if (top > 0) {
+        ceiling = Math.min(ceiling, top - 6);
+      }
+      break;
+    }
+    sib = sib.nextElementSibling;
+  }
+  if (!(ceiling < clipBounds.bottom)) return clipBounds;
+  return {
+    left: clipBounds.left,
+    top: clipBounds.top,
+    right: clipBounds.right,
+    bottom: ceiling,
+    width: clipBounds.right - clipBounds.left,
+    height: ceiling - clipBounds.top
+  };
 }
 
 // §36 CW-2: dt/dd・SVG+テキスト行 — 複数 chunk rect / 折り返し時は pointer 視覚行に絞る
@@ -2414,7 +2487,7 @@ function findHeadingSectionRoot(fromNode) {
   while (el && el !== document.body && el !== document.documentElement) {
     if (isYomupUiElement(el) || isEditableElement(el)) return null;
     if (el.closest && el.closest('code')) return null;
-    const headings = el.querySelectorAll('h2,h3');
+    const headings = el.querySelectorAll('h2,h3,h4,h5,h6');
     if (headings.length > 0) return el;
     el = el.parentElement;
   }
@@ -2422,7 +2495,7 @@ function findHeadingSectionRoot(fromNode) {
 }
 
 function getOrderedHeadingSections(root) {
-  const list = root.querySelectorAll('h2,h3');
+  const list = root.querySelectorAll('h2,h3,h4,h5,h6');
   const headings = [];
   for (let i = 0; i < list.length; i++) {
     const h = list[i];
@@ -4808,16 +4881,16 @@ function findHighlightBlockFromPoint(clientX, clientY) {
   const iconTextRow = findIconTextRowBlockFromPoint(clientX, clientY);
   if (iconTextRow) return iconTextRow;
 
-  // N-S1: br-flow を block 祖先より先に（西川 rt_cf_n_body 等の `<br>` 論理行）
+  // §39 AI-1: 県 CMS 等の <p> は block 祖先を優先。br-only div は下で継続（N-S1）
+  const blockAncestor = findBlockAncestorFromPoint(clientX, clientY);
+  if (blockAncestor) {
+    return { mode: 'element', element: blockAncestor };
+  }
+
   const brFlow = findBrFlowBlockFromPoint(clientX, clientY);
   const inlineHost = findBestInlineTextHostFromPoint(clientX, clientY);
   if (brFlow && (!inlineHost || !shouldPreferInlineTextOverBrFlow(inlineHost))) {
     return brFlow;
-  }
-
-  const element = findBlockAncestorFromPoint(clientX, clientY);
-  if (element) {
-    return { mode: 'element', element };
   }
 
   if (inlineHost) {
@@ -5130,6 +5203,15 @@ function collectBlockTextSegmentLines(block) {
         flushLine();
       } else if (
         child.nodeType === Node.ELEMENT_NODE &&
+        parent === block &&
+        !isPBlock &&
+        child.tagName === 'P'
+      ) {
+        // §39 AI-1: 兄弟 <p> 連結防止（県 CMS 等）
+        walkNodes(child);
+        flushLine();
+      } else if (
+        child.nodeType === Node.ELEMENT_NODE &&
         HEADING_SECTION_TAGS.has(child.tagName)
       ) {
         flushLine();
@@ -5421,6 +5503,13 @@ function shouldUseJaSectionFullLineChunk(highlightBlock, blockText, languageMode
   if (highlightBlock.mode === 'br-flow' || highlightBlock.mode === 'heading-interval') return true;
   if (typeof clientX === 'number' && typeof clientY === 'number') {
     const caretNode = getPointReferenceNode(clientX, clientY);
+    if (
+      isElementHighlightBlock(highlightBlock) &&
+      highlightBlock.element &&
+      BLOCK_ANCESTOR_TAGS.has(highlightBlock.element.tagName)
+    ) {
+      return false;
+    }
     if (findBrFlowContainerFromNode(caretNode)) return true;
   }
   return false;
@@ -5459,10 +5548,23 @@ function resolveHighlightTextContext(highlightBlock, languageMode, clientX, clie
     return lines[findLineIndexAtCaret(lines, clientX, clientY)];
   }
 
+  // §39 AI-1: <p> は <br> 論理行で読み分割しない（段落＝1 塊で chunk 化）
+  if (
+    isElementHighlightBlock(highlightBlock) &&
+    highlightBlock.element &&
+    highlightBlock.element.tagName === 'P'
+  ) {
+    return collectHighlightBlockTextSegments(highlightBlock);
+  }
+
   if (!highlightBlock.scopedTextNode) {
+    const blockEl = isElementHighlightBlock(highlightBlock) ? highlightBlock.element : null;
     const caretNode = getPointReferenceNode(clientX, clientY);
     const brContainer = findBrFlowContainerFromNode(caretNode);
-    if (brContainer) {
+    if (
+      brContainer &&
+      !(blockEl && BLOCK_ANCESTOR_TAGS.has(blockEl.tagName))
+    ) {
       const brLine = resolveBrFlowContainerLogicalLineAtPoint(brContainer, clientX, clientY);
       if (brLine) return brLine;
     }
@@ -5474,8 +5576,12 @@ function resolveHighlightTextContext(highlightBlock, languageMode, clientX, clie
   if (lines.length <= 1) {
     if (lines[0]) return lines[0];
     const caretNode = getPointReferenceNode(clientX, clientY);
+    const blockEl = isElementHighlightBlock(highlightBlock) ? highlightBlock.element : null;
     const brContainer = findBrFlowContainerFromNode(caretNode);
-    if (brContainer) {
+    if (
+      brContainer &&
+      !(blockEl && BLOCK_ANCESTOR_TAGS.has(blockEl.tagName))
+    ) {
       const brLine = resolveBrFlowContainerLogicalLineAtPoint(brContainer, clientX, clientY);
       if (brLine) return brLine;
     }
@@ -6888,6 +6994,7 @@ function tryHighlightLogicalBlockAtPoint(clientX, clientY) {
     }
     logUnderlineTrace('block', summarizeHighlightBlockForTrace(highlightBlock));
     highlightBlock = normalizeAggregateHighlightBlock(highlightBlock, clientX, clientY);
+    highlightBlock = preferParagraphHighlightBlockAtPoint(highlightBlock, clientX, clientY);
 
     if (
       isElementHighlightBlock(highlightBlock) &&
@@ -6981,7 +7088,10 @@ function tryHighlightLogicalBlockAtPoint(clientX, clientY) {
       return false;
     }
 
-    const clipBounds = getHighlightBlockClipBounds(highlightBlock);
+    const clipBounds = getTightenedParagraphClipBounds(
+      getHighlightBlockClipElement(highlightBlock),
+      getHighlightBlockClipBounds(highlightBlock)
+    );
     const overlayHostElement = getHighlightBlockClipElement(highlightBlock);
     let overlayRects = chunkRects;
     if (isElementHighlightBlock(highlightBlock)) {

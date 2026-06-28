@@ -1,5 +1,5 @@
 /**
- * §7.0 コア G01〜G09 — 拡張ロード済みハイライト・スモーク
+ * §7.0 コア G01〜G12 — 拡張ロード済みハイライト・スモーク
  * 実行: npm run golden:core
  */
 import { chromium } from 'playwright';
@@ -69,6 +69,48 @@ const CASES = [
       { name: 'top-card-title', locate: locateNikkeiTopCard }
     ],
     requireProbe: 'body-text'
+  },
+  {
+    id: 'G10',
+    url: 'https://www.pref.aichi.jp/soshiki/gorin/skillcompetition-aicheetahcup2025.html',
+    probes: [
+      {
+        name: 'para-before-gap',
+        locate: (p) => locateAichiPair(p, '決められた時間内に試走', '参加者やその御家族'),
+        assertOverlayNotBelow: true
+      },
+      {
+        name: 'across-image',
+        locate: (p) => locateAichiPair(p, '見学者からは歓声', 'また、会場となっている'),
+        assertOverlayNotBelow: true
+      }
+    ],
+    requireProbe: 'para-before-gap'
+  },
+  {
+    id: 'G11',
+    url: 'https://www.pref.aichi.jp/soshiki/gorin/skillcompetition-aicheetahcup.html',
+    probes: [
+      {
+        name: 'h5-heading-only',
+        locate: (p) => locateAichiH5Pair(p, '集合型の事前講習会', '愛知県立名古屋工科高等学校'),
+        assertOverlayNotBelow: true
+      }
+    ],
+    requireProbe: 'h5-heading-only'
+  },
+  {
+    id: 'G12',
+    url: 'https://www.pref.aichi.jp/press-release/aichitahai2026.html',
+    probes: [
+      {
+        name: 'long-sentence-quote',
+        locate: (p) =>
+          locateAichiPair(p, 'モノづくりとデジタル技術', 'この度、本大会'),
+        assertOverlayNotBelow: true
+      }
+    ],
+    requireProbe: 'long-sentence-quote'
   }
 ];
 
@@ -244,12 +286,20 @@ async function main() {
           if (lit && probe.assertOverlayNearHover) {
             lit = await overlayNearHoverPoint(page, point);
           }
+          if (lit && probe.assertOverlayNotBelow) {
+            lit = await overlayNotBelowY(page, point);
+          }
+          const debugOverlay = probe.assertOverlayNotBelow
+            ? await describeOverlayProbe(page, point)
+            : undefined;
           caseResult.probes.push({
             name: probe.name,
             status: lit ? 'PASS' : 'FAIL',
             x: Math.round(point.x),
             y: Math.round(point.y),
-            hoverTop: point.hoverTop != null ? Math.round(point.hoverTop) : undefined
+            hoverTop: point.hoverTop != null ? Math.round(point.hoverTop) : undefined,
+            forbidBelowY: point.forbidBelowY != null ? Math.round(point.forbidBelowY) : undefined,
+            debugOverlay
           });
           if (lit) anyPass = true;
         }
@@ -284,6 +334,7 @@ function printCase(r) {
   console.log(`\n[${r.id}] ${r.ok ? 'OK' : 'NG'} ${r.url}`);
   for (const p of r.probes) {
     console.log(`  - ${p.name}: ${p.status}${p.reason ? ` (${p.reason})` : ''}`);
+    if (p.debugOverlay) console.log(`    debug: ${JSON.stringify(p.debugOverlay)}`);
   }
   if (r.error) console.log(`  ! ${r.error}`);
 }
@@ -298,6 +349,39 @@ async function hasHighlightOverlay(page) {
       root.querySelector('.yomup-highlight-outline')
     );
   });
+}
+
+async function describeOverlayProbe(page, point) {
+  return page.evaluate(({ forbidBelowY, y, hoverTop }) => {
+    const targetY = typeof hoverTop === 'number' ? hoverTop : y;
+    const segs = [
+      ...document.querySelectorAll(
+        '#yomup-highlight-overlay-root .yomup-highlight-underline-segment, #yomup-highlight-overlay-root .yomup-highlight-underline'
+      )
+    ];
+    const tops = segs.map((s) => Math.round(s.getBoundingClientRect().top));
+    const bottoms = segs.map((s) => Math.round(s.getBoundingClientRect().bottom));
+    const nearHover = tops.some((t) => Math.abs(t - targetY) < 55);
+    const spills = typeof forbidBelowY === 'number' && bottoms.some((b) => b > forbidBelowY);
+    return { segCount: segs.length, tops, bottoms, nearHover, spills, forbidBelowY, hoverTop: targetY };
+  }, point);
+}
+
+/** AI-1/AI-2: 下線が次ブロック境界をまたがないこと */
+async function overlayNotBelowY(page, point) {
+  return page.evaluate(({ forbidBelowY, y, hoverTop }) => {
+    if (typeof forbidBelowY !== 'number') return false;
+    const targetY = typeof hoverTop === 'number' ? hoverTop : y;
+    const segs = [
+      ...document.querySelectorAll(
+        '#yomup-highlight-overlay-root .yomup-highlight-underline-segment, #yomup-highlight-overlay-root .yomup-highlight-underline'
+      )
+    ];
+    if (segs.length === 0) return false;
+    const nearHover = segs.some((s) => Math.abs(s.getBoundingClientRect().top - targetY) < 55);
+    const spills = segs.some((s) => s.getBoundingClientRect().bottom > forbidBelowY);
+    return nearHover && !spills;
+  }, point);
 }
 
 /** NK-1R: オーバーレイがホバー行付近にあること（タイトル誤光り検出） */
@@ -607,6 +691,173 @@ async function locateNikkeiTopCard(page) {
     await page.waitForTimeout(500);
   }
   return null;
+}
+
+async function aichiSnippetInViewport(page, snippet) {
+  return page.evaluate((hoverSnippet) => {
+    const root =
+      document.querySelector('#main, main, [role="main"], #contents, .inner') || document.body;
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+    while (walker.nextNode()) {
+      const node = walker.currentNode;
+      const full = node.textContent || '';
+      if (node.parentElement?.closest('nav, header, footer, script, style, noscript')) continue;
+      if (!full.includes(hoverSnippet)) continue;
+      const host =
+        node.parentElement?.closest('h1,h2,h3,h4,h5,h6,p,li,td,dd,dt') ||
+        node.parentElement;
+      if (!host) return false;
+      const rect = host.getBoundingClientRect();
+      return rect.top >= 24 && rect.bottom <= window.innerHeight - 24;
+    }
+    return false;
+  }, snippet);
+}
+
+/** 愛知県 — 県 CMS は window.scroll が効かないことがあるため wheel で補正 */
+async function scrollAichiSnippetIntoView(page, snippet) {
+  const hoverLoc = page.getByText(snippet, { exact: false }).first();
+  try {
+    await hoverLoc.scrollIntoViewIfNeeded({ timeout: 12000 });
+    if (await aichiSnippetInViewport(page, snippet)) {
+      return true;
+    }
+  } catch (_e) {
+    // Playwright では非表示扱いでも DOM 上にある → wheel 補正へ
+  }
+
+  await page.locator('body').click({ position: { x: 40, y: 40 }, timeout: 5000 }).catch(() => {});
+  const targetScroll = await page.evaluate((hoverSnippet) => {
+    const root =
+      document.querySelector('#main, main, [role="main"], #contents, .inner') || document.body;
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+    while (walker.nextNode()) {
+      const node = walker.currentNode;
+      const full = node.textContent || '';
+      if (node.parentElement?.closest('nav, header, footer, script, style, noscript')) continue;
+      if (!full.includes(hoverSnippet)) continue;
+      const host =
+        node.parentElement?.closest('h1,h2,h3,h4,h5,h6,p,li,td,dd,dt') ||
+        node.parentElement;
+      if (!host) return null;
+      return Math.max(0, host.getBoundingClientRect().top + window.scrollY - 180);
+    }
+    return null;
+  }, snippet);
+  if (targetScroll == null) {
+    return false;
+  }
+  await page.mouse.move(640, 450);
+  let scrolled = 0;
+  while (scrolled + 80 < targetScroll) {
+    const step = Math.min(500, targetScroll - scrolled);
+    await page.mouse.wheel(0, step);
+    scrolled += step;
+    await page.waitForTimeout(80);
+  }
+  return aichiSnippetInViewport(page, snippet);
+}
+
+/** G11 — h5 は Playwright 上「表示」でもビューポート外のことがある */
+async function locateAichiH5Pair(page, hoverSnippet, nextSnippet) {
+  const h5 = page.locator('h5').filter({ hasText: hoverSnippet }).first();
+  if ((await h5.count()) === 0) {
+    return null;
+  }
+  await page.locator('body').click({ position: { x: 40, y: 40 }, timeout: 5000 }).catch(() => {});
+  for (let i = 0; i < 14; i++) {
+    const box = await h5.boundingBox();
+    if (box && box.y >= 24 && box.y + box.height <= 860) {
+      break;
+    }
+    await page.mouse.move(640, 450);
+    await page.mouse.wheel(0, 450);
+    await page.waitForTimeout(120);
+  }
+  const hBox = await h5.boundingBox();
+  if (!hBox) {
+    return null;
+  }
+  await page.waitForTimeout(200);
+  return page.evaluate(({ hoverSnippet, nextSnippet, hBox }) => {
+    const root =
+      document.querySelector('#main, main, [role="main"], #contents, .inner') || document.body;
+
+    function pointForSnippet(snippet) {
+      const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+      while (walker.nextNode()) {
+        const node = walker.currentNode;
+        const full = node.textContent || '';
+        if (node.parentElement?.closest('nav, header, footer, script, style, noscript')) continue;
+        const idx = full.indexOf(snippet);
+        if (idx < 0) continue;
+        const range = document.createRange();
+        range.setStart(node, idx);
+        range.setEnd(node, Math.min(idx + snippet.length, full.length));
+        const r = range.getBoundingClientRect();
+        if (r.width > 0 && r.height > 0) {
+          return { range, rect: r };
+        }
+      }
+      return null;
+    }
+
+    const next = pointForSnippet(nextSnippet);
+    if (!next) return null;
+    const nRect = next.rect;
+    return {
+      x: hBox.x + Math.min(24, hBox.width * 0.3),
+      y: hBox.y + hBox.height / 2,
+      hoverTop: hBox.y,
+      forbidBelowY: nRect.top - 6
+    };
+  }, { hoverSnippet, nextSnippet, hBox });
+}
+
+/** 愛知県 — hover 対象テキストと、下線が届いてはいけない次ブロック先頭 */
+async function locateAichiPair(page, hoverSnippet, nextSnippet) {
+  if (!(await scrollAichiSnippetIntoView(page, hoverSnippet))) {
+    return null;
+  }
+  await page.waitForTimeout(250);
+  return page.evaluate(({ hoverSnippet, nextSnippet }) => {
+    const root =
+      document.querySelector('#main, main, [role="main"], #contents, .inner') || document.body;
+
+    function pointForSnippet(snippet) {
+      const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+      while (walker.nextNode()) {
+        const node = walker.currentNode;
+        const full = node.textContent || '';
+        if (node.parentElement?.closest('nav, header, footer, script, style, noscript')) continue;
+        const idx = full.indexOf(snippet);
+        if (idx < 0) continue;
+        const range = document.createRange();
+        range.setStart(node, idx);
+        range.setEnd(node, Math.min(idx + snippet.length, full.length));
+        const r = range.getBoundingClientRect();
+        if (r.width > 0 && r.height > 0) {
+          return { node, range };
+        }
+      }
+      return null;
+    }
+
+    const hover = pointForSnippet(hoverSnippet);
+    const next = pointForSnippet(nextSnippet);
+    if (!hover || !next) return null;
+
+    const hRect = hover.range.getBoundingClientRect();
+    const nRect = next.range.getBoundingClientRect();
+    if (hRect.width <= 0 || hRect.height <= 0) return null;
+
+    return {
+      x: hRect.left + Math.min(24, hRect.width * 0.3),
+      y: hRect.top + hRect.height / 2,
+      hoverTop: hRect.top,
+      forbidBelowY: nRect.top - 6
+    };
+  }, { hoverSnippet, nextSnippet });
 }
 
 async function locateNikkeiTopCardBody(page) {
