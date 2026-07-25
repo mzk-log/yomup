@@ -211,6 +211,111 @@ for (const sel of ['div.intro-box > strong', 'div.intro-box > p', 'div.error-ite
   if (!m.lit) fail++;
 }
 
+await page.goto('https://mzk-log.github.io/arduino/lessons/basic/lesson014.html', {
+  waitUntil: 'domcontentloaded',
+  timeout: 60000
+});
+await preparePage(context, page);
+const stepItem = page.locator('div.step-item').first();
+await stepItem.scrollIntoViewIfNeeded();
+const stepPoints = await page.evaluate(() => {
+  const step = document.querySelector('div.step-item');
+  const badge = step.querySelector('.step-badge');
+  const title = step.querySelector('.step-title');
+  const p = step.querySelector('p');
+  const pack = (el, note) => {
+    const r = el.getBoundingClientRect();
+    let tw = Math.round(r.width);
+    try {
+      const range = document.createRange();
+      range.selectNodeContents(el.childNodes[0] || el);
+      tw = Math.round(range.getBoundingClientRect().width) || tw;
+    } catch (_e) {
+      // ignore
+    }
+    return {
+      note,
+      x: r.left + Math.min(20, r.width / 2),
+      y: r.top + r.height / 2,
+      w: tw
+    };
+  };
+  return [pack(badge, 'step-badge'), pack(title, 'step-title'), pack(p, 'step-p')];
+});
+const stepMs = [];
+for (const pt of stepPoints) {
+  stepMs.push(await hoverAndMeasure(page, pt.x, pt.y, pt.note));
+}
+console.log(JSON.stringify({ stepPoints, stepMs }, null, 2));
+for (let i = 0; i < stepMs.length; i++) {
+  const m = stepMs[i];
+  const pt = stepPoints[i];
+  if (!m.lit || m.segCount !== 1) {
+    console.log(`FAIL: ${pt.note} expected 1 seg, got ${m.segCount}`);
+    fail++;
+  }
+  if (m.unionW > pt.w + 40) {
+    console.log(`FAIL: ${pt.note} highlight too wide`);
+    fail++;
+  }
+}
+
+const voidLoopPts = await page.evaluate(() => {
+  const li = [...document.querySelectorAll('li')].find(
+    (x) => (x.textContent || '').includes('void loop()') && x.querySelector('br')
+  );
+  if (!li) return null;
+  li.scrollIntoView({ block: 'center' });
+  const strong = li.querySelector('strong');
+  const br = li.querySelector('br');
+  const sr = strong.getBoundingClientRect();
+  const range = document.createRange();
+  range.selectNodeContents(br.nextSibling);
+  const brc = range.getBoundingClientRect();
+  return {
+    label: {
+      x: sr.left + Math.min(20, sr.width / 2),
+      y: sr.top + sr.height / 2,
+      w: Math.round(sr.width)
+    },
+    body: {
+      x: brc.left + Math.min(20, brc.width / 2),
+      y: brc.top + brc.height / 2,
+      w: Math.round(brc.width)
+    }
+  };
+});
+if (!voidLoopPts) {
+  console.log('FAIL: void loop li not found');
+  fail++;
+} else {
+  const voidLabel = await hoverAndMeasure(
+    page,
+    voidLoopPts.label.x,
+    voidLoopPts.label.y,
+    'void-loop-label'
+  );
+  const voidBody = await hoverAndMeasure(
+    page,
+    voidLoopPts.body.x,
+    voidLoopPts.body.y,
+    'void-loop-body'
+  );
+  console.log(JSON.stringify({ voidLoopPts, voidLabel, voidBody }, null, 2));
+  if (!voidLabel.lit || voidLabel.segCount !== 1 || voidLabel.unionW > voidLoopPts.label.w + 40) {
+    console.log('FAIL: void-loop-label not separated');
+    fail++;
+  }
+  if (!voidBody.lit || voidBody.segCount !== 1 || voidBody.unionW > voidLoopPts.body.w + 40) {
+    console.log('FAIL: void-loop-body not separated');
+    fail++;
+  }
+  if (Math.abs(voidLabel.minTop - voidBody.minTop) < 8) {
+    console.log('FAIL: void-loop label/body same top');
+    fail++;
+  }
+}
+
 await context.close();
 console.log(fail === 0 ? 'ARDUINO_PROBES_OK' : `ARDUINO_PROBES_FAIL count=${fail}`);
 process.exit(fail === 0 ? 0 : 1);

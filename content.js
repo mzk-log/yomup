@@ -3614,6 +3614,101 @@ function findStackedVisualLineSpanFromPoint(clientX, clientY) {
   return null;
 }
 
+// §43 AL-5: step-item 型（badge span + 題名 leaf-div + p）を行ごとに光らせる
+function isMultiLineStepCardLineChild(el) {
+  if (!el || !el.tagName) return false;
+  if (!(el.textContent || '').trim()) return false;
+  if (isYomupUiElement(el) || isEditableElement(el)) return false;
+  if (el.tagName === 'P' && isBlockHighlightContainer(el)) return true;
+  if (el.tagName === 'DIV' && isLeafTextDivElement(el)) return true;
+  if (el.tagName === 'SPAN' && isStackedVisualLineSpan(el)) return true;
+  return false;
+}
+
+function isMultiLineStepCard(el) {
+  if (!el || el.tagName !== 'DIV') return false;
+  if (isYomupUiElement(el) || isEditableElement(el)) return false;
+  if (isHighlightExcludedCodeElement(el)) return false;
+  let lines = 0;
+  for (let i = 0; i < el.children.length; i++) {
+    const child = el.children[i];
+    if (child.nodeType !== Node.ELEMENT_NODE) continue;
+    if (!(child.textContent || '').trim()) continue;
+    if (!isMultiLineStepCardLineChild(child)) return false;
+    lines++;
+  }
+  return lines >= 2;
+}
+
+function buildMultiLineStepCardLineBlock(lineEl) {
+  if (!lineEl) return null;
+  if (lineEl.tagName === 'P') {
+    return { mode: 'element', element: lineEl };
+  }
+  return { mode: 'inline-text', element: lineEl };
+}
+
+function resolveMultiLineStepCardLine(cardEl, clientX, clientY) {
+  if (!isMultiLineStepCard(cardEl)) return null;
+
+  if (typeof document.elementsFromPoint === 'function') {
+    const stack = document.elementsFromPoint(clientX, clientY);
+    for (let i = 0; i < stack.length; i++) {
+      const el = stack[i];
+      if (!el || el === cardEl || !cardEl.contains(el)) continue;
+      let n = el;
+      while (n && n.parentElement && n.parentElement !== cardEl) {
+        n = n.parentElement;
+      }
+      if (n && n.parentElement === cardEl && isMultiLineStepCardLineChild(n)) {
+        if (
+          n.tagName === 'P' ||
+          getContainingTextRectsForPoint(n, clientX, clientY).length > 0 ||
+          inlineTextHostAcceptsHoverPoint(n, clientX, clientY)
+        ) {
+          return buildMultiLineStepCardLineBlock(n);
+        }
+      }
+    }
+  }
+
+  for (let i = 0; i < cardEl.children.length; i++) {
+    const child = cardEl.children[i];
+    if (!isMultiLineStepCardLineChild(child)) continue;
+    const rect = child.getBoundingClientRect();
+    if (
+      rect.width > 0 &&
+      rect.height > 0 &&
+      clientX >= rect.left &&
+      clientX <= rect.right &&
+      clientY >= rect.top &&
+      clientY <= rect.bottom
+    ) {
+      return buildMultiLineStepCardLineBlock(child);
+    }
+  }
+  return null;
+}
+
+function findMultiLineStepCardLineFromPoint(clientX, clientY) {
+  let node = getPointReferenceNode(clientX, clientY);
+  if (node && node.nodeType === Node.TEXT_NODE) {
+    node = node.parentElement;
+  }
+  if (!node) {
+    node = document.elementFromPoint(clientX, clientY);
+  }
+
+  while (node && node !== document.body && node !== document.documentElement) {
+    if (isYomupUiElement(node) || isEditableElement(node)) return null;
+    if (isMultiLineStepCard(node)) {
+      return resolveMultiLineStepCardLine(node, clientX, clientY);
+    }
+    node = node.parentElement;
+  }
+  return null;
+}
+
 // §29: 内側2段カード（見出し div + 本文 div）
 function isInnerCardCellStructure(el) {
   if (!el || el.tagName !== 'DIV') return false;
@@ -4287,6 +4382,9 @@ function findCardCellBlockFromPoint(clientX, clientY) {
     if (isCardCellStructure(node)) {
       const unit = resolveCardCellTextUnit(node, caretNode || node, clientX, clientY);
       if (unit) {
+        // §43 AL-5: step-item 等の複合行カードは子行へ分解
+        const stepLine = resolveMultiLineStepCardLine(unit, clientX, clientY);
+        if (stepLine) return stepLine;
         return { mode: 'element', element: unit };
       }
     }
@@ -5317,6 +5415,10 @@ function findHighlightBlockFromPoint(clientX, clientY) {
   const stackedSpanLine = findStackedVisualLineSpanFromPoint(clientX, clientY);
   if (stackedSpanLine) return stackedSpanLine;
 
+  // §43 AL-5: step-item 行（badge / 題名 / 本文）— card-cell 全体誤認より先
+  const multiLineStepLine = findMultiLineStepCardLineFromPoint(clientX, clientY);
+  if (multiLineStepLine) return multiLineStepLine;
+
   const innerCardCell = findInnerCardCellBlockFromPoint(clientX, clientY);
   if (innerCardCell) return innerCardCell;
 
@@ -5744,7 +5846,8 @@ function mergeShortJapaneseParenLogicalLines(lines) {
       i + 1 < lines.length &&
       curText.length > 0 &&
       curText.length < COALESCE_MIN_CHARS_JA &&
-      /[）\)]$/.test(curText)
+      // §43 AL-6: 全角 `）` のみ（ASCII `)` は void loop() 等のコード行を誤結合する）
+      /）$/.test(curText)
     ) {
       const next = lines[i + 1];
       const nextText = (next.blockText || '').trim();
