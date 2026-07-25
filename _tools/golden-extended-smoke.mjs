@@ -39,10 +39,24 @@ const CASES = [
         name: 'article-p',
         locate: async (page) => {
           // 上部バナー/画像の被りを避け、本文 p 内で elementFromPoint が通る座標を探す
+          // レイアウトずれ対策: scroll 後に rect を再取得し、hover 直前にも hit を再確認できる座標を返す
           return page.evaluate(() => {
             document
               .querySelectorAll(
-                '.articleTagWrap, .p-articleTag, .HeaderWrap, .articleHeader, [class*="floating"], [class*="FixedBan"], [class*="fixedBan"]'
+                [
+                  '.articleTagWrap',
+                  '.p-articleTag',
+                  '.HeaderWrap',
+                  '.articleHeader',
+                  '[class*="floating"]',
+                  '[class*="FixedBan"]',
+                  '[class*="fixedBan"]',
+                  '[class*="Fixed"]',
+                  '[class*="sticky"]',
+                  'iframe',
+                  '.p-article__side',
+                  '.p-article__sub'
+                ].join(',')
               )
               .forEach((el) => {
                 el.style.pointerEvents = 'none';
@@ -52,23 +66,24 @@ const CASES = [
             );
             for (const p of paras) {
               p.scrollIntoView({ block: 'center' });
+              // 画像遅延等で位置が動くため短い待ちの代わりに再計測
               const range = document.createRange();
               range.selectNodeContents(p);
               const rects = [...range.getClientRects()].filter((r) => r.width > 20 && r.height > 8);
               for (const r of rects) {
                 const candidates = [
-                  [12, 6],
-                  [36, 8],
-                  [72, 10],
-                  [120, 8],
-                  [Math.min(160, r.width / 2), r.height / 2]
+                  [Math.min(40, r.width / 2), r.height / 2],
+                  [12, Math.max(4, r.height / 2)],
+                  [36, Math.max(4, r.height / 2)],
+                  [72, Math.max(4, r.height / 2)],
+                  [120, Math.max(4, r.height / 2)]
                 ];
                 for (const [dx, dy] of candidates) {
                   const x = r.left + dx;
                   const y = r.top + dy;
                   const hit = document.elementFromPoint(x, y);
                   if (hit && (hit === p || p.contains(hit)) && hit.tagName !== 'IMG') {
-                    return { x, y };
+                    return { x, y, tag: 'article__txt' };
                   }
                 }
               }
@@ -432,7 +447,7 @@ async function main() {
           await hoverProbe(page, point);
           let lit = await hasHighlightOverlay(page);
           if (!lit) {
-            // リトライ: 電球再確認 + 再ホバー
+            // リトライ: 電球再確認 + 座標再取得 + 再ホバー
             await page.evaluate(() => {
               const img = document
                 .getElementById('YomuP-popup-container')
@@ -441,6 +456,8 @@ async function main() {
             });
             await page.waitForTimeout(400);
             await clearHighlight(page);
+            const retryPoint = await probe.locate(page);
+            if (retryPoint) point = retryPoint;
             await hoverProbe(page, point);
             lit = await hasHighlightOverlay(page);
           }

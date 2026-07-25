@@ -76,7 +76,8 @@ const CJK_RATIO_THRESHOLD = 0.15;
 const EN_BOUNDARY_SEARCH_WINDOW_WORDS = 15;
 
 // 日本語分割: 目標位置から前方に許容する文字数（句読点が maxLength を少し超える場合）
-const JA_BOUNDARY_SEARCH_WINDOW_FORWARD = 10;
+// §48 MS-3: 116字前後の1文が文中切れしないよう 10→20（AI-1 句点優先の探索余裕）
+const JA_BOUNDARY_SEARCH_WINDOW_FORWARD = 20;
 
 // ハイライト対象となるタグ名（findParentWithConsecutiveSpansの引数として受け入れるタグ）
 const HIGHLIGHT_TARGET_TAGS = ['SPAN', 'STRONG'];

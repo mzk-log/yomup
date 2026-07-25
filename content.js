@@ -1823,32 +1823,46 @@ function findBestJapaneseBoundary(text, start, targetEnd, maxLength) {
   const searchStart = start + 1;
   const searchEnd = Math.min(text.length, targetEnd + JA_BOUNDARY_SEARCH_WINDOW_FORWARD);
   const chunkLength = targetEnd - start;
-  const allowComma = chunkLength > maxLength * 1.2;
+  let allowComma = chunkLength > maxLength * 1.2;
   const maxChunkEnd = start + maxLength + HIGHLIGHT_UNIT_SLACK_JA;
   // 句点（priority 1）は括弧より先に、探索窓ぶんだけ上限を緩めて採用（§39 AI-1）
+  // §48 MS-3: 閉じ引用（priority 2）も同上限まで許可し、引用途中切断を避ける
   const maxSentenceEnd = Math.min(
     text.length,
     start + maxLength + HIGHLIGHT_UNIT_SLACK_JA + JA_BOUNDARY_SEARCH_WINDOW_FORWARD
   );
 
-  let best = null;
-  let bestPriority = 999;
-  let bestDistance = Infinity;
-
-  for (let i = searchEnd; i >= searchStart; i--) {
-    const boundary = classifyJapaneseBoundary(text, i, allowComma);
-    if (!boundary) continue;
-    const limit = boundary.priority === 1 ? maxSentenceEnd : maxChunkEnd;
-    if (boundary.cutAfter > limit) continue;
-    const distance = Math.abs(i - targetEnd);
-    if (
-      boundary.priority < bestPriority ||
-      (boundary.priority === bestPriority && distance < bestDistance)
-    ) {
-      best = { cutAfter: boundary.cutAfter, kind: boundary.kind };
-      bestPriority = boundary.priority;
-      bestDistance = distance;
+  function search(allowCommaFlag) {
+    let best = null;
+    let bestPriority = 999;
+    let bestDistance = Infinity;
+    for (let i = searchEnd; i >= searchStart; i--) {
+      const boundary = classifyJapaneseBoundary(text, i, allowCommaFlag);
+      if (!boundary) continue;
+      const limit = boundary.priority <= 2 ? maxSentenceEnd : maxChunkEnd;
+      if (boundary.cutAfter > limit) continue;
+      // §48 MS-3: maxChunkEnd を超える句点より、手前の閉じ引用（priority 2）を優先
+      const effectivePriority =
+        boundary.priority === 1 && boundary.cutAfter > maxChunkEnd
+          ? 2.5
+          : boundary.priority;
+      const distance = Math.abs(i - targetEnd);
+      if (
+        effectivePriority < bestPriority ||
+        (effectivePriority === bestPriority && distance < bestDistance)
+      ) {
+        best = { cutAfter: boundary.cutAfter, kind: boundary.kind };
+        bestPriority = effectivePriority;
+        bestDistance = distance;
+      }
     }
+    return best;
+  }
+
+  let best = search(allowComma);
+  // §48 MS-3: 句点・引用が見つからないとき読点を再探索（硬切断回避）
+  if (!best && !allowComma) {
+    best = search(true);
   }
   return best;
 }
@@ -1974,9 +1988,15 @@ function isJapaneseSentenceEndChunk(text) {
   return t.length > 0 && /[。！？．]$/.test(t);
 }
 
+// §48 MS-3: 閉じ引用・括弧で終わるチャンクも句点同様に上限余裕を付与
+function isJapaneseSoftEndChunk(text) {
+  const t = (text || '').trim();
+  return t.length > 0 && /[。！？．」』）)\]]$/.test(t);
+}
+
 function getJapaneseHighlightMaxLength(text) {
   const base = MAX_TEXT_LENGTH_FOR_HIGHLIGHT + HIGHLIGHT_UNIT_SLACK_JA;
-  if (isJapaneseSentenceEndChunk(text)) {
+  if (isJapaneseSoftEndChunk(text)) {
     return base + JA_BOUNDARY_SEARCH_WINDOW_FORWARD;
   }
   return base;
@@ -2254,6 +2274,8 @@ function getTightenedParagraphClipBounds(hostElement, clipBounds, clientX, clien
   if (!hostElement || hostElement.tagName !== 'P' || !clipBounds) return clipBounds;
   let top = clipBounds.top;
   let ceiling = clipBounds.bottom;
+  const hostRect = hostElement.getBoundingClientRect();
+  const lineTol = getHighlightUnderlineLineTolerancePx();
 
   if (typeof clientX === 'number' && typeof clientY === 'number') {
     const split = getParagraphBrLabelSplit(hostElement);
@@ -2278,11 +2300,12 @@ function getTightenedParagraphClipBounds(hostElement, clipBounds, clientX, clien
       tag === 'DIV' ||
       tag === 'IMG'
     ) {
-      const top = sib.getBoundingClientRect().top;
-      if (top > 0) {
-        ceiling = Math.min(ceiling, top - 6);
+      const sibTop = sib.getBoundingClientRect().top;
+      // §49 MS-4: option-item 横並び（同一行の次兄弟 P）を天井にすると下線が全クリップされる
+      if (sibTop > 0 && sibTop > hostRect.top + lineTol) {
+        ceiling = Math.min(ceiling, sibTop - 6);
+        break;
       }
-      break;
     }
     sib = sib.nextElementSibling;
   }
@@ -2339,6 +2362,45 @@ function findLayoutTableCellInnerBlockFromPoint(clientX, clientY, tableCell) {
   const inlineHost = findBestInlineTextHostFromPoint(clientX, clientY);
   if (inlineHost && tableCell.contains(inlineHost)) {
     return { mode: 'inline-text', element: inlineHost };
+  }
+
+  return null;
+}
+
+// §49 MS-4: 長文条件 TD（直下 DIV のみ）はセル全文が上限超過で不発 → 内側 LI / P を優先
+function findContentTableCellInnerBlockFromPoint(clientX, clientY, tableCell) {
+  if (!tableCell || !isTableCellHighlightHost(tableCell)) return null;
+  if (isLayoutTableCell(tableCell)) return null;
+
+  // ヒット要素の祖先を優先（option-item 上で下層 LI を elementsFromPoint 誤拾いしない）
+  let node = getPointReferenceNode(clientX, clientY) || document.elementFromPoint(clientX, clientY);
+  if (node && node.nodeType === Node.TEXT_NODE) {
+    node = node.parentElement;
+  }
+  while (node && node !== tableCell && tableCell.contains(node)) {
+    if (node.tagName === 'P' && isBlockHighlightContainer(node)) {
+      return { mode: 'element', element: node };
+    }
+    if (
+      node.tagName === 'LI' &&
+      !isFlowStepListItemStructure(node) &&
+      !liContainsInnerCardCellAtPoint(node, clientX, clientY)
+    ) {
+      return { mode: 'element', element: node };
+    }
+    node = node.parentElement;
+  }
+
+  // 余白 hover 等: テキスト矩形に載る LI のみ
+  const deepestLi = findDeepestListItemFromPoint(clientX, clientY);
+  if (
+    deepestLi &&
+    tableCell.contains(deepestLi) &&
+    !isFlowStepListItemStructure(deepestLi) &&
+    !liContainsInnerCardCellAtPoint(deepestLi, clientX, clientY) &&
+    getContainingTextRectsForPoint(deepestLi, clientX, clientY).length > 0
+  ) {
+    return { mode: 'element', element: deepestLi };
   }
 
   return null;
@@ -2652,13 +2714,30 @@ function isStructuralParagraphLeadingBlockLabel(el, parent, text) {
   return true;
 }
 
+// label〜br のあいだに有意テキストがあるか（MS-2: strong+本文+br を CK-3 誤判定しない）
+function hasSignificantContentBetweenNodes(fromNode, toNode) {
+  if (!fromNode || !toNode) return false;
+  let n = fromNode.nextSibling;
+  while (n && n !== toNode) {
+    if (n.nodeType === Node.TEXT_NODE) {
+      if ((n.textContent || '').trim()) return true;
+    } else if (n.nodeType === Node.ELEMENT_NODE && n.tagName !== 'BR') {
+      if ((n.textContent || '').trim()) return true;
+    }
+    n = n.nextSibling;
+  }
+  return false;
+}
+
 // §40 CK-1: <p><strong>ラベル</strong><br>本文…</p> — strong のみ光らせる
+// §48 MS-2: strong と br の間に本文がある DOM は対象外
 function isParagraphBrSeparatedBlockLabel(el, parent) {
   if (!parent || parent.tagName !== 'P') return false;
   if (!el || !el.tagName || !BLOCK_LABEL_TAGS.has(el.tagName)) return false;
   if (!isLeadingBlockLabelPosition(parent, el)) return false;
   const br = el.nextElementSibling;
   if (!br || br.tagName !== 'BR') return false;
+  if (hasSignificantContentBetweenNodes(el, br)) return false;
   return getFollowingSiblingTextLength(parent, el) >= BLOCK_LABEL_MIN_FOLLOWING_CHARS;
 }
 
@@ -5533,6 +5612,9 @@ function findHighlightBlockFromPoint(clientX, clientY) {
   if (tableCell) {
     const layoutInner = findLayoutTableCellInnerBlockFromPoint(clientX, clientY, tableCell);
     if (layoutInner) return layoutInner;
+    // §49 MS-4: ol/li・option-item 等をセル全文より先に採用
+    const contentInner = findContentTableCellInnerBlockFromPoint(clientX, clientY, tableCell);
+    if (contentInner) return contentInner;
     return { mode: 'element', element: tableCell };
   }
 
