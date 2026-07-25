@@ -111,7 +111,13 @@ const HEADING_SECTION_TAGS = new Set(['H1', 'H2', 'H3', 'H4', 'H5', 'H6']);
 // p/li/dd 先頭の b/strong ラベル（Gemini「結果：」型）。§3.7 inline 経路でテキスト幅のみ光らせる
 const BLOCK_LABEL_TAGS = new Set(['B', 'STRONG']);
 const BLOCK_LABEL_PARENT_TAGS = new Set(['P', 'LI', 'DD']);
+// §43 AL-1: div.intro-box 型（先頭 strong + 続く p）もラベル親として許可
+const BLOCK_LABEL_DIV_PARENT_OK = true;
 const BLOCK_LABEL_MIN_FOLLOWING_CHARS = 10;
+// §43: ハイライト用 phrasing（文中に置ける短いタグ）。div/p/img 等の塊要素は含めない
+const PHRASING_HIGHLIGHT_TAGS = new Set([
+  'BR', 'SPAN', 'STRONG', 'B', 'EM', 'I', 'U', 'CODE', 'SMALL', 'MARK', 'S', 'SUB', 'SUP'
+]);
 // 構造ラベル上限（コロン付き / ol・ul>li>p 先頭見出し / p 先頭 b）
 const BLOCK_LABEL_MAX_COLON_CHARS = 40;
 // p 先頭 b の直前に許容するプレフィックス（💡 等）の最大字数
@@ -2631,6 +2637,27 @@ function isLabelVisuallySeparatedFromFollowing(labelEl, parent) {
   return false;
 }
 
+function isDivLeadingLabelWithFollowingBlock(el, parent) {
+  if (!BLOCK_LABEL_DIV_PARENT_OK || !parent || parent.tagName !== 'DIV') return false;
+  if (!isLeadingBlockLabelPosition(parent, el)) return false;
+  if (getFollowingSiblingTextLength(parent, el) < BLOCK_LABEL_MIN_FOLLOWING_CHARS) return false;
+
+  let foundLabel = false;
+  for (let i = 0; i < parent.childNodes.length; i++) {
+    const child = parent.childNodes[i];
+    if (child === el) {
+      foundLabel = true;
+      continue;
+    }
+    if (!foundLabel) continue;
+    if (child.nodeType === Node.ELEMENT_NODE && child.tagName === 'P') {
+      return true;
+    }
+  }
+  // 続く p が無くても、視覚的に分離していれば intro 見出し扱いにする
+  return isBlockDisplayLabel(el) || isLabelVisuallySeparatedFromFollowing(el, parent);
+}
+
 function isBlockLabelElement(el) {
   if (!el || !el.tagName || !BLOCK_LABEL_TAGS.has(el.tagName)) return false;
   if (isYomupUiElement(el) || isEditableElement(el)) return false;
@@ -2639,7 +2666,13 @@ function isBlockLabelElement(el) {
   if (isNodeInsideTable(el)) return false;
 
   const parent = el.parentElement;
-  if (!parent || !BLOCK_LABEL_PARENT_TAGS.has(parent.tagName)) return false;
+  if (!parent) return false;
+
+  const parentOk =
+    BLOCK_LABEL_PARENT_TAGS.has(parent.tagName) ||
+    (parent.tagName === 'DIV' && isDivLeadingLabelWithFollowingBlock(el, parent)) ||
+    (parent.tagName === 'A' && isTitleBodyPhrasingAnchor(parent));
+  if (!parentOk) return false;
 
   if (!isLeadingBlockLabelPosition(parent, el)) return false;
 
@@ -2664,6 +2697,18 @@ function isBlockLabelElement(el) {
   }
 
   if (isParagraphBrSeparatedBlockLabel(el, parent)) {
+    return true;
+  }
+
+  // §43 AL-1: div 先頭 strong + 続く p（Arduino intro-box 等）
+  if (parent.tagName === 'DIV' && isDivLeadingLabelWithFollowingBlock(el, parent)) {
+    if (text.length > MAX_TEXT_LENGTH_FOR_HIGHLIGHT + HIGHLIGHT_UNIT_SLACK_JA) return false;
+    return true;
+  }
+
+  // §43 AL-2b: <a><strong>見出し</strong>本文</a>（guide-card 等）
+  if (parent.tagName === 'A' && isTitleBodyPhrasingAnchor(parent)) {
+    if (text.length > MAX_TEXT_LENGTH_FOR_HIGHLIGHT + HIGHLIGHT_UNIT_SLACK_JA) return false;
     return true;
   }
 
@@ -2768,13 +2813,108 @@ function isWithinFaqAnswerRegion(node) {
   return !!(el && el.closest && el.closest('.faq-answer'));
 }
 
+function isPhrasingHighlightElement(el) {
+  if (!el || el.nodeType !== Node.ELEMENT_NODE || !el.tagName) return false;
+  if (!PHRASING_HIGHLIGHT_TAGS.has(el.tagName)) return false;
+  // ネストした塊・メディア・リンクは phrasing 扱いにしない（複合バナー等の誤採用防止）
+  if (el.querySelector && el.querySelector('div, p, li, ul, ol, dl, dt, dd, table, h1, h2, h3, h4, h5, h6, img, picture, svg, a')) {
+    return false;
+  }
+  return true;
+}
+
+// §43 AL-2: strong 等だけの案内カード <a> は許可。img/div 付き複合 <a> は従来どおり除外
+function hasNonPhrasingDirectElementChild(el) {
+  if (!el) return false;
+  for (let i = 0; i < el.childNodes.length; i++) {
+    const child = el.childNodes[i];
+    if (child.nodeType !== Node.ELEMENT_NODE) continue;
+    if (!isPhrasingHighlightElement(child)) return true;
+  }
+  return false;
+}
+
+// §43 AL-2b: <a><strong>見出し</strong>本文…</a> — 見出しと本文を分けて光らせる
+function isTitleBodyPhrasingAnchor(a) {
+  if (!a || a.tagName !== 'A') return false;
+  if (isYomupUiElement(a) || isEditableElement(a)) return false;
+  if (hasNonPhrasingDirectElementChild(a)) return false;
+  const label = getFirstSignificantChild(a);
+  if (
+    !label ||
+    label.nodeType !== Node.ELEMENT_NODE ||
+    !BLOCK_LABEL_TAGS.has(label.tagName)
+  ) {
+    return false;
+  }
+  if (!isLeadingBlockLabelPosition(a, label)) return false;
+  return getFollowingSiblingTextLength(a, label) >= BLOCK_LABEL_MIN_FOLLOWING_CHARS;
+}
+
+function isNodeAfterSiblingInParent(parent, afterNode, node) {
+  if (!parent || !afterNode || !node || !parent.contains(node)) return false;
+  return !!(afterNode.compareDocumentPosition(node) & Node.DOCUMENT_POSITION_FOLLOWING);
+}
+
+function findTitleBodyPhrasingAnchorBodyFromPoint(clientX, clientY) {
+  const caretNode = getPointReferenceNode(clientX, clientY);
+  let node = caretNode;
+  if (node && node.nodeType === Node.TEXT_NODE) {
+    node = node.parentElement;
+  }
+  if (!node) {
+    node = document.elementFromPoint(clientX, clientY);
+  }
+  if (!node || !node.closest) return null;
+
+  const anchor = node.closest('a');
+  if (!anchor || !isTitleBodyPhrasingAnchor(anchor)) return null;
+  const label = getFirstSignificantChild(anchor);
+  if (!label || label.nodeType !== Node.ELEMENT_NODE) return null;
+
+  // 見出し上は blockLabel 経路に任せる
+  if (label === node || label.contains(node)) return null;
+  if (getContainingTextRectsForPoint(label, clientX, clientY).length > 0) return null;
+
+  if (caretNode && caretNode.nodeType === Node.TEXT_NODE) {
+    if (!isNodeAfterSiblingInParent(anchor, label, caretNode)) return null;
+    if (!shouldIncludeTextNodeInBlock(caretNode, anchor)) return null;
+    const text = (caretNode.textContent || '').trim();
+    if (!text) return null;
+    if (text.length > MAX_TEXT_LENGTH_FOR_HIGHLIGHT + HIGHLIGHT_UNIT_SLACK_JA) return null;
+    return {
+      mode: 'element',
+      element: anchor,
+      scopedTextNode: caretNode
+    };
+  }
+
+  // 本文側の <code> 等（見出しの後）
+  let el = node;
+  while (el && el !== anchor) {
+    if (
+      isPhrasingHighlightElement(el) &&
+      isNodeAfterSiblingInParent(anchor, label, el) &&
+      isInlineTextHostElement(el)
+    ) {
+      if (scoreInlineTextHostCandidate(el, clientX, clientY)) {
+        return { mode: 'inline-text', element: el };
+      }
+    }
+    el = el.parentElement;
+  }
+  return null;
+}
+
 function isInlineTextHostElement(el) {
   if (!el || !el.tagName || !INLINE_TEXT_HOST_TAGS.has(el.tagName)) return false;
   if (isYomupUiElement(el) || isEditableElement(el)) return false;
   // §4.5.2: FAQ 回答は faq-answer 経路（直下 div）を優先 — 内側 span 等を inline-text にしない
   if (el.closest && el.closest('.faq-answer')) return false;
   // アイコン等を含む複合 <a> は inline-text 対象外（日経 PR バナー等）
-  if (el.tagName === 'A' && hasDirectElementChild(el)) return false;
+  if (el.tagName === 'A' && hasNonPhrasingDirectElementChild(el)) return false;
+  // §43 AL-2b: 見出し+本文型 <a> はカード全体を1塊にしない
+  if (el.tagName === 'A' && isTitleBodyPhrasingAnchor(el)) return false;
   // pre 外の短文 code のみ inline-text 対象（pre 内は findPreBlockFromPoint に任せる）
   if (el.tagName === 'CODE') {
     if (el.closest && el.closest('pre')) return false;
@@ -3155,7 +3295,28 @@ function elementVisuallyContainsPoint(el, clientX, clientY) {
 }
 
 function scoreInlineTextHostCandidate(el, clientX, clientY) {
-  const containing = getContainingTextRectsForPoint(el, clientX, clientY);
+  let containing = getContainingTextRectsForPoint(el, clientX, clientY);
+  // §43 AL-2: phrasing のみの案内 <a> は余白ホバーもカード矩形で採用
+  // 見出し+本文型（AL-2b）は全体採用しない
+  if (
+    containing.length === 0 &&
+    el &&
+    el.tagName === 'A' &&
+    !hasNonPhrasingDirectElementChild(el) &&
+    !isTitleBodyPhrasingAnchor(el)
+  ) {
+    const rect = el.getBoundingClientRect();
+    if (
+      rect.width > 0 &&
+      rect.height > 0 &&
+      clientX >= rect.left &&
+      clientX <= rect.right &&
+      clientY >= rect.top &&
+      clientY <= rect.bottom
+    ) {
+      containing = [rect];
+    }
+  }
   if (containing.length === 0) return null;
 
   let minWidth = Infinity;
@@ -3273,6 +3434,20 @@ function inlineTextHostAcceptsHoverPoint(el, clientX, clientY) {
       return true;
     }
   }
+  // §43 AL-4: 積み上げ span 行（display:block 等）は行ボックス内の右空白も許容
+  if (
+    isStackedVisualLineSpan(el) &&
+    isStackedVisualLineSpanCard(el.parentElement)
+  ) {
+    const rect = el.getBoundingClientRect();
+    if (
+      rect.width > 0 && rect.height > 0 &&
+      clientX >= rect.left && clientX <= rect.right &&
+      clientY >= rect.top && clientY <= rect.bottom
+    ) {
+      return true;
+    }
+  }
   return false;
 }
 
@@ -3379,6 +3554,66 @@ function hasOnlyInnerCardCellAllowedExtraDirectChildren(el) {
   return true;
 }
 
+// §43 AL-4: display:block/inline-block の直下 span が複数行スタックしたカード行
+function isStackedVisualLineSpan(el) {
+  if (!el || el.tagName !== 'SPAN') return false;
+  if (isYomupUiElement(el) || isEditableElement(el)) return false;
+  if (isHighlightExcludedCodeElement(el)) return false;
+  const text = (el.textContent || '').trim();
+  if (!text) return false;
+  if (text.length > MAX_TEXT_LENGTH_FOR_HIGHLIGHT + HIGHLIGHT_UNIT_SLACK_JA) return false;
+  const display = window.getComputedStyle(el).display;
+  return (
+    display === 'block' ||
+    display === 'flex' ||
+    display === 'grid' ||
+    display === 'list-item' ||
+    display === 'inline-block'
+  );
+}
+
+function isStackedVisualLineSpanCard(parent) {
+  if (!parent || (parent.tagName !== 'DIV' && parent.tagName !== 'A')) return false;
+  if (isYomupUiElement(parent) || isEditableElement(parent)) return false;
+  let stacked = 0;
+  for (let i = 0; i < parent.children.length; i++) {
+    const child = parent.children[i];
+    if (child.nodeType !== Node.ELEMENT_NODE) continue;
+    if (child.tagName === 'SPAN' && isStackedVisualLineSpan(child)) {
+      stacked++;
+      continue;
+    }
+    if ((child.textContent || '').trim()) return false;
+  }
+  return stacked >= 2;
+}
+
+function findStackedVisualLineSpanFromPoint(clientX, clientY) {
+  let node = getPointReferenceNode(clientX, clientY);
+  if (node && node.nodeType === Node.TEXT_NODE) {
+    node = node.parentElement;
+  }
+  if (!node) {
+    node = document.elementFromPoint(clientX, clientY);
+  }
+
+  while (node && node !== document.body && node !== document.documentElement) {
+    if (isYomupUiElement(node) || isEditableElement(node)) return null;
+    if (
+      node.tagName === 'SPAN' &&
+      isStackedVisualLineSpan(node) &&
+      isStackedVisualLineSpanCard(node.parentElement)
+    ) {
+      if (inlineTextHostAcceptsHoverPoint(node, clientX, clientY)) {
+        return { mode: 'inline-text', element: node };
+      }
+      return null;
+    }
+    node = node.parentElement;
+  }
+  return null;
+}
+
 // §29: 内側2段カード（見出し div + 本文 div）
 function isInnerCardCellStructure(el) {
   if (!el || el.tagName !== 'DIV') return false;
@@ -3397,6 +3632,8 @@ function isInnerCardCellStructure(el) {
     if (isAggregateFeatureColumnElement(child)) return false;
     if (containsNestedFeatureIconCardBlocks(child)) return false;
     if (containsCardCellPricingRows(child)) return false;
+    // §43 AL-4: 同型 lesson-card 複数の grid を見出し+本文と誤認しない
+    if (isStackedVisualLineSpanCard(child)) return false;
   }
   return true;
 }
@@ -4172,11 +4409,32 @@ function hasOnlyBrDirectElementChildren(el) {
   return brCount >= 1;
 }
 
+// §43 AL-3: text + span/strong + br のみの div（Arduino error-item 等）。純 br-only の拡張
+function hasOnlyPhrasingOrBrDirectElementChildren(el) {
+  if (!el) return false;
+  let brCount = 0;
+  let phrasingCount = 0;
+  for (let i = 0; i < el.childNodes.length; i++) {
+    const child = el.childNodes[i];
+    if (child.nodeType !== Node.ELEMENT_NODE) continue;
+    if (child.tagName === 'BR') {
+      brCount++;
+      continue;
+    }
+    if (!isPhrasingHighlightElement(child)) return false;
+    phrasingCount++;
+  }
+  // 純 br-only は hasOnlyBrDirectElementChildren 側。こちらは phrasing 混在が必須
+  return brCount >= 1 && phrasingCount >= 1;
+}
+
 function isBrOnlyDivElement(el) {
   if (!el || el.tagName !== 'DIV') return false;
   if (isYomupUiElement(el) || isEditableElement(el)) return false;
   if (isHighlightExcludedCodeElement(el)) return false;
-  if (!hasOnlyBrDirectElementChildren(el)) return false;
+  if (!hasOnlyBrDirectElementChildren(el) && !hasOnlyPhrasingOrBrDirectElementChildren(el)) {
+    return false;
+  }
   const text = (el.textContent || '').trim();
   if (!text) return false;
   if (isBrFlowContainer(el)) return false;
@@ -5043,6 +5301,10 @@ function findHighlightBlockFromPoint(clientX, clientY) {
     return { mode: 'inline-text', element: blockLabel };
   }
 
+  // §43 AL-2b: guide-card 本文（見出し strong の後）
+  const titleBodyAnchorBody = findTitleBodyPhrasingAnchorBodyFromPoint(clientX, clientY);
+  if (titleBodyAnchorBody) return titleBodyAnchorBody;
+
   const flowStep = findFlowStepBlockFromPoint(clientX, clientY);
   if (flowStep) return flowStep;
 
@@ -5050,6 +5312,10 @@ function findHighlightBlockFromPoint(clientX, clientY) {
   const definitionListItemEarly = findDefinitionListItemBlockFromPoint(clientX, clientY);
   if (definitionListItemEarly) return definitionListItemEarly;
   if (isPointInsideMultiColumnStatDlGrid(clientX, clientY)) return null;
+
+  // §43 AL-4: 積み上げ span 行（lesson-card 等）— inner-card 誤認より先
+  const stackedSpanLine = findStackedVisualLineSpanFromPoint(clientX, clientY);
+  if (stackedSpanLine) return stackedSpanLine;
 
   const innerCardCell = findInnerCardCellBlockFromPoint(clientX, clientY);
   if (innerCardCell) return innerCardCell;
