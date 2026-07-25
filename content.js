@@ -2171,6 +2171,45 @@ function shouldFilterHeadingOverlayToPointerLine(headingElement, chunkRects) {
   return getVisualLineTopsFromClientRects(chunkRects, lineTolerance).length > 1;
 }
 
+// §45 JL-1: h3>span.stepLabel+span.heading 等 — 複数直下要素がある見出しは hover 子を inline-text に
+function countDirectElementChildren(el) {
+  if (!el || !el.children) return 0;
+  let count = 0;
+  for (let i = 0; i < el.children.length; i++) {
+    if (el.children[i].nodeType === Node.ELEMENT_NODE) count++;
+  }
+  return count;
+}
+
+function resolveHeadingChildTextHostAtPoint(headingEl, clientX, clientY) {
+  if (!headingEl || !isHeadingHighlightHost(headingEl)) return null;
+  if (countDirectElementChildren(headingEl) < 2) return null;
+
+  let node = getPointReferenceNode(clientX, clientY);
+  if (node && node.nodeType === Node.TEXT_NODE) {
+    node = node.parentElement;
+  }
+  if (!node) {
+    node = document.elementFromPoint(clientX, clientY);
+  }
+
+  while (node && node !== headingEl) {
+    if (isYomupUiElement(node) || isEditableElement(node)) return null;
+    if (node.parentElement === headingEl && (node.textContent || '').trim()) {
+      if (node.tagName === 'SPAN' || isInlineTextHostElement(node)) {
+        if (
+          getContainingTextRectsForPoint(node, clientX, clientY).length > 0 ||
+          inlineTextHostAcceptsHoverPoint(node, clientX, clientY)
+        ) {
+          return node;
+        }
+      }
+    }
+    node = node.parentElement;
+  }
+  return null;
+}
+
 function isDefinitionListItemHighlightHost(element) {
   return !!(element && (element.tagName === 'DT' || element.tagName === 'DD'));
 }
@@ -5416,6 +5455,11 @@ function findHighlightBlockFromPoint(clientX, clientY) {
   // li 内見出しは §3.2 専用 Range を deepestLi より優先（表セル目次型と同型）
   const heading = findHeadingBlockFromPoint(clientX, clientY);
   if (heading) {
+    // §45 JL-1: 複数直下要素の見出しは子テキストを優先（下線 Y ずれ・塊の取り違え防止）
+    const headingChild = resolveHeadingChildTextHostAtPoint(heading, clientX, clientY);
+    if (headingChild) {
+      return { mode: 'inline-text', element: headingChild };
+    }
     return { mode: 'element', element: heading };
   }
 
