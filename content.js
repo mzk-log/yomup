@@ -2125,12 +2125,11 @@ function isTableCellHighlightHost(element) {
   return !!(element && (element.tagName === 'TD' || element.tagName === 'TH'));
 }
 
-// §40 ZN-N2a: 素の td 折り返しは全行。br・構造子があるセルのみ pointer 行に絞る
-// §46 AL-7: 目次型は JA 論理行分割で既に絞るため pointer 視覚行絞りを使わない
-// （折り返し行ごとに sticky が切れ、250ms debounce 再待機で応答が悪くなる）
-function shouldFilterTableCellOverlayToPointerLine(cell) {
+// §40 ZN-N2a: br / H1–H3 / p 等があり論理行分割する表セル（素の折り返しのみ td は除く）
+function isStructuredTableCellForLineSplit(cell) {
   if (!cell || !isTableCellHighlightHost(cell)) return false;
-  if (isLayoutTableCell(cell)) return false;
+  if (isYomupUiElement(cell) || isEditableElement(cell)) return false;
+  if (isLayoutTableCell(cell)) return true;
   for (let i = 0; i < cell.children.length; i++) {
     const child = cell.children[i];
     if (child.nodeType !== Node.ELEMENT_NODE || !child.tagName) continue;
@@ -2142,15 +2141,22 @@ function shouldFilterTableCellOverlayToPointerLine(cell) {
   return false;
 }
 
+// §40 ZN-N2a / §46 AL-7 / §47 AR-1:
+// 表セルの overlay は pointer 視覚行に絞らない（ソフト折り返しで文中切れ・応答悪化するため）。
+// スコープは br/見出し論理行分割と句点チャンクに任せる。
+function shouldFilterTableCellOverlayToPointerLine(cell) {
+  return false;
+}
+
 // §40 ZN-N2a: 素の td は句点分割せずセル全文を 1 チャンク（折り返し全行に下線）
-// §46 AL-7: 目次型は論理行＋句点分割するため除外（長文説明が limit 超過で不点灯になる）
+// §46 AL-7: 目次型は論理行＋句点分割するため除外
+// §47 AR-1: br 構造セルも全文1チャンクにしない（isStructured… で除外）
 function shouldUseFullTableCellChunk(highlightBlock) {
   return (
     isElementHighlightBlock(highlightBlock) &&
     highlightBlock.element &&
     isTableCellHighlightHost(highlightBlock.element) &&
-    !shouldFilterTableCellOverlayToPointerLine(highlightBlock.element) &&
-    !isLayoutTableCell(highlightBlock.element)
+    !isStructuredTableCellForLineSplit(highlightBlock.element)
   );
 }
 
@@ -6309,13 +6315,12 @@ function resolveHighlightTextContext(highlightBlock, languageMode, clientX, clie
   }
 
   // §40 ZN-N2a: 素の td はセル全文（折り返し全行）。行分割しない
+  // §47 AR-1: br/見出し構造セルは下の論理行分割へ（pointer 絞り判定とは分離）
   if (
     isElementHighlightBlock(highlightBlock) &&
     highlightBlock.element &&
-    isTableCellHighlightHost(highlightBlock.element) &&
-    !shouldFilterTableCellOverlayToPointerLine(highlightBlock.element)
+    isTableCellHighlightHost(highlightBlock.element)
   ) {
-    // §46 AL-7: 目次型は「pointer 絞りなし」だが JA 論理行は見出し区間で分割する
     if (isLayoutTableCell(highlightBlock.element)) {
       const layoutLine = resolveLayoutTableCellTextContextAtPoint(
         highlightBlock.element,
@@ -6323,7 +6328,7 @@ function resolveHighlightTextContext(highlightBlock, languageMode, clientX, clie
         clientY
       );
       if (layoutLine) return layoutLine;
-    } else {
+    } else if (!isStructuredTableCellForLineSplit(highlightBlock.element)) {
       return collectHighlightBlockTextSegments(highlightBlock);
     }
   }
