@@ -2125,10 +2125,12 @@ function isTableCellHighlightHost(element) {
   return !!(element && (element.tagName === 'TD' || element.tagName === 'TH'));
 }
 
-// §40 ZN-N2a: 素の td 折り返しは全行。目次型・br・構造子があるセルのみ pointer 行に絞る
+// §40 ZN-N2a: 素の td 折り返しは全行。br・構造子があるセルのみ pointer 行に絞る
+// §46 AL-7: 目次型は JA 論理行分割で既に絞るため pointer 視覚行絞りを使わない
+// （折り返し行ごとに sticky が切れ、250ms debounce 再待機で応答が悪くなる）
 function shouldFilterTableCellOverlayToPointerLine(cell) {
   if (!cell || !isTableCellHighlightHost(cell)) return false;
-  if (isLayoutTableCell(cell)) return true;
+  if (isLayoutTableCell(cell)) return false;
   for (let i = 0; i < cell.children.length; i++) {
     const child = cell.children[i];
     if (child.nodeType !== Node.ELEMENT_NODE || !child.tagName) continue;
@@ -2141,12 +2143,14 @@ function shouldFilterTableCellOverlayToPointerLine(cell) {
 }
 
 // §40 ZN-N2a: 素の td は句点分割せずセル全文を 1 チャンク（折り返し全行に下線）
+// §46 AL-7: 目次型は論理行＋句点分割するため除外（長文説明が limit 超過で不点灯になる）
 function shouldUseFullTableCellChunk(highlightBlock) {
   return (
     isElementHighlightBlock(highlightBlock) &&
     highlightBlock.element &&
     isTableCellHighlightHost(highlightBlock.element) &&
-    !shouldFilterTableCellOverlayToPointerLine(highlightBlock.element)
+    !shouldFilterTableCellOverlayToPointerLine(highlightBlock.element) &&
+    !isLayoutTableCell(highlightBlock.element)
   );
 }
 
@@ -2332,6 +2336,105 @@ function findLayoutTableCellInnerBlockFromPoint(clientX, clientY, tableCell) {
   }
 
   return null;
+}
+
+function getLayoutTableCellDirectHeadings(cell) {
+  const headings = [];
+  if (!cell || !cell.children) return headings;
+  for (let i = 0; i < cell.children.length; i++) {
+    const child = cell.children[i];
+    if (child.nodeType === Node.ELEMENT_NODE && TD_CHILD_LINE_BREAK_TAGS.has(child.tagName)) {
+      headings.push(child);
+    }
+  }
+  return headings;
+}
+
+// §46 AL-7: 目次型 TD はセル全体を走査せず、前後 H1–H3 区間だけ行分割する
+function collectLayoutTableCellIntervalLines(cell, startHeading, endHeading) {
+  const lines = [];
+  let current = { blockText: '', segments: [] };
+
+  const flushLine = () => {
+    if (current.segments.length > 0) {
+      lines.push(current);
+    }
+    current = { blockText: '', segments: [] };
+  };
+
+  const appendTextNode = (node) => {
+    const text = node.textContent || '';
+    if (!text) return;
+    const start = current.blockText.length;
+    current.blockText += text;
+    current.segments.push({ node, start, end: current.blockText.length, text });
+  };
+
+  const walkNodes = (parent) => {
+    for (const child of parent.childNodes) {
+      if (child.nodeType === Node.ELEMENT_NODE && child.tagName === 'BR') {
+        flushLine();
+      } else if (child.nodeType === Node.TEXT_NODE) {
+        if (shouldIncludeTextNodeInBlock(child, cell)) {
+          appendTextNode(child);
+        }
+      } else if (child.nodeType === Node.ELEMENT_NODE) {
+        if (isYomupUiElement(child) || isEditableElement(child)) continue;
+        if (child.tagName === 'SCRIPT' || child.tagName === 'STYLE' || child.tagName === 'NOSCRIPT') {
+          continue;
+        }
+        walkNodes(child);
+      }
+    }
+  };
+
+  let started = false;
+  for (let i = 0; i < cell.childNodes.length; i++) {
+    const child = cell.childNodes[i];
+    if (child === startHeading) {
+      started = true;
+      continue;
+    }
+    if (!started) continue;
+    if (child === endHeading) break;
+
+    if (child.nodeType === Node.ELEMENT_NODE && child.tagName === 'BR') {
+      flushLine();
+    } else if (child.nodeType === Node.TEXT_NODE) {
+      if (shouldIncludeTextNodeInBlock(child, cell)) {
+        appendTextNode(child);
+      }
+    } else if (child.nodeType === Node.ELEMENT_NODE) {
+      if (isYomupUiElement(child) || isEditableElement(child)) continue;
+      if (child.tagName === 'SCRIPT' || child.tagName === 'STYLE' || child.tagName === 'NOSCRIPT') {
+        continue;
+      }
+      walkNodes(child);
+    }
+  }
+  flushLine();
+  return mergeShortJapaneseParenLogicalLines(lines);
+}
+
+function resolveLayoutTableCellTextContextAtPoint(cell, clientX, clientY) {
+  if (!cell || !isLayoutTableCell(cell)) return null;
+  if (typeof clientX !== 'number' || typeof clientY !== 'number') return null;
+
+  const caretNode = getPointReferenceNode(clientX, clientY);
+  if (!caretNode || !cell.contains(caretNode)) return null;
+
+  const headings = getLayoutTableCellDirectHeadings(cell);
+  const bounds = findHeadingIntervalBoundaries(headings, caretNode);
+  if (!bounds) return null;
+
+  const lines = collectLayoutTableCellIntervalLines(
+    cell,
+    bounds.startHeading,
+    bounds.endHeading
+  ).filter((line) => line.segments.length > 0 && line.blockText.trim());
+  if (lines.length === 0) return null;
+  if (lines.length === 1) return lines[0];
+  return lines[findLineIndexAtCaret(lines, clientX, clientY)];
 }
 
 function findDeepestListItemFromPoint(clientX, clientY) {
@@ -6212,7 +6315,17 @@ function resolveHighlightTextContext(highlightBlock, languageMode, clientX, clie
     isTableCellHighlightHost(highlightBlock.element) &&
     !shouldFilterTableCellOverlayToPointerLine(highlightBlock.element)
   ) {
-    return collectHighlightBlockTextSegments(highlightBlock);
+    // §46 AL-7: 目次型は「pointer 絞りなし」だが JA 論理行は見出し区間で分割する
+    if (isLayoutTableCell(highlightBlock.element)) {
+      const layoutLine = resolveLayoutTableCellTextContextAtPoint(
+        highlightBlock.element,
+        clientX,
+        clientY
+      );
+      if (layoutLine) return layoutLine;
+    } else {
+      return collectHighlightBlockTextSegments(highlightBlock);
+    }
   }
 
   // §39 AI-1 / §42 JA-1: <p> は段落全文で segment 化し buildLogicalChunks で句点分割
@@ -6250,6 +6363,20 @@ function resolveHighlightTextContext(highlightBlock, languageMode, clientX, clie
       const brLine = resolveBrFlowContainerLogicalLineAtPoint(brContainer, clientX, clientY);
       if (brLine) return brLine;
     }
+  }
+
+  // §46 AL-7: 目次型 TD（上記 early 以外の経路）でもセル全体走査を避ける
+  if (
+    isElementHighlightBlock(highlightBlock) &&
+    highlightBlock.element &&
+    isLayoutTableCell(highlightBlock.element)
+  ) {
+    const layoutLine = resolveLayoutTableCellTextContextAtPoint(
+      highlightBlock.element,
+      clientX,
+      clientY
+    );
+    if (layoutLine) return layoutLine;
   }
 
   const lines = collectHighlightBlockTextSegmentLines(highlightBlock).filter(
@@ -7694,7 +7821,23 @@ function tryHighlightLogicalBlockAtPoint(clientX, clientY) {
       return false;
     }
 
-    const whole = collectHighlightBlockTextSegments(highlightBlock);
+    let layoutLineContext = null;
+    if (
+      isElementHighlightBlock(highlightBlock) &&
+      highlightBlock.element &&
+      isLayoutTableCell(highlightBlock.element)
+    ) {
+      layoutLineContext = resolveLayoutTableCellTextContextAtPoint(
+        highlightBlock.element,
+        clientX,
+        clientY
+      );
+    }
+
+    const whole =
+      layoutLineContext && layoutLineContext.blockText.trim() && layoutLineContext.segments.length > 0
+        ? layoutLineContext
+        : collectHighlightBlockTextSegments(highlightBlock);
     if (!whole.blockText.trim() || whole.segments.length === 0) {
       logUnderlineTrace('block-miss', {
         x: clientX,
@@ -7712,7 +7855,9 @@ function tryHighlightLogicalBlockAtPoint(clientX, clientY) {
     const useGhostCardLeadChunk = shouldUseGhostCardLeadChunk(clientX, clientY, highlightBlock);
     const { blockText, segments } = useGhostCardLeadChunk
       ? whole
-      : resolveHighlightTextContext(highlightBlock, languageMode, clientX, clientY);
+      : layoutLineContext && layoutLineContext.blockText.trim() && layoutLineContext.segments.length > 0
+        ? layoutLineContext
+        : resolveHighlightTextContext(highlightBlock, languageMode, clientX, clientY);
     if (!blockText.trim() || segments.length === 0) return false;
 
     let chunk;
