@@ -2590,6 +2590,31 @@ function resolveParagraphBrLabelBodyTextContext(p, clientX, clientY) {
   return collectParagraphBodyAfterBrLabelSegments(p);
 }
 
+// §44 MS-1: FAQ 等 — <br> 区切りの箇条書き型 <p>（・/※）は caret 行単位（AI-1 の通常散文は対象外）
+function shouldSplitParagraphByBrListLines(p) {
+  if (!p || p.tagName !== 'P') return false;
+  if (p.querySelectorAll('br').length < 2) return false;
+  const lines = collectBlockTextSegmentLines(p).filter(
+    (line) => line.segments.length > 0 && (line.blockText || '').trim()
+  );
+  if (lines.length < 3) return false;
+  let markers = 0;
+  for (let i = 0; i < lines.length; i++) {
+    const t = (lines[i].blockText || '').trim();
+    if (isIndependentJapaneseLogicalLine(t) || /^※/.test(t)) markers++;
+  }
+  return markers >= 1;
+}
+
+function resolveParagraphBrListLineTextContext(p, clientX, clientY) {
+  if (!shouldSplitParagraphByBrListLines(p)) return null;
+  const lines = collectBlockTextSegmentLines(p).filter(
+    (line) => line.segments.length > 0 && (line.blockText || '').trim()
+  );
+  if (lines.length <= 1) return lines[0] || null;
+  return lines[findLineIndexAtCaret(lines, clientX, clientY)];
+}
+
 function isBlockDisplayLabel(el) {
   const display = window.getComputedStyle(el).display;
   return display === 'block' || display === 'flex' || display === 'list-item' || display === 'grid';
@@ -6159,6 +6184,13 @@ function resolveHighlightTextContext(highlightBlock, languageMode, clientX, clie
         clientY
       );
       if (brBody) return brBody;
+      // §44 MS-1: 箇条書き型 br 行（もしも FAQ 等）
+      const brListLine = resolveParagraphBrListLineTextContext(
+        highlightBlock.element,
+        clientX,
+        clientY
+      );
+      if (brListLine) return brListLine;
     }
     return collectHighlightBlockTextSegments(highlightBlock);
   }
