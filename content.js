@@ -2817,7 +2817,7 @@ function resolveParagraphBrLabelBodyTextContext(p, clientX, clientY) {
   return collectParagraphBodyAfterBrLabelSegments(p);
 }
 
-// §44 MS-1: FAQ 等 — <br> 区切りの箇条書き型 <p>（・/※）は caret 行単位（AI-1 の通常散文は対象外）
+// §44 MS-1 / §50 AT-1: FAQ・学校 CMS 等 — <br> 区切りの箇条書き型 <p>（・/※/〇 等）は caret 行単位（AI-1 の通常散文は対象外）
 function shouldSplitParagraphByBrListLines(p) {
   if (!p || p.tagName !== 'P') return false;
   if (p.querySelectorAll('br').length < 2) return false;
@@ -6092,7 +6092,8 @@ function collectBlockTextSegmentLines(block) {
 
 function isIndependentJapaneseLogicalLine(text) {
   const t = (text || '').trim();
-  return /^[・•\-※■]/.test(t);
+  // §50 AT-1: 学校 CMS 等の「〇／○」箇条書きも br 行分割対象（MS-1 と同型）
+  return /^[・•\-※■〇○]/.test(t);
 }
 
 function mergeShortJapaneseParenLogicalLines(lines) {
