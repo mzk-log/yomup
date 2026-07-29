@@ -1803,11 +1803,57 @@ function splitEnglishTextByBoundary(text, maxWords = MAX_WORDS_FOR_HIGHLIGHT) {
   return chunks.filter((c) => c.trim().length > 0);
 }
 
+function isOpeningJapaneseQuote(ch) {
+  return ch === '「' || ch === '『';
+}
+
+function isClosingJapaneseQuote(ch) {
+  return ch === '」' || ch === '』';
+}
+
+function isJapaneseSentenceTerminatorChar(ch) {
+  return ch === '。' || ch === '！' || ch === '？' || ch === '．';
+}
+
+/**
+ * text[index] が文末終止として切ってよいか。
+ * §51 AL-8: 「できた！」のように鉤括弧内／閉じ括弧直前の！？は文中扱い。
+ */
+function isJapaneseSentenceEndAt(text, index) {
+  if (!text || index < 0 || index >= text.length) return false;
+  const ch = text[index];
+  if (!isJapaneseSentenceTerminatorChar(ch)) return false;
+
+  let depth = 0;
+  for (let i = 0; i < index; i++) {
+    const c = text[i];
+    if (isOpeningJapaneseQuote(c)) depth++;
+    else if (isClosingJapaneseQuote(c) && depth > 0) depth--;
+  }
+
+  if ((ch === '！' || ch === '？') && depth > 0) {
+    return false;
+  }
+
+  let j = index + 1;
+  while (j < text.length && /\s/.test(text[j])) j++;
+  if (
+    (ch === '！' || ch === '？') &&
+    j < text.length &&
+    isClosingJapaneseQuote(text[j])
+  ) {
+    return false;
+  }
+
+  return true;
+}
+
 function classifyJapaneseBoundary(text, cutAfter, allowComma) {
   if (cutAfter <= 0 || cutAfter > text.length) return null;
 
   const prev = text[cutAfter - 1];
   if (prev === '。' || prev === '！' || prev === '？' || prev === '．') {
+    if (!isJapaneseSentenceEndAt(text, cutAfter - 1)) return null;
     return { cutAfter, priority: 1, kind: prev };
   }
   if (prev === '」' || prev === '』' || prev === '）' || prev === ')' || prev === ']') {
@@ -1896,14 +1942,14 @@ function splitJapaneseTextByBoundary(text, maxLength = MAX_TEXT_LENGTH_FOR_HIGHL
 }
 
 // §40 ZN-N2b / §42 JA-1: 句点区切りは文ごとに 1 チャンク（短い複数文を連結しない）
+// §51 AL-8: 鉤括弧内／閉じ直前の！？は文末にしない
 function splitJapaneseLogicalParts(blockText, maxLength = MAX_TEXT_LENGTH_FOR_HIGHLIGHT) {
   if (!blockText || !blockText.trim()) return [];
 
   const sentenceParts = [];
   let start = 0;
   for (let i = 0; i < blockText.length; i++) {
-    const ch = blockText[i];
-    if (ch === '。' || ch === '！' || ch === '？' || ch === '．') {
+    if (isJapaneseSentenceEndAt(blockText, i)) {
       sentenceParts.push(blockText.slice(start, i + 1));
       start = i + 1;
     }
@@ -2321,6 +2367,28 @@ function getTightenedParagraphClipBounds(hostElement, clipBounds, clientX, clien
 }
 
 // §36 CW-2: dt/dd・SVG+テキスト行 — 複数 chunk rect / 折り返し時は pointer 視覚行に絞る
+// §50 AT-2: 見出し+本文 div など構造化 dd は絞らない（抜粋折り返しの細切れ・進行遅さを防ぐ）
+function definitionListItemHasStructuredBlockChildren(el) {
+  if (!el) return false;
+  for (let i = 0; i < el.children.length; i++) {
+    const child = el.children[i];
+    if (child.nodeType !== Node.ELEMENT_NODE) continue;
+    const tag = child.tagName;
+    if (
+      HEADING_SECTION_TAGS.has(tag) ||
+      tag === 'DIV' ||
+      tag === 'P' ||
+      tag === 'UL' ||
+      tag === 'OL' ||
+      tag === 'SECTION' ||
+      tag === 'ARTICLE'
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
 function shouldFilterDecoratedBlockOverlayToPointerLine(hostElement, chunkRects) {
   if (shouldFilterHeadingOverlayToPointerLine(hostElement, chunkRects)) {
     return true;
@@ -2331,6 +2399,13 @@ function shouldFilterDecoratedBlockOverlayToPointerLine(hostElement, chunkRects)
     isDefinitionListItemHighlightHost(hostElement) ||
     (hostElement.tagName === 'DIV' && isIconTextRowDiv(hostElement));
   if (!isDecoratedRow) return false;
+
+  if (
+    isDefinitionListItemHighlightHost(hostElement) &&
+    definitionListItemHasStructuredBlockChildren(hostElement)
+  ) {
+    return false;
+  }
 
   const lineTolerance = getHighlightUnderlineLineTolerancePx();
   if (getVisualLineTopsFromClientRects(chunkRects, lineTolerance).length > 1) {
@@ -5105,6 +5180,48 @@ function resolveDlDescUnitAtPoint(clientX, clientY) {
   return null;
 }
 
+// §50 AT-2: dd/dt 内の本文専用 div（except 等）を dd 全体より優先する。
+// dd ホストだと §36 の pointer 視覚行絞りが発火し、折り返し文で
+// 「行途中切れ」に見え、かつ進行時間が論理塊全文のまま遅くなる。
+function isPlainTextOnlyDivElement(el) {
+  if (!el || el.tagName !== 'DIV') return false;
+  if (isYomupUiElement(el) || isEditableElement(el)) return false;
+  if (isHighlightExcludedCodeElement(el)) return false;
+  if (hasDirectElementChild(el) && !hasOnlyDecorativeMediaElementChildren(el)) return false;
+  return !!(el.textContent || '').trim();
+}
+
+function findPreferredInnerBlockInDefinitionListItem(listItem, clientX, clientY) {
+  if (!listItem || (listItem.tagName !== 'DT' && listItem.tagName !== 'DD')) return null;
+
+  let node = getPointReferenceNode(clientX, clientY);
+  if (node && node.nodeType === Node.TEXT_NODE) {
+    node = node.parentElement;
+  }
+  if (!node) {
+    node = document.elementFromPoint(clientX, clientY);
+  }
+  if (!node || !listItem.contains(node)) return null;
+
+  while (node && node !== listItem) {
+    if (isYomupUiElement(node) || isEditableElement(node)) return null;
+    if (node.tagName === 'P' && isBlockHighlightContainer(node)) {
+      return { mode: 'element', element: node };
+    }
+    if (
+      node.tagName === 'DIV' &&
+      isPlainTextOnlyDivElement(node) &&
+      inlineTextHostAcceptsHoverPoint(node, clientX, clientY)
+    ) {
+      // §50 AT-2: leaf 除外コンテキスト（card-cell 祖先等）は見ない。
+      // 除外すると dd ホストに戻り pointer 行絞りで折り返し細切れになる。
+      return { mode: 'inline-text', element: node };
+    }
+    node = node.parentElement;
+  }
+  return null;
+}
+
 function findDefinitionListItemBlockFromPoint(clientX, clientY) {
   if (isGhostOverlayAtPoint(clientX, clientY)) return null;
 
@@ -5141,6 +5258,8 @@ function findDefinitionListItemBlockFromPoint(clientX, clientY) {
         continue;
       }
       if (definitionListItemAcceptsHoverPoint(node, clientX, clientY)) {
+        const inner = findPreferredInnerBlockInDefinitionListItem(node, clientX, clientY);
+        if (inner) return inner;
         return { mode: 'element', element: node };
       }
       node = node.parentElement;
