@@ -2230,6 +2230,40 @@ function isHeadingHighlightHost(element) {
   return !!(element && element.tagName && isHeadingSectionTag(element.tagName));
 }
 
+// §53 CP-3: 見出し内の UI（custom element / data-nosnippet 等）はタイトル扱いにしない
+function isHeadingChromeSubtreeElement(el) {
+  if (!el || el.nodeType !== Node.ELEMENT_NODE || !el.tagName) return false;
+  if (el.hasAttribute && (el.hasAttribute('data-nosnippet') || el.hasAttribute('hidden'))) {
+    return true;
+  }
+  if (el.getAttribute && el.getAttribute('aria-hidden') === 'true') return true;
+  // Web Components（devsite-actions 等）
+  if (el.tagName.includes('-')) return true;
+  return false;
+}
+
+function isHeadingTitlePhrasingAncestor(el) {
+  if (!el || !el.tagName) return false;
+  if (el.tagName === 'A') {
+    return !(
+      el.querySelector &&
+      el.querySelector('div, p, li, ul, ol, dl, dt, dd, table, h1, h2, h3, h4, h5, h6, img, picture, svg')
+    );
+  }
+  return isPhrasingHighlightElement(el);
+}
+
+function isHeadingTitleTextNode(node, headingEl) {
+  if (!node || node.nodeType !== Node.TEXT_NODE || !headingEl) return false;
+  let el = node.parentElement;
+  while (el && el !== headingEl) {
+    if (isHeadingChromeSubtreeElement(el)) return false;
+    if (!isHeadingTitlePhrasingAncestor(el)) return false;
+    el = el.parentElement;
+  }
+  return el === headingEl;
+}
+
 // §33 CW-1: h1 + span.subtitle 等 — 子要素で複数視覚行になる見出しのみ pointer 行に絞る
 function shouldFilterHeadingOverlayToPointerLine(headingElement, chunkRects) {
   if (!isHeadingHighlightHost(headingElement) || !chunkRects || chunkRects.length <= 1) {
@@ -3135,6 +3169,43 @@ function isWithinUiChromeRegion(node) {
   return !!(el && el.closest && el.closest('header, footer, nav'));
 }
 
+// §52 CO-2: header/footer/nav 直テキスト（§3.7.1 ホストタグ外）を chrome 内のみ救済
+function isChromeRegionPlainTextHost(el) {
+  if (!el || !el.tagName) return false;
+  if (el.tagName !== 'HEADER' && el.tagName !== 'FOOTER' && el.tagName !== 'NAV') return false;
+  if (isYomupUiElement(el) || isEditableElement(el)) return false;
+  if (isHighlightExcludedCodeElement(el)) return false;
+  for (let i = 0; i < el.childNodes.length; i++) {
+    const child = el.childNodes[i];
+    if (child.nodeType !== Node.ELEMENT_NODE) continue;
+    if (!isPhrasingHighlightElement(child)) return false;
+  }
+  const text = (el.textContent || '').trim();
+  if (!text) return false;
+  return text.length <= MAX_TEXT_LENGTH_FOR_HIGHLIGHT + HIGHLIGHT_UNIT_SLACK_JA;
+}
+
+function findChromeRegionPlainTextHostFromPoint(clientX, clientY) {
+  let node = getPointReferenceNode(clientX, clientY);
+  if (node && node.nodeType === Node.TEXT_NODE) {
+    node = node.parentElement;
+  }
+  if (!node) {
+    node = document.elementFromPoint(clientX, clientY);
+  }
+  while (node && node !== document.body && node !== document.documentElement) {
+    if (isYomupUiElement(node) || isEditableElement(node)) return null;
+    if (isChromeRegionPlainTextHost(node)) {
+      if (inlineTextHostAcceptsHoverPoint(node, clientX, clientY)) {
+        return node;
+      }
+      return null;
+    }
+    node = node.parentElement;
+  }
+  return null;
+}
+
 function isWithinFaqAnswerRegion(node) {
   const el = node && node.nodeType === Node.TEXT_NODE ? node.parentElement : node;
   return !!(el && el.closest && el.closest('.faq-answer'));
@@ -3750,8 +3821,13 @@ function inlineTextHostAcceptsHoverPoint(el, clientX, clientY) {
   if (isAnchorTextWrapperSpanInMultiSpanAnchor(el)) {
     return false;
   }
-  // Gemini sequence / leaf-text-div: 行幅 div 内のテキスト右空白（NK-4 相当・領域限定）
-  if (isGeminiSequenceTextUnit(el) || isLeafTextDivElement(el) || isAnchorTextWrapperSpan(el)) {
+  // Gemini sequence / leaf-text-div / chrome 直テキスト: 行幅内のテキスト右空白（NK-4 相当・領域限定）
+  if (
+    isGeminiSequenceTextUnit(el) ||
+    isLeafTextDivElement(el) ||
+    isAnchorTextWrapperSpan(el) ||
+    isChromeRegionPlainTextHost(el)
+  ) {
     const rect = el.getBoundingClientRect();
     if (
       rect.width > 0 && rect.height > 0 &&
@@ -4853,6 +4929,20 @@ function hasOnlyPhrasingOrBrDirectElementChildren(el) {
   return brCount >= 1 && phrasingCount >= 1;
 }
 
+// §52 CO-1: text + strong/span 等のみ（br なし）。leaf-text-div 拡張用。br 混在は §28/AL-3 へ委譲
+function hasOnlyNonBrPhrasingDirectElementChildren(el) {
+  if (!el) return false;
+  let phrasingCount = 0;
+  for (let i = 0; i < el.childNodes.length; i++) {
+    const child = el.childNodes[i];
+    if (child.nodeType !== Node.ELEMENT_NODE) continue;
+    if (child.tagName === 'BR') return false;
+    if (!isPhrasingHighlightElement(child)) return false;
+    phrasingCount++;
+  }
+  return phrasingCount >= 1;
+}
+
 function isBrOnlyDivElement(el) {
   if (!el || el.tagName !== 'DIV') return false;
   if (isYomupUiElement(el) || isEditableElement(el)) return false;
@@ -5304,7 +5394,10 @@ function isLeafTextDivElement(el) {
   if (!el || el.tagName !== 'DIV') return false;
   if (isYomupUiElement(el) || isEditableElement(el)) return false;
   if (isHighlightExcludedCodeElement(el)) return false;
-  if (hasDirectElementChild(el) && !hasOnlyDecorativeMediaElementChildren(el)) return false;
+  // §24 L4: 要素子なし、または装飾メディアのみ、または §52 phrasing のみ（br なし）
+  if (hasDirectElementChild(el) && !hasOnlyDecorativeMediaElementChildren(el)) {
+    if (!hasOnlyNonBrPhrasingDirectElementChildren(el)) return false;
+  }
   const text = (el.textContent || '').trim();
   if (!text) return false;
   if (text.length > MAX_TEXT_LENGTH_FOR_HIGHLIGHT + HIGHLIGHT_UNIT_SLACK_JA) return false;
@@ -5750,8 +5843,11 @@ function findHighlightBlockFromPoint(clientX, clientY) {
   }
 
   // header/footer/nav 内では LI よりインライン短文を優先（§3.7.2）
+  // §52 CO-2: 直テキスト header/footer/nav は §3.7.1 ホスト外のため chrome 専用救済
   if (isWithinUiChromeRegion(pointNode)) {
-    const chromeInlineHost = findBestInlineTextHostFromPoint(clientX, clientY);
+    const chromeInlineHost =
+      findBestInlineTextHostFromPoint(clientX, clientY) ||
+      findChromeRegionPlainTextHostFromPoint(clientX, clientY);
     if (chromeInlineHost) {
       return { mode: 'inline-text', element: chromeInlineHost };
     }
@@ -5930,6 +6026,10 @@ function shouldIncludeTextNodeInBlock(node, blockElement) {
   if (parent.closest('script,style,noscript')) return false;
   if (isEditableElement(parent)) return false;
   if (parent.closest('rt,rp')) return false;
+  // §53 CP-3: 見出しはタイトル文言のみ（同居 UI ツールバー等を語数・下線から除外）
+  if (blockElement && isHeadingHighlightHost(blockElement)) {
+    if (!isHeadingTitleTextNode(node, blockElement)) return false;
+  }
   if (parent.closest('code')) {
     const codeEl = parent.closest('code');
     if (blockElement && blockElement.tagName === 'PRE' && blockElement.contains(parent)) {
@@ -6190,6 +6290,14 @@ function collectBlockTextSegmentLines(block) {
       } else if (child.nodeType === Node.ELEMENT_NODE) {
         if (isYomupUiElement(child) || isEditableElement(child)) continue;
         if (child.tagName === 'SCRIPT' || child.tagName === 'STYLE' || child.tagName === 'NOSCRIPT') {
+          continue;
+        }
+        // §53 CP-3: 見出し直下の UI / 非タイトル要素は走査しない
+        if (
+          isHeadingHighlightHost(block) &&
+          parent === block &&
+          (isHeadingChromeSubtreeElement(child) || !isHeadingTitlePhrasingAncestor(child))
+        ) {
           continue;
         }
         walkNodes(child);

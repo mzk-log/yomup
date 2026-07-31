@@ -31,7 +31,7 @@ const PDF_PAGE_MENU = {
 };
 
 // 読むプバージョン（機能変更.不具合修正・改善.申請）
-const YOMUP_VERSION = "3.7.0";
+const YOMUP_VERSION = "3.8.0";
 
 // 任意の開発支援（Ko-fi）— ユーザー操作時のみ外部タブで開く
 const DONATION_KOFI_URL = 'https://ko-fi.com/mzk_log';
@@ -63,8 +63,8 @@ const HIGHLIGHT_UNDERLINE_PROGRESS_MIN_SECONDS = 0.3;
 // 確定ハイライト内の再描画抑制: 矩形内のみ（右端だけ余白 px。0 で厳密）
 const HIGHLIGHT_STICKY_RIGHT_PADDING_PX = 4;
 
-// 読書速度（英語: 単語/分）— 基準 500字/分 ＝ 225語/分（UI 未接続時のフォールバック）
-const WORDS_PER_MINUTE = 225;
+// 読書速度（英語: 単語/分）— 基準 500字/分 ＝ 90語/分（UI 未接続時のフォールバック）
+const WORDS_PER_MINUTE = 90;
 
 // 読書速度（日本語: 字/分）— UI 未接続時のフォールバック
 const READING_SPEED_CHARS_PER_MIN = 500;
