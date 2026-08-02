@@ -310,6 +310,8 @@ function shouldRejectRubyFuriganaTextNode(node) {
   const parent = node.parentElement;
   if (!parent) return false;
   if (parent.closest('rt, rp')) return true;
+  // §54 GL-2: 全体カウント／言語判定に script 等の JS ソースを混ぜない（ハイライト収集と同型）
+  if (parent.closest('script, style, noscript, template')) return true;
   if (parent.closest('#' + ID_YOMUP_POPUP_CONTAINER + ', #' + ID_SUBPOPUP_CONTAINER)) return true;
   return false;
 }
