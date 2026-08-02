@@ -2443,6 +2443,15 @@ function shouldFilterDecoratedBlockOverlayToPointerLine(hostElement, chunkRects)
     return false;
   }
 
+  // §55 JS-1: 素の dt/dd（直テキストのみ）はソフト折り返しでも文全体を光らせる。
+  // §36 の pointer 行絞りは SVG+テキスト等の装飾行向け。AT-2 は子ブロックありのみ除外していた。
+  if (
+    isDefinitionListItemHighlightHost(hostElement) &&
+    !hasDirectElementChild(hostElement)
+  ) {
+    return false;
+  }
+
   const lineTolerance = getHighlightUnderlineLineTolerancePx();
   if (getVisualLineTopsFromClientRects(chunkRects, lineTolerance).length > 1) {
     return true;

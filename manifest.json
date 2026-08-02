@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "default_locale": "ja",
   "name": "読むプ ： ハイライト・タイマーで集中Web/PDF読書",
-  "version": "3.8.0",
+  "version": "3.9.0",
   "description": "ハイライトとタイマーで、Web/PDF読書の読みやすさ・集中を支援します。",
   "permissions": [
     "contextMenus",
