@@ -4123,6 +4123,37 @@ function findMultiLineStepCardLineFromPoint(clientX, clientY) {
   return null;
 }
 
+// §57 AT-4: WordPress 等の primary/sidebar 2カラム壳を §29 見出し+本文と誤認しない
+function isPageLayoutColumnDiv(el) {
+  if (!el || el.tagName !== 'DIV') return false;
+  const id = el.id || '';
+  if (id === 'primary' || id === 'secondary' || id === 'content' || id === 'main') {
+    return true;
+  }
+  const cls = String(el.className || '');
+  if (
+    cls.includes('content-area') ||
+    cls.includes('sidebar-area') ||
+    cls.includes('widget-area') ||
+    cls.includes('site-content') ||
+    cls.includes('site-main')
+  ) {
+    return true;
+  }
+  // カード部品想定を超えるネスト（entry-content 等の多数ブロック子）
+  for (let i = 0; i < el.children.length; i++) {
+    const child = el.children[i];
+    if (
+      child.nodeType === Node.ELEMENT_NODE &&
+      child.tagName === 'DIV' &&
+      child.children.length > CARD_CELL_MAX_DIRECT_CHILDREN
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
 // §29: 内側2段カード（見出し div + 本文 div）
 function isInnerCardCellStructure(el) {
   if (!el || el.tagName !== 'DIV') return false;
@@ -4132,12 +4163,15 @@ function isInnerCardCellStructure(el) {
   if (el.children.length > CARD_CELL_MAX_DIRECT_CHILDREN) return false;
   // §32: Ko-fi mb-8 等 — feature 列 + 料金 grid の複合容器は inner-card にしない
   if (containsNestedFeatureIconCardBlocks(el)) return false;
+  // §57 AT-4: site-content > primary + secondary 等
+  if (isPageLayoutColumnDiv(el)) return false;
   const textDivChildren = getDirectTextDivChildren(el);
   if (textDivChildren.length !== INNER_CARD_CELL_TEXT_DIV_COUNT) return false;
   if (!hasOnlyInnerCardCellAllowedExtraDirectChildren(el)) return false;
   for (let i = 0; i < textDivChildren.length; i++) {
     const child = textDivChildren[i];
     if (!isInnerCardCellTextDiv(child)) return false;
+    if (isPageLayoutColumnDiv(child)) return false;
     if (isAggregateFeatureColumnElement(child)) return false;
     if (containsNestedFeatureIconCardBlocks(child)) return false;
     if (containsCardCellPricingRows(child)) return false;
