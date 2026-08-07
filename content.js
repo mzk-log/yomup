@@ -2940,7 +2940,22 @@ function resolveParagraphBrLabelBodyTextContext(p, clientX, clientY) {
   return collectParagraphBodyAfterBrLabelSegments(p);
 }
 
+// §59 DG-1: マーカー無しの短行 br 一覧（実績リスト等）
+function isUnmarkedBrItemListLines(lines) {
+  if (!lines || lines.length < 4) return false;
+  let withPeriod = 0;
+  for (let i = 0; i < lines.length; i++) {
+    const t = (lines[i].blockText || '').trim();
+    if (!t) return false;
+    if (t.length > MAX_TEXT_LENGTH_FOR_HIGHLIGHT + HIGHLIGHT_UNIT_SLACK_JA) return false;
+    if (/。/.test(t)) withPeriod++;
+  }
+  // 句点付き行が半数超なら散文寄り（AI-1）として不採用
+  return withPeriod * 2 < lines.length;
+}
+
 // §44 MS-1 / §50 AT-1: FAQ・学校 CMS 等 — <br> 区切りの箇条書き型 <p>（・/※/〇 等）は caret 行単位（AI-1 の通常散文は対象外）
+// §59 DG-1: 無マーカー短行一覧も同様
 function shouldSplitParagraphByBrListLines(p) {
   if (!p || p.tagName !== 'P') return false;
   if (p.querySelectorAll('br').length < 2) return false;
@@ -2953,7 +2968,8 @@ function shouldSplitParagraphByBrListLines(p) {
     const t = (lines[i].blockText || '').trim();
     if (isIndependentJapaneseLogicalLine(t) || /^※/.test(t)) markers++;
   }
-  return markers >= 1;
+  if (markers >= 1) return true;
+  return isUnmarkedBrItemListLines(lines);
 }
 
 function resolveParagraphBrListLineTextContext(p, clientX, clientY) {
@@ -4126,7 +4142,7 @@ function findMultiLineStepCardLineFromPoint(clientX, clientY) {
   return null;
 }
 
-// §57 AT-4: WordPress 等の primary/sidebar 2カラム壳を §29 見出し+本文と誤認しない
+// §57 AT-4: WordPress 等の primary/sidebar 2カラム枠を §29 見出し+本文と誤認しない
 function isPageLayoutColumnDiv(el) {
   if (!el || el.tagName !== 'DIV') return false;
   const id = el.id || '';
@@ -6400,7 +6416,7 @@ function mergeShortJapaneseParenLogicalLines(lines) {
       curText.length < COALESCE_MIN_CHARS_JA &&
       // §43 AL-6: 全角 `）` のみ（ASCII `)` は void loop() 等のコード行を誤結合する）
       /）$/.test(curText) &&
-      // §56 AT-3: 括弧が閉じ済み（深さ 0）の短行は次行と結合しない（担当：（恩田）＋見出し行 等）
+      // §56 AT-3: 括弧が閉じ済み（深さ 0）の短行は次行と結合しない（肩書き括弧の短行＋次見出し 等）
       japaneseFullwidthParenDepth(curText) > 0
     ) {
       const next = lines[i + 1];
