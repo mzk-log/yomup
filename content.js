@@ -6334,6 +6334,18 @@ function isIndependentJapaneseLogicalLine(text) {
   return /^[・•\-※■〇○]/.test(t);
 }
 
+// 全角括弧の未閉じ深さ（閉じ超過は 0 にクランプ）
+function japaneseFullwidthParenDepth(text) {
+  let depth = 0;
+  const s = text || '';
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i];
+    if (ch === '（') depth++;
+    else if (ch === '）') depth = Math.max(0, depth - 1);
+  }
+  return depth;
+}
+
 function mergeShortJapaneseParenLogicalLines(lines) {
   if (!lines || lines.length < 2) return lines;
   const merged = [];
@@ -6346,7 +6358,9 @@ function mergeShortJapaneseParenLogicalLines(lines) {
       curText.length > 0 &&
       curText.length < COALESCE_MIN_CHARS_JA &&
       // §43 AL-6: 全角 `）` のみ（ASCII `)` は void loop() 等のコード行を誤結合する）
-      /）$/.test(curText)
+      /）$/.test(curText) &&
+      // §56 AT-3: 括弧が閉じ済み（深さ 0）の短行は次行と結合しない（担当：（恩田）＋見出し行 等）
+      japaneseFullwidthParenDepth(curText) > 0
     ) {
       const next = lines[i + 1];
       const nextText = (next.blockText || '').trim();
@@ -7731,7 +7745,9 @@ function captureHighlightProgressTarget(highlightBlock, chunk) {
     startHeading: highlightBlock.startHeading || null,
     endHeading: highlightBlock.endHeading || null,
     chunkStart: chunk.start,
-    chunkEnd: chunk.end
+    chunkEnd: chunk.end,
+    // §56 AT-3b: 同一 <p> 内の別 br 行が同じ文字数でも衝突しないよう本文も保持
+    chunkText: chunk.text || ''
   };
 }
 
@@ -7739,6 +7755,7 @@ function isSameHighlightProgressTarget(highlightBlock, chunk) {
   if (!highlightProgressSession || !highlightProgressSession.target) return false;
   const target = highlightProgressSession.target;
   if (target.chunkStart !== chunk.start || target.chunkEnd !== chunk.end) return false;
+  if ((target.chunkText || '') !== (chunk.text || '')) return false;
   if (target.mode !== highlightBlock.mode) return false;
   if (target.scopedTextNode) {
     return highlightBlock.scopedTextNode === target.scopedTextNode;
