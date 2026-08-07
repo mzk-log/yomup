@@ -2267,16 +2267,19 @@ function isHeadingTitleTextNode(node, headingEl) {
 }
 
 // §33 CW-1: h1 + span.subtitle 等 — 子要素で複数視覚行になる見出しのみ pointer 行に絞る
+// §58 AT-5: <br>/<wbr> だけの見出しはソフト折り返し全文を光らせる（BR を「装飾子」とみなさない）
 function shouldFilterHeadingOverlayToPointerLine(headingElement, chunkRects) {
   if (!isHeadingHighlightHost(headingElement) || !chunkRects || chunkRects.length <= 1) {
     return false;
   }
   let hasElementChild = false;
   for (let i = 0; i < headingElement.children.length; i++) {
-    if (headingElement.children[i].nodeType === Node.ELEMENT_NODE) {
-      hasElementChild = true;
-      break;
-    }
+    const child = headingElement.children[i];
+    if (child.nodeType !== Node.ELEMENT_NODE) continue;
+    const tag = child.tagName;
+    if (tag === 'BR' || tag === 'WBR') continue;
+    hasElementChild = true;
+    break;
   }
   if (!hasElementChild) return false;
   const lineTolerance = getHighlightUnderlineLineTolerancePx();
@@ -6365,7 +6368,11 @@ function collectBlockTextSegmentLines(block) {
 function isIndependentJapaneseLogicalLine(text) {
   const t = (text || '').trim();
   // §50 AT-1: 学校 CMS 等の「〇／○」箇条書きも br 行分割対象（MS-1 と同型）
-  return /^[・•\-※■〇○]/.test(t);
+  if (/^[・•\-※■〇○]/.test(t)) return true;
+  // §58 AT-6: 「B　当日動画」「１　導入…」等のセクション／番号ラベル行
+  if (/^[A-Za-zＡ-Ｚａ-ｚ][　\s]/.test(t)) return true;
+  if (/^[０-９0-9]+[　\s\.．、）)]/.test(t)) return true;
+  return false;
 }
 
 // 全角括弧の未閉じ深さ（閉じ超過は 0 にクランプ）
