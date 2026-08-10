@@ -53,7 +53,7 @@ const LANGUAGE_MODE_EN = 'en';
 const COALESCE_MIN_WORDS_EN = 8;
 const COALESCE_MIN_CHARS_JA = 40;
 const BLOCK_ANCESTOR_TAGS = new Set([
-  'P', 'LI', 'DD', 'DT', 'BLOCKQUOTE', 'FIGCAPTION', 'TD', 'TH', 'PRE'
+  'P', 'LI', 'DD', 'DT', 'BLOCKQUOTE', 'FIGCAPTION', 'CAPTION', 'TD', 'TH', 'PRE', 'ADDRESS'
 ]);
 const LIST_LINE_BREAK_TAGS = new Set(['LI', 'UL', 'OL']);
 const INTERVAL_LINE_BREAK_TAGS = new Set([
@@ -2162,9 +2162,34 @@ function findNearestTableCell(table, clientX, clientY) {
 }
 
 // 表内は TD/TH をブロックとする（セル隙間は最近傍セル）
+// §64 AS-3: CAPTION 上はセルに奪われない（findHighlightBlock で CAPTION を先に返す）
+function findTableCaptionFromNode(node) {
+  if (!node) return null;
+  let el = node.nodeType === Node.TEXT_NODE ? node.parentElement : node;
+  while (el && el !== document.body && el !== document.documentElement) {
+    if (isYomupUiElement(el) || isEditableElement(el)) return null;
+    if (el.tagName === 'CAPTION') return el;
+    // セル／表本体に入ったら caption 外
+    if (el.tagName === 'TD' || el.tagName === 'TH' || el.tagName === 'TABLE') break;
+    el = el.parentElement;
+  }
+  return null;
+}
+
+function findTableCaptionBlockFromPoint(clientX, clientY) {
+  const caretNode = getPointReferenceNode(clientX, clientY);
+  const hitEl = document.elementFromPoint(clientX, clientY);
+  return findTableCaptionFromNode(caretNode) || findTableCaptionFromNode(hitEl);
+}
+
 function findTableCellBlockFromPoint(clientX, clientY) {
   const caretNode = getPointReferenceNode(clientX, clientY);
   const hitEl = document.elementFromPoint(clientX, clientY);
+
+  // caption 上では最近傍セルへフォールバックしない
+  if (findTableCaptionFromNode(caretNode) || findTableCaptionFromNode(hitEl)) {
+    return null;
+  }
 
   let cell = findTableCellFromNode(caretNode) || findTableCellFromNode(hitEl);
   if (cell) return cell;
@@ -2244,6 +2269,8 @@ function isHeadingChromeSubtreeElement(el) {
   return false;
 }
 
+// §53 CP-3 / §67 SV-3: 見出しタイトルは phrasing と単純 <a>。
+// isPhrasingHighlightElement はネスト a を拒否するため、見出し専用に a ラップを許す（Wix h5>span>a 等）。
 function isHeadingTitlePhrasingAncestor(el) {
   if (!el || !el.tagName) return false;
   if (el.tagName === 'A') {
@@ -2252,7 +2279,19 @@ function isHeadingTitlePhrasingAncestor(el) {
       el.querySelector('div, p, li, ul, ol, dl, dt, dd, table, h1, h2, h3, h4, h5, h6, img, picture, svg')
     );
   }
-  return isPhrasingHighlightElement(el);
+  if (!PHRASING_HIGHLIGHT_TAGS.has(el.tagName)) return false;
+  if (
+    el.querySelector &&
+    el.querySelector('div, p, li, ul, ol, dl, dt, dd, table, h1, h2, h3, h4, h5, h6, img, picture, svg')
+  ) {
+    return false;
+  }
+  if (!el.querySelectorAll) return true;
+  const anchors = el.querySelectorAll('a');
+  for (let i = 0; i < anchors.length; i++) {
+    if (!isHeadingTitlePhrasingAncestor(anchors[i])) return false;
+  }
+  return true;
 }
 
 function isHeadingTitleTextNode(node, headingEl) {
@@ -2941,8 +2980,9 @@ function resolveParagraphBrLabelBodyTextContext(p, clientX, clientY) {
 }
 
 // §59 DG-1: マーカー無しの短行 br 一覧（実績リスト等）
+// §65 SV-1: 下限を 4→3（採用ページの休日3行など）。句点半数ルールで AI-1 散文は除外
 function isUnmarkedBrItemListLines(lines) {
-  if (!lines || lines.length < 4) return false;
+  if (!lines || lines.length < 3) return false;
   let withPeriod = 0;
   for (let i = 0; i < lines.length; i++) {
     const t = (lines[i].blockText || '').trim();
@@ -2954,22 +2994,74 @@ function isUnmarkedBrItemListLines(lines) {
   return withPeriod * 2 < lines.length;
 }
 
+// §66 SV-2: 2行 br の「：」付き。無マーカー2行は AI-1 のため採用しない
+// §66.4 SV-2b: 短い「ラベル：」行 + 本文（本文に句点可）。両方「：」かつ双方無句点の項目ペアも可
+const COLON_LABEL_LINE_MAX_CHARS = 40;
+
+function isColonSeparatedTwoLineBrList(lines) {
+  if (!lines || lines.length !== 2) return false;
+  const a = stripLeadingFormatChars((lines[0].blockText || '').trim());
+  const b = stripLeadingFormatChars((lines[1].blockText || '').trim());
+  if (!a || !b) return false;
+  const maxLen = MAX_TEXT_LENGTH_FOR_HIGHLIGHT + HIGHLIGHT_UNIT_SLACK_JA;
+  if (a.length > maxLen || b.length > maxLen) return false;
+
+  const aColon = /：/.test(a);
+  const bColon = /：/.test(b);
+  const aPeriod = /。/.test(a);
+  const bPeriod = /。/.test(b);
+
+  // 項目ペア: 両行方に「：」、どちらも句点なし（メカニック：/エンジニア：）
+  if (aColon && bColon && !aPeriod && !bPeriod) return true;
+
+  // ラベル＋本文: 先頭が短い「…：…」（句点なし）、2行目は本文（句点可・「：」ラベルではない）
+  if (
+    aColon &&
+    !aPeriod &&
+    a.length <= COLON_LABEL_LINE_MAX_CHARS &&
+    !bColon
+  ) {
+    return true;
+  }
+  return false;
+}
+
+function stripLeadingFormatChars(text) {
+  return String(text || '').replace(/^[\u200b\uFEFF\u00a0]+/, '');
+}
+
+function countBrListMarkerLines(lines) {
+  let markers = 0;
+  for (let i = 0; i < lines.length; i++) {
+    const t = stripLeadingFormatChars((lines[i].blockText || '').trim());
+    if (isIndependentJapaneseLogicalLine(t) || /^※/.test(t)) markers++;
+  }
+  return markers;
+}
+
 // §44 MS-1 / §50 AT-1: FAQ・学校 CMS 等 — <br> 区切りの箇条書き型 <p>（・/※/〇 等）は caret 行単位（AI-1 の通常散文は対象外）
-// §59 DG-1: 無マーカー短行一覧も同様
+// §59 DG-1 / §65 SV-1: 無マーカー短行一覧（≥3行）
+// §66 SV-2: 2行はマーカー/※ または「：」項目ペア／短いラベル：＋本文（散文2行は割らない）
 function shouldSplitParagraphByBrListLines(p) {
   if (!p || p.tagName !== 'P') return false;
-  if (p.querySelectorAll('br').length < 2) return false;
+  if (p.querySelectorAll('br').length < 1) return false;
   const lines = collectBlockTextSegmentLines(p).filter(
     (line) => line.segments.length > 0 && (line.blockText || '').trim()
   );
-  if (lines.length < 3) return false;
-  let markers = 0;
-  for (let i = 0; i < lines.length; i++) {
-    const t = (lines[i].blockText || '').trim();
-    if (isIndependentJapaneseLogicalLine(t) || /^※/.test(t)) markers++;
+  if (lines.length < 2) return false;
+
+  const markers = countBrListMarkerLines(lines);
+
+  if (lines.length >= 3) {
+    // 3行以上は従来どおり br が実質複数ある想定（空行用の余剰 br は許容）
+    if (p.querySelectorAll('br').length < 1) return false;
+    if (markers >= 1) return true;
+    return isUnmarkedBrItemListLines(lines);
   }
+
+  // ちょうど2行
   if (markers >= 1) return true;
-  return isUnmarkedBrItemListLines(lines);
+  return isColonSeparatedTwoLineBrList(lines);
 }
 
 function resolveParagraphBrListLineTextContext(p, clientX, clientY) {
@@ -4243,6 +4335,17 @@ function findInnerCardCellBlockFromPoint(clientX, clientY) {
     if (isInnerCardCellStructure(node)) {
       const unit = resolveInnerCardCellTextUnit(node, caretNode || node, clientX, clientY);
       if (unit) {
+        // AS-2: ページ枠（見出し div + 本文 div）の inner-card 誤認時、
+        // 点下の通常 LI があれば LI を優先（overlapRhythm が容器 lh で文字中央に寄るのを防ぐ）
+        const deepestLi = findDeepestListItemFromPoint(clientX, clientY);
+        if (
+          deepestLi &&
+          unit.contains(deepestLi) &&
+          !isFlowStepListItemStructure(deepestLi) &&
+          !liContainsInnerCardCellAtPoint(deepestLi, clientX, clientY)
+        ) {
+          return { mode: 'element', element: deepestLi };
+        }
         return { mode: 'element', element: unit };
       }
     }
@@ -5884,6 +5987,12 @@ function findHighlightBlockFromPoint(clientX, clientY) {
     return { mode: 'element', element: preBlock };
   }
 
+  // §64 AS-3: <caption> は表セル経路より先（KZ-1 ADDRESS と同型のブロック祖先）
+  const tableCaption = findTableCaptionBlockFromPoint(clientX, clientY);
+  if (tableCaption) {
+    return { mode: 'element', element: tableCaption };
+  }
+
   const tableCell = findTableCellBlockFromPoint(clientX, clientY);
   if (tableCell) {
     const layoutInner = findLayoutTableCellInnerBlockFromPoint(clientX, clientY, tableCell);
@@ -6382,9 +6491,11 @@ function collectBlockTextSegmentLines(block) {
 }
 
 function isIndependentJapaneseLogicalLine(text) {
-  const t = (text || '').trim();
+  const t = stripLeadingFormatChars((text || '').trim());
   // §50 AT-1: 学校 CMS 等の「〇／○」箇条書きも br 行分割対象（MS-1 と同型）
   if (/^[・•\-※■〇○]/.test(t)) return true;
+  // §66 SV-2: 丸数字 ①–⑳（採用ページの職種行など）
+  if (/^[\u2460-\u2473]/.test(t)) return true;
   // §58 AT-6: 「B　当日動画」「１　導入…」等のセクション／番号ラベル行
   if (/^[A-Za-zＡ-Ｚａ-ｚ][　\s]/.test(t)) return true;
   if (/^[０-９0-9]+[　\s\.．、）)]/.test(t)) return true;
@@ -7214,10 +7325,16 @@ function capUnderlineAnchorAbovePeerRects(rect, anchorBottom, peerRects) {
   if (!rect || !Number.isFinite(anchorBottom) || !peerRects || peerRects.length < 2) {
     return anchorBottom;
   }
+  const rectBottom = getHighlightRectBottom(rect);
   let capped = anchorBottom;
   for (let i = 0; i < peerRects.length; i++) {
     const peer = peerRects[i];
     if (!peer || peer === rect || peer.top <= rect.top + 1) continue;
+    // §62 AS-1: 横並び（縦に大きく重なる）peer は「次行」ではない → 誤 cap しない
+    const peerBottom = getHighlightRectBottom(peer);
+    const overlap = Math.min(rectBottom, peerBottom) - Math.max(rect.top, peer.top);
+    const minH = Math.min(rect.height || rectBottom - rect.top, peer.height || peerBottom - peer.top);
+    if (minH > 0 && overlap > minH * 0.5) continue;
     if (peer.top < capped) {
       capped = peer.top - 1;
     }
