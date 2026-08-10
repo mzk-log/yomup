@@ -6690,6 +6690,29 @@ function isPreHighlightBlock(highlightBlock) {
 }
 
 function resolveHighlightTextContext(highlightBlock, languageMode, clientX, clientY) {
+  // §60 KB-1: EN でも br 箇条書き／コード行型 <p> は行単位（PRE と同趣旨）
+  // 英語判定のコード貼り付け <p>+<br> が語数チャンクで複数行同時下線になるのを防ぐ
+  if (
+    isElementHighlightBlock(highlightBlock) &&
+    highlightBlock.element &&
+    highlightBlock.element.tagName === 'P' &&
+    typeof clientX === 'number' &&
+    typeof clientY === 'number'
+  ) {
+    const brBodyEarly = resolveParagraphBrLabelBodyTextContext(
+      highlightBlock.element,
+      clientX,
+      clientY
+    );
+    if (brBodyEarly) return brBodyEarly;
+    const brListLineEarly = resolveParagraphBrListLineTextContext(
+      highlightBlock.element,
+      clientX,
+      clientY
+    );
+    if (brListLineEarly) return brListLineEarly;
+  }
+
   const useLineSplit = languageMode === LANGUAGE_MODE_JA || isPreHighlightBlock(highlightBlock);
   if (!useLineSplit) {
     return collectHighlightBlockTextSegments(highlightBlock);
