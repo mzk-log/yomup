@@ -5065,12 +5065,46 @@ function findFaqAnswerBlockFromPoint(clientX, clientY) {
   return { mode: 'element', element: unit };
 }
 
+// §68 TK-1: Froala `fr-view` 等 — 末尾の style/button/短いラベル p は br-only 判定から除外
+function isIgnorableBrOnlyDivChromeChild(el) {
+  if (!el || el.nodeType !== Node.ELEMENT_NODE || !el.tagName) return false;
+  const tag = el.tagName;
+  if (tag === 'STYLE' || tag === 'SCRIPT' || tag === 'NOSCRIPT' || tag === 'TEMPLATE') {
+    return true;
+  }
+  if (tag === 'BUTTON') return true;
+  if (tag !== 'P') return false;
+  if (
+    el.querySelector &&
+    el.querySelector(
+      'div, p, ul, ol, li, table, h1, h2, h3, h4, h5, h6, section, article, img, picture, svg, button'
+    )
+  ) {
+    return false;
+  }
+  const text = (el.textContent || '').trim();
+  if (!text) return true;
+  // 関連リンク行
+  if (el.querySelector && el.querySelector('a')) {
+    return text.length <= MAX_TEXT_LENGTH_FOR_HIGHLIGHT + HIGHLIGHT_UNIT_SLACK_JA;
+  }
+  // 「■関連する〜」など phrasing のみの短い見出しラベル
+  for (let i = 0; i < el.children.length; i++) {
+    const child = el.children[i];
+    if (child.nodeType !== Node.ELEMENT_NODE) continue;
+    if (child.tagName === 'BR') continue;
+    if (!isPhrasingHighlightElement(child)) return false;
+  }
+  return text.length <= 60;
+}
+
 function hasOnlyBrDirectElementChildren(el) {
   if (!el) return false;
   let brCount = 0;
   for (let i = 0; i < el.childNodes.length; i++) {
     const child = el.childNodes[i];
     if (child.nodeType !== Node.ELEMENT_NODE) continue;
+    if (isIgnorableBrOnlyDivChromeChild(child)) continue;
     if (child.tagName !== 'BR') return false;
     brCount++;
   }
@@ -5085,6 +5119,7 @@ function hasOnlyPhrasingOrBrDirectElementChildren(el) {
   for (let i = 0; i < el.childNodes.length; i++) {
     const child = el.childNodes[i];
     if (child.nodeType !== Node.ELEMENT_NODE) continue;
+    if (isIgnorableBrOnlyDivChromeChild(child)) continue;
     if (child.tagName === 'BR') {
       brCount++;
       continue;
@@ -8818,6 +8853,8 @@ function clearCurrentHighlight() {
 // === テキスト入力可能なDOMの判定 =============================================
 function isEditableElement(element) {
   if (!element) return false;
+  if (element.nodeType && element.nodeType !== Node.ELEMENT_NODE) return false;
+  if (typeof element.getAttribute !== 'function') return false;
 
   // 1. contenteditable属性がtrue
   if (element.contentEditable === 'true' || element.isContentEditable) {
@@ -8842,7 +8879,7 @@ function isEditableElement(element) {
 
   // 5. 親要素がテキスト入力可能な場合もスキップ（オプション）
   // 例: contenteditableな親要素内の子要素
-  if (element.closest('[contenteditable="true"]')) {
+  if (element.closest && element.closest('[contenteditable="true"]')) {
     return true;
   }
 
