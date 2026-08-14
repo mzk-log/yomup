@@ -31,7 +31,7 @@ const PDF_PAGE_MENU = {
 };
 
 // 読むプバージョン（機能変更.不具合修正・改善.申請）
-const YOMUP_VERSION = "3.11.0";
+const YOMUP_VERSION = "3.12.0";
 
 // 任意の開発支援（Ko-fi）— ユーザー操作時のみ外部タブで開く
 const DONATION_KOFI_URL = 'https://ko-fi.com/mzk_log';
@@ -40,7 +40,7 @@ const DONATION_KOFI_URL = 'https://ko-fi.com/mzk_log';
 // デバッグログ出力の有効/無効（コンパイルスイッチ）
 const ENABLE_DEBUG_LOG = false; // true: 有効, false: 無効（本番環境）
 // フェーズ0: 下線ずれ調査。P0 完了後 false（§34 EH-1・2026-06-28）
-const ENABLE_HIGHLIGHT_UNDERLINE_TRACE = true;
+const ENABLE_HIGHLIGHT_UNDERLINE_TRACE = false;
 
 // テキストハイライトの文字数制限（日本語）
 const MAX_TEXT_LENGTH_FOR_HIGHLIGHT = 100;

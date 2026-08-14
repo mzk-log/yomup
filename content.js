@@ -3182,6 +3182,28 @@ function resolveParagraphBrListLineTextContext(p, clientX, clientY) {
   return lines[findLineIndexAtCaret(lines, clientX, clientY)];
 }
 
+// §15.2 / G-1b: 先頭 b/strong ラベル付き <p> — AI-1 全文句点分割より先にラベル行／本文行を分離
+function paragraphHasLeadingBlockLabel(p) {
+  if (!p || p.tagName !== 'P') return false;
+  for (let i = 0; i < p.childNodes.length; i++) {
+    const child = p.childNodes[i];
+    if (child.nodeType === Node.ELEMENT_NODE && isBlockLabelElement(child)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function resolveParagraphBlockLabelLineTextContext(p, clientX, clientY) {
+  if (!paragraphHasLeadingBlockLabel(p)) return null;
+  if (typeof clientX !== 'number' || typeof clientY !== 'number') return null;
+  const lines = collectBlockTextSegmentLines(p).filter(
+    (line) => line.segments.length > 0 && (line.blockText || '').trim()
+  );
+  if (lines.length <= 1) return null;
+  return lines[findLineIndexAtCaret(lines, clientX, clientY)];
+}
+
 function isBlockDisplayLabel(el) {
   const display = window.getComputedStyle(el).display;
   return display === 'block' || display === 'flex' || display === 'list-item' || display === 'grid';
@@ -7064,6 +7086,13 @@ function resolveHighlightTextContext(highlightBlock, languageMode, clientX, clie
       clientY
     );
     if (brListLineEarly) return brListLineEarly;
+    // §15.2 G-1b: 先頭 b/strong ラベル行と本文行を分離（preferParagraph→P 昇格後も）
+    const blockLabelLineEarly = resolveParagraphBlockLabelLineTextContext(
+      highlightBlock.element,
+      clientX,
+      clientY
+    );
+    if (blockLabelLineEarly) return blockLabelLineEarly;
   }
 
   const useLineSplit = languageMode === LANGUAGE_MODE_JA || isPreHighlightBlock(highlightBlock);
@@ -7102,6 +7131,7 @@ function resolveHighlightTextContext(highlightBlock, languageMode, clientX, clie
   }
 
   // §39 AI-1 / §42 JA-1: <p> は段落全文で segment 化し buildLogicalChunks で句点分割
+  // （先頭構造 b/strong ラベル付きは §15.2 G-1b で行分割を先に適用）
   if (
     isElementHighlightBlock(highlightBlock) &&
     highlightBlock.element &&
@@ -7121,6 +7151,12 @@ function resolveHighlightTextContext(highlightBlock, languageMode, clientX, clie
         clientY
       );
       if (brListLine) return brListLine;
+      const blockLabelLine = resolveParagraphBlockLabelLineTextContext(
+        highlightBlock.element,
+        clientX,
+        clientY
+      );
+      if (blockLabelLine) return blockLabelLine;
     }
     return collectHighlightBlockTextSegments(highlightBlock);
   }
