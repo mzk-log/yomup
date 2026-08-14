@@ -2104,14 +2104,102 @@ function isHighlightExcludedCodeElement(el) {
 function getPointReferenceNode(clientX, clientY) {
   const range = caretRangeFromClientXY(clientX, clientY);
   let node = range ? range.startContainer : null;
-  if (node && node.nodeType === Node.TEXT_NODE) {
-    return node;
+  // §69 IK-1c: 広告殻上の caret（script/CDATA）は無視し、下の本文ヒットを使う
+  if (node && !isNodeInHighlightIgnoredShell(node)) {
+    if (node.nodeType === Node.TEXT_NODE || node.nodeType === Node.ELEMENT_NODE) {
+      return node;
+    }
   }
-  if (node && node.nodeType === Node.ELEMENT_NODE) {
-    return node;
+  return getNonShellElementFromPoint(clientX, clientY);
+}
+
+function getNonShellElementFromPoint(clientX, clientY) {
+  if (typeof document.elementsFromPoint === 'function') {
+    const stack = document.elementsFromPoint(clientX, clientY);
+    for (let i = 0; i < stack.length; i++) {
+      const el = stack[i];
+      if (!el || el === document.documentElement || el === document.body) continue;
+      if (isYomupUiElement(el) || isHighlightIgnoredShellElement(el)) continue;
+      return el;
+    }
   }
   const hit = document.elementFromPoint(clientX, clientY);
-  return hit || null;
+  if (hit && !isHighlightIgnoredShellElement(hit)) return hit;
+  return null;
+}
+
+function isHighlightIgnoredShellElement(el) {
+  if (!el || el.nodeType !== Node.ELEMENT_NODE || !el.closest) return false;
+  if (el.tagName === 'SCRIPT' || el.tagName === 'STYLE' || el.tagName === 'NOSCRIPT') {
+    return true;
+  }
+  if (
+    el.closest(
+      '.c-ad-information, .c-ad_container, [id^="div-gpt-"], [id*="google_ads_iframe"]'
+    )
+  ) {
+    return true;
+  }
+  // いこーよ情報枠: class が c-information のみでも GPT/script 殻なら除外
+  if (el.classList && el.classList.contains('c-information')) {
+    if (
+      el.querySelector('[id^="div-gpt-"], iframe[src*="googlesyndication"], iframe[src*="doubleclick"]') ||
+      /googletag|google_ads|<\!\[CDATA\[/i.test(el.textContent || '')
+    ) {
+      return true;
+    }
+  }
+  if (el.tagName === 'IFRAME') {
+    const src = el.getAttribute('src') || '';
+    if (/googlesyndication|doubleclick|googletag|safeframe/i.test(src)) return true;
+  }
+  // script/CDATA 本文だけの殻（class 揺れ・未ロード広告）
+  const headText = (el.textContent || '').trim().slice(0, 120);
+  if (
+    /^\/\/\s*<!\[CDATA\[/.test(headText) ||
+    /googletag\.cmd\.push/.test(headText) ||
+    /^[\s\/]*googletag\b/.test(headText)
+  ) {
+    return true;
+  }
+  return false;
+}
+
+function isNodeInHighlightIgnoredShell(node) {
+  if (!node) return false;
+  const el = node.nodeType === Node.TEXT_NODE ? node.parentElement : node;
+  return !!(el && isHighlightIgnoredShellElement(el));
+}
+
+function recoverHighlightBlockFromHitStack(clientX, clientY) {
+  if (typeof document.elementsFromPoint !== 'function') return null;
+  const stack = document.elementsFromPoint(clientX, clientY);
+  for (let i = 0; i < stack.length; i++) {
+    let node = stack[i];
+    if (!node || isYomupUiElement(node) || isHighlightIgnoredShellElement(node)) continue;
+    while (node && node !== document.body && node !== document.documentElement) {
+      if (isHighlightIgnoredShellElement(node)) break;
+      if (isYomupUiElement(node) || isEditableElement(node)) break;
+      if (
+        node.tagName === 'DIV' &&
+        isLeafTextDivElement(node) &&
+        !isLeafTextDivExcludedContext(node) &&
+        inlineTextHostAcceptsHoverPoint(node, clientX, clientY)
+      ) {
+        return { mode: 'inline-text', element: node };
+      }
+      if (node.tagName && isHeadingSectionTag(node.tagName) && (node.textContent || '').trim()) {
+        return { mode: 'element', element: node };
+      }
+      if (isBlockHighlightContainer(node) && (node.textContent || '').trim()) {
+        if (!(node.tagName === 'LI' && isRichMultiUnitListItem(node))) {
+          return { mode: 'element', element: node };
+        }
+      }
+      node = node.parentElement;
+    }
+  }
+  return null;
 }
 
 function isNodeInsideTable(node) {
@@ -2344,19 +2432,31 @@ function resolveHeadingChildTextHostAtPoint(headingEl, clientX, clientY) {
     node = node.parentElement;
   }
   if (!node) {
-    node = document.elementFromPoint(clientX, clientY);
+    node = getNonShellElementFromPoint(clientX, clientY) || document.elementFromPoint(clientX, clientY);
   }
 
   while (node && node !== headingEl) {
     if (isYomupUiElement(node) || isEditableElement(node)) return null;
+    if (isHighlightIgnoredShellElement(node)) {
+      node = node.parentElement;
+      continue;
+    }
     if (node.parentElement === headingEl && (node.textContent || '').trim()) {
+      const accepts =
+        getContainingTextRectsForPoint(node, clientX, clientY).length > 0 ||
+        inlineTextHostAcceptsHoverPoint(node, clientX, clientY) ||
+        (typeof elementVisuallyContainsPoint === 'function' &&
+          elementVisuallyContainsPoint(node, clientX, clientY));
+      if (!accepts) {
+        node = node.parentElement;
+        continue;
+      }
       if (node.tagName === 'SPAN' || isInlineTextHostElement(node)) {
-        if (
-          getContainingTextRectsForPoint(node, clientX, clientY).length > 0 ||
-          inlineTextHostAcceptsHoverPoint(node, clientX, clientY)
-        ) {
-          return node;
-        }
+        return node;
+      }
+      // §69: 天気 H4 等 — 直下 div（予報地点・日付）を見出し全体より優先
+      if (node.tagName === 'DIV') {
+        return node;
       }
     }
     node = node.parentElement;
@@ -2535,7 +2635,7 @@ function findContentTableCellInnerBlockFromPoint(clientX, clientY, tableCell) {
   if (isLayoutTableCell(tableCell)) return null;
 
   // ヒット要素の祖先を優先（option-item 上で下層 LI を elementsFromPoint 誤拾いしない）
-  let node = getPointReferenceNode(clientX, clientY) || document.elementFromPoint(clientX, clientY);
+  let node = getPointReferenceNode(clientX, clientY) || getNonShellElementFromPoint(clientX, clientY);
   if (node && node.nodeType === Node.TEXT_NODE) {
     node = node.parentElement;
   }
@@ -2694,13 +2794,14 @@ function findDeepestListItemFromPoint(clientX, clientY) {
 }
 
 function findBlockAncestorFromPoint(clientX, clientY) {
-  const pointNode = getPointReferenceNode(clientX, clientY) || document.elementFromPoint(clientX, clientY);
+  const pointNode = getPointReferenceNode(clientX, clientY) || getNonShellElementFromPoint(clientX, clientY);
   if (isLikelyNikkeiPrAdRoot(pointNode)) return null;
   // §4.5.2: FAQ 内は findFaqAnswerBlockFromPoint に委ねる（P 祖先より先）
   if (isWithinFaqAnswerRegion(pointNode)) return null;
 
   const deepestLi = findDeepestListItemFromPoint(clientX, clientY);
-  if (deepestLi) return deepestLi;
+  // §69 IK-2: 複合一覧カード LI は丸ごと block にしない（leaf/inline に委譲）
+  if (deepestLi && !isRichMultiUnitListItem(deepestLi)) return deepestLi;
 
   let node = getPointReferenceNode(clientX, clientY);
   if (node && node.nodeType === Node.TEXT_NODE) {
@@ -2716,7 +2817,14 @@ function findBlockAncestorFromPoint(clientX, clientY) {
       node = node.parentElement;
       continue;
     }
-    if (isBlockHighlightContainer(node)) return node;
+    if (isBlockHighlightContainer(node)) {
+      // §69 IK-2: 複合一覧カード LI は block 祖先として採用しない
+      if (node.tagName === 'LI' && isRichMultiUnitListItem(node)) {
+        node = node.parentElement;
+        continue;
+      }
+      return node;
+    }
     node = node.parentElement;
   }
   return null;
@@ -2725,6 +2833,7 @@ function findBlockAncestorFromPoint(clientX, clientY) {
 function isHitStackBlockCandidate(el) {
   if (isYomupUiElement(el) || isEditableElement(el)) return false;
   if (isHighlightExcludedCodeElement(el)) return false;
+  if (isHighlightIgnoredShellElement(el)) return false;
   if (isGhostOverlayLink(el)) return false;
   if (isLikelyNikkeiPrAdRoot(el)) return false;
   if (isNodeInsideTable(el) && el.tagName !== 'TD' && el.tagName !== 'TH') return false;
@@ -2739,7 +2848,7 @@ function isHitStackBlockCandidate(el) {
 
 // 祖先探索で拾えないブロック（大きな <a> ラップ内の P 等）をヒットスタックから補完
 function findBlockInHitStackFromPoint(clientX, clientY) {
-  const pointNode = getPointReferenceNode(clientX, clientY) || document.elementFromPoint(clientX, clientY);
+  const pointNode = getPointReferenceNode(clientX, clientY) || getNonShellElementFromPoint(clientX, clientY);
   if (isWithinUiChromeRegion(pointNode)) return null;
   if (isLikelyNikkeiPrAdRoot(pointNode)) return null;
 
@@ -4063,7 +4172,16 @@ function isInnerCardCellTextDiv(el) {
   if (!el || el.tagName !== 'DIV') return false;
   if (isYomupUiElement(el) || isEditableElement(el)) return false;
   if (isHighlightExcludedCodeElement(el)) return false;
-  return !!(el.textContent || '').trim();
+  if (!(el.textContent || '').trim()) return false;
+  // §69 IK-2: 施設カード content 等 — 入れ子の葉テキストが複数なら「本文1枚」ではない
+  let nestedLeaf = 0;
+  const divs = el.getElementsByTagName('div');
+  for (let i = 0; i < divs.length; i++) {
+    if (!isLeafTextDivStructure(divs[i])) continue;
+    nestedLeaf++;
+    if (nestedLeaf >= 2) return false;
+  }
+  return true;
 }
 
 function hasOnlyInnerCardCellAllowedExtraDirectChildren(el) {
@@ -4268,6 +4386,7 @@ function isPageLayoutColumnDiv(el) {
 // §29: 内側2段カード（見出し div + 本文 div）
 function isInnerCardCellStructure(el) {
   if (!el || el.tagName !== 'DIV') return false;
+  if (isHighlightIgnoredShellElement(el)) return false;
   if (isYomupUiElement(el) || isEditableElement(el)) return false;
   if (isHighlightExcludedCodeElement(el)) return false;
   if (hasDirectHeadingChild(el)) return false;
@@ -4332,6 +4451,10 @@ function findInnerCardCellBlockFromPoint(clientX, clientY) {
 
   while (node && node !== document.body && node !== document.documentElement) {
     if (isYomupUiElement(node) || isEditableElement(node)) return null;
+    if (isHighlightIgnoredShellElement(node)) {
+      node = node.parentElement;
+      continue;
+    }
     if (isInnerCardCellStructure(node)) {
       const unit = resolveInnerCardCellTextUnit(node, caretNode || node, clientX, clientY);
       if (unit) {
@@ -4431,6 +4554,7 @@ function liContainsInnerCardCellAtPoint(liEl, clientX, clientY) {
 // grid 内カード親: 構造のみ（全文の字数上限は子 div で判定）
 function isCardCellStructure(el) {
   if (!el || el.tagName !== 'DIV') return false;
+  if (isHighlightIgnoredShellElement(el)) return false;
   if (isInnerCardCellStructure(el)) return false;
   if (isFeatureIconCardBlock(el)) return false;
   if (isAggregateFeatureColumnElement(el)) return false;
@@ -4450,7 +4574,13 @@ function isCardCellStructure(el) {
     if (cls.includes('col-span') || cls.includes('space-y-')) return false;
     if (isAggregateFeatureColumnElement(textDivChildren[i])) return false;
   }
-  if (textDivChildren.length < CARD_CELL_MIN_TEXT_DIVS) return false;
+  // §69 IK-1b: レイアウト殻（l-page 等）は長文子 div を含むため
+  // 「テキスト付き直下 div≥2」だけでは誤認する。短文 unit が実際に2つ以上あること。
+  let unitDivCount = 0;
+  for (let i = 0; i < textDivChildren.length; i++) {
+    if (isCardCellTextUnit(textDivChildren[i])) unitDivCount++;
+  }
+  if (unitDivCount < CARD_CELL_MIN_TEXT_DIVS) return false;
   if (el.children.length > CARD_CELL_MAX_DIRECT_CHILDREN) return false;
   return countSiblingDivsWithText(el) >= CARD_CELL_MIN_SIBLING_DIVS;
 }
@@ -4949,6 +5079,10 @@ function findCardCellBlockFromPoint(clientX, clientY) {
 
   while (node && node !== document.body && node !== document.documentElement) {
     if (isYomupUiElement(node) || isEditableElement(node)) return null;
+    if (isHighlightIgnoredShellElement(node)) {
+      node = node.parentElement;
+      continue;
+    }
     if (isCardCellStructure(node)) {
       const unit = resolveCardCellTextUnit(node, caretNode || node, clientX, clientY);
       if (unit) {
@@ -5592,7 +5726,10 @@ function findBrOnlyDivBlockFromPoint(clientX, clientY) {
   return null;
 }
 
-function isLeafTextDivElement(el) {
+// §69 IK-1: 句点分割可能な長文葉 div の絶対上限（レイアウト捨て DOM 誤認防止）
+const MAX_LEAF_TEXT_DIV_PROSE_LENGTH = 500;
+
+function isLeafTextDivStructure(el) {
   if (!el || el.tagName !== 'DIV') return false;
   if (isYomupUiElement(el) || isEditableElement(el)) return false;
   if (isHighlightExcludedCodeElement(el)) return false;
@@ -5600,15 +5737,55 @@ function isLeafTextDivElement(el) {
   if (hasDirectElementChild(el) && !hasOnlyDecorativeMediaElementChildren(el)) {
     if (!hasOnlyNonBrPhrasingDirectElementChildren(el)) return false;
   }
-  const text = (el.textContent || '').trim();
+  return !!(el.textContent || '').trim();
+}
+
+function canChunkLeafTextDivProse(text) {
   if (!text) return false;
-  if (text.length > MAX_TEXT_LENGTH_FOR_HIGHLIGHT + HIGHLIGHT_UNIT_SLACK_JA) return false;
-  if (countWords(text) > MAX_WORDS_FOR_HIGHLIGHT + HIGHLIGHT_UNIT_SLACK_EN) return false;
-  return true;
+  if (/[。！？]/.test(text)) return true;
+  return countWords(text) > MAX_WORDS_FOR_HIGHLIGHT + HIGHLIGHT_UNIT_SLACK_EN;
+}
+
+function isLeafTextDivElement(el) {
+  if (!isLeafTextDivStructure(el)) return false;
+  const text = (el.textContent || '').trim();
+  const maxJa = MAX_TEXT_LENGTH_FOR_HIGHLIGHT + HIGHLIGHT_UNIT_SLACK_JA;
+  const maxEn = MAX_WORDS_FOR_HIGHLIGHT + HIGHLIGHT_UNIT_SLACK_EN;
+  if (text.length <= maxJa && countWords(text) <= maxEn) return true;
+  // §69 IK-1: 短文上限超でも句点／語境界で分割できる葉 prose は許可
+  if (text.length > MAX_LEAF_TEXT_DIV_PROSE_LENGTH) return false;
+  return canChunkLeafTextDivProse(text);
+}
+
+// §69 IK-2: 見出し＋複数テキスト塊の一覧カード LI（いこーよ施設カード等）
+function isRichMultiUnitListItem(li) {
+  if (!li || li.tagName !== 'LI') return false;
+  if (isYomupUiElement(li) || isEditableElement(li)) return false;
+  if (isFlowStepListItemStructure(li)) return false;
+
+  let hasHeading = false;
+  const headingNodes = li.querySelectorAll('h1, h2, h3, h4, h5, h6');
+  for (let i = 0; i < headingNodes.length; i++) {
+    if ((headingNodes[i].textContent || '').trim()) {
+      hasHeading = true;
+      break;
+    }
+  }
+
+  let leafCount = 0;
+  const divs = li.getElementsByTagName('div');
+  for (let i = 0; i < divs.length; i++) {
+    if (isLeafTextDivStructure(divs[i])) leafCount++;
+  }
+
+  if (hasHeading && leafCount >= 1) return true;
+  if (leafCount >= 2) return true;
+  return false;
 }
 
 function isLeafTextDivExcludedContext(el) {
   if (!el) return true;
+  if (isHighlightIgnoredShellElement(el)) return true;
   if (isNodeInsideTable(el)) return true;
   if (isWithinUiChromeRegion(el)) return true;
 
@@ -5637,6 +5814,9 @@ function isLeafTextDivExcludedContext(el) {
   let cardAncestor = el.parentElement;
   while (cardAncestor && cardAncestor !== document.body && cardAncestor !== document.documentElement) {
     if (isCardCellStructure(cardAncestor) || isInnerCardCellStructure(cardAncestor)) {
+      // §69 IK-2: 複合一覧 LI 内の葉は card/inner-card 祖先でも許可（unit 誤認時の不発防止）
+      const richLi = el.closest && el.closest('li');
+      if (richLi && isRichMultiUnitListItem(richLi)) return false;
       return !(cardAncestor === el.parentElement && el.tagName === 'DIV');
     }
     cardAncestor = cardAncestor.parentElement;
@@ -5653,7 +5833,10 @@ function findLeafTextDivBlockFromPoint(clientX, clientY) {
     node = node.parentElement;
   }
   if (!node) {
-    node = document.elementFromPoint(clientX, clientY);
+    node = getNonShellElementFromPoint(clientX, clientY);
+  }
+  if (node && isHighlightIgnoredShellElement(node)) {
+    node = getNonShellElementFromPoint(clientX, clientY);
   }
 
   while (node && node !== document.body && node !== document.documentElement) {
@@ -6016,6 +6199,15 @@ function findPreBlockFromPoint(clientX, clientY) {
 }
 
 function findHighlightBlockFromPoint(clientX, clientY) {
+  const block = findHighlightBlockFromPointCore(clientX, clientY);
+  if (block && block.element && isHighlightIgnoredShellElement(block.element)) {
+    logUnderlineTrace('block-reject-shell', summarizeHighlightBlockForTrace(block));
+    return recoverHighlightBlockFromHitStack(clientX, clientY);
+  }
+  return block;
+}
+
+function findHighlightBlockFromPointCore(clientX, clientY) {
   // 表セル内の pre はセル全体ではなく pre 単位で行分割する
   const preBlock = findPreBlockFromPoint(clientX, clientY);
   if (preBlock) {
@@ -6042,7 +6234,7 @@ function findHighlightBlockFromPoint(clientX, clientY) {
   const aozoraBlock = findAozoraHighlightBlockFromPoint(clientX, clientY);
   if (aozoraBlock) return aozoraBlock;
 
-  const pointNode = getPointReferenceNode(clientX, clientY) || document.elementFromPoint(clientX, clientY);
+  const pointNode = getPointReferenceNode(clientX, clientY) || getNonShellElementFromPoint(clientX, clientY);
 
   // §4.5.2: FAQ — block 祖先（P）より先に faq-answer 経路へ
   if (isWithinFaqAnswerRegion(pointNode)) {
@@ -6102,10 +6294,8 @@ function findHighlightBlockFromPoint(clientX, clientY) {
   const multiLineStepLine = findMultiLineStepCardLineFromPoint(clientX, clientY);
   if (multiLineStepLine) return multiLineStepLine;
 
-  const innerCardCell = findInnerCardCellBlockFromPoint(clientX, clientY);
-  if (innerCardCell) return innerCardCell;
-
   // §38 N-N1: 複合 <a>（直下 span のみ）— span テキスト上のみ。列間 gap は不発
+  // §69: rich-list 葉より先（西川 categories G06 退行防止）
   let compositeAnchorNode = pointNode;
   if (compositeAnchorNode && compositeAnchorNode.nodeType === Node.TEXT_NODE) {
     compositeAnchorNode = compositeAnchorNode.parentElement;
@@ -6125,11 +6315,28 @@ function findHighlightBlockFromPoint(clientX, clientY) {
     }
   }
 
+  // §69: 葉 div は inner-card / deepestLi より先
+  // - LI 外（導入文 c-container 等 / IK-1）
+  // - 複合一覧カード内（IK-2）
+  const earlyLeafText = findLeafTextDivBlockFromPoint(clientX, clientY);
+  if (earlyLeafText && earlyLeafText.element) {
+    const leafLi =
+      earlyLeafText.element.closest && earlyLeafText.element.closest('li');
+    if (!leafLi || isRichMultiUnitListItem(leafLi)) {
+      return earlyLeafText;
+    }
+  }
+
+  const innerCardCell = findInnerCardCellBlockFromPoint(clientX, clientY);
+  if (innerCardCell) return innerCardCell;
+
   const deepestLi = findDeepestListItemFromPoint(clientX, clientY);
   if (deepestLi) {
     if (
       !isFlowStepListItemStructure(deepestLi) &&
-      !liContainsInnerCardCellAtPoint(deepestLi, clientX, clientY)
+      !liContainsInnerCardCellAtPoint(deepestLi, clientX, clientY) &&
+      // §69 IK-2: 複合一覧カードは LI 丸ごと点灯せず後段の leaf/inline へ
+      !isRichMultiUnitListItem(deepestLi)
     ) {
       return { mode: 'element', element: deepestLi };
     }
@@ -7510,6 +7717,21 @@ function summarizeHighlightBlockForTrace(block) {
 }
 
 function logUnderlineTrace(phase, payload) {
+  try {
+    const root =
+      (typeof ensureHighlightOverlayRoot === 'function'
+        ? ensureHighlightOverlayRoot()
+        : document.getElementById('yomup-highlight-overlay-root')) ||
+      document.getElementById('yomup-highlight-overlay-root');
+    if (root) {
+      root.setAttribute(
+        'data-yomup-probe',
+        JSON.stringify({ phase: phase, payload: payload, t: Date.now() })
+      );
+    }
+  } catch (_e) {
+    /* ignore probe mirror errors */
+  }
   if (!isHighlightUnderlineTraceEnabled()) return;
   console.log('[YomuP:underline]', phase, payload);
 }
@@ -8385,7 +8607,10 @@ function tryHighlightLogicalBlockAtPoint(clientX, clientY) {
       isDlDescAggregateDiv(highlightBlock.element)
     ) {
       const dlDescUnit = resolveDlDescUnitAtPoint(clientX, clientY);
-      if (!dlDescUnit) return false;
+      if (!dlDescUnit) {
+        logUnderlineTrace('block-miss', { x: clientX, y: clientY, reason: 'dl-desc-unit-null' });
+        return false;
+      }
       highlightBlock = { mode: 'element', element: dlDescUnit };
     }
 
@@ -8393,6 +8618,12 @@ function tryHighlightLogicalBlockAtPoint(clientX, clientY) {
       isInlineTextHighlightBlock(highlightBlock) &&
       !inlineTextHostAcceptsHoverPoint(highlightBlock.element, clientX, clientY)
     ) {
+      logUnderlineTrace('block-miss', {
+        x: clientX,
+        y: clientY,
+        reason: 'inline-text-rejects-point',
+        host: summarizeHighlightBlockForTrace(highlightBlock)
+      });
       return false;
     }
 
@@ -8409,10 +8640,26 @@ function tryHighlightLogicalBlockAtPoint(clientX, clientY) {
       );
     }
 
-    const whole =
+    let whole =
       layoutLineContext && layoutLineContext.blockText.trim() && layoutLineContext.segments.length > 0
         ? layoutLineContext
         : collectHighlightBlockTextSegments(highlightBlock);
+    if (!whole.blockText.trim() || whole.segments.length === 0) {
+      const recovered = recoverHighlightBlockFromHitStack(clientX, clientY);
+      if (
+        recovered &&
+        recovered.element &&
+        (!highlightBlock.element || recovered.element !== highlightBlock.element)
+      ) {
+        logUnderlineTrace('block-recover-empty', {
+          from: summarizeHighlightBlockForTrace(highlightBlock),
+          to: summarizeHighlightBlockForTrace(recovered)
+        });
+        highlightBlock = recovered;
+        layoutLineContext = null;
+        whole = collectHighlightBlockTextSegments(highlightBlock);
+      }
+    }
     if (!whole.blockText.trim() || whole.segments.length === 0) {
       logUnderlineTrace('block-miss', {
         x: clientX,
@@ -8433,7 +8680,15 @@ function tryHighlightLogicalBlockAtPoint(clientX, clientY) {
       : layoutLineContext && layoutLineContext.blockText.trim() && layoutLineContext.segments.length > 0
         ? layoutLineContext
         : resolveHighlightTextContext(highlightBlock, languageMode, clientX, clientY);
-    if (!blockText.trim() || segments.length === 0) return false;
+    if (!blockText.trim() || segments.length === 0) {
+      logUnderlineTrace('block-miss', {
+        x: clientX,
+        y: clientY,
+        reason: 'empty-resolved-text-context',
+        host: summarizeHighlightBlockForTrace(highlightBlock)
+      });
+      return false;
+    }
 
     let chunk;
     let chunks;
@@ -8443,13 +8698,24 @@ function tryHighlightLogicalBlockAtPoint(clientX, clientY) {
         chunk = chunks[0];
       } else {
         chunk = buildGhostCardLeadChunk(blockText, languageMode);
-        if (!chunk) return false;
+        if (!chunk) {
+          logUnderlineTrace('block-miss', { x: clientX, y: clientY, reason: 'ghost-lead-chunk-null' });
+          return false;
+        }
         chunks = buildLogicalChunks(blockText, languageMode);
       }
     } else {
       let offset = getCaretOffsetInBlock(highlightBlock, segments, clientX, clientY);
       if (offset < 0) {
-        if (isInlineTextHighlightBlock(highlightBlock)) return false;
+        if (isInlineTextHighlightBlock(highlightBlock)) {
+          logUnderlineTrace('block-miss', {
+            x: clientX,
+            y: clientY,
+            reason: 'caret-offset-inline',
+            host: summarizeHighlightBlockForTrace(highlightBlock)
+          });
+          return false;
+        }
         offset = Math.floor(blockText.length / 2);
       }
 
@@ -8467,11 +8733,26 @@ function tryHighlightLogicalBlockAtPoint(clientX, clientY) {
       }
     }
 
-    if (!chunk || !chunk.text.trim()) return false;
-    if (!withinHighlightLimit(chunk.text, languageMode)) return false;
+    if (!chunk || !chunk.text.trim()) {
+      logUnderlineTrace('block-miss', { x: clientX, y: clientY, reason: 'chunk-empty' });
+      return false;
+    }
+    if (!withinHighlightLimit(chunk.text, languageMode)) {
+      logUnderlineTrace('block-miss', {
+        x: clientX,
+        y: clientY,
+        reason: 'over-highlight-limit',
+        chunk: chunk.text.slice(0, 80),
+        len: chunk.text.trim().length
+      });
+      return false;
+    }
 
     const range = createRangeForChunk(segments, chunk.start, chunk.end);
-    if (!range) return false;
+    if (!range) {
+      logUnderlineTrace('block-miss', { x: clientX, y: clientY, reason: 'range-null' });
+      return false;
+    }
     const chunkRects = getClientRectsForChunkSegments(segments, chunk.start, chunk.end);
     if (
       !useGhostCardLeadChunk &&
@@ -8582,7 +8863,15 @@ function tryHighlightLogicalBlockAtPoint(clientX, clientY) {
     } else {
       overlayApplied = applyHighlightOverlay(range, clipBounds, overlayRects, overlayHostElement, underlineOptions);
     }
-    if (!overlayApplied) return false;
+    if (!overlayApplied) {
+      logUnderlineTrace('block-miss', {
+        x: clientX,
+        y: clientY,
+        reason: 'overlay-not-applied',
+        host: summarizeHighlightBlockForTrace(highlightBlock)
+      });
+      return false;
+    }
 
     const units = countUnits(chunk.text, languageMode);
     const progressTarget = captureHighlightProgressTarget(highlightBlock, chunk);
@@ -8598,9 +8887,16 @@ function tryHighlightLogicalBlockAtPoint(clientX, clientY) {
       chunk.end,
       units
     );
+    logUnderlineTrace('applied', {
+      x: clientX,
+      y: clientY,
+      host: summarizeHighlightBlockForTrace(highlightBlock),
+      chunk: chunk.text.slice(0, 80)
+    });
     return true;
   } catch (err) {
     debugError('tryHighlightLogicalBlockAtPoint:', err);
+    logUnderlineTrace('block-miss', { x: clientX, y: clientY, reason: 'exception', message: String(err && err.message || err) });
     return false;
   }
 }

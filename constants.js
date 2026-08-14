@@ -40,7 +40,7 @@ const DONATION_KOFI_URL = 'https://ko-fi.com/mzk_log';
 // デバッグログ出力の有効/無効（コンパイルスイッチ）
 const ENABLE_DEBUG_LOG = false; // true: 有効, false: 無効（本番環境）
 // フェーズ0: 下線ずれ調査。P0 完了後 false（§34 EH-1・2026-06-28）
-const ENABLE_HIGHLIGHT_UNDERLINE_TRACE = false;
+const ENABLE_HIGHLIGHT_UNDERLINE_TRACE = true;
 
 // テキストハイライトの文字数制限（日本語）
 const MAX_TEXT_LENGTH_FOR_HIGHLIGHT = 100;
@@ -164,4 +164,6 @@ if (typeof window !== 'undefined') {
   window.ENABLE_UI_LOCALE_OVERRIDE = ENABLE_UI_LOCALE_OVERRIDE;
   window.LOCALSTRG_UI_LOCALE_OVERRIDE = LOCALSTRG_UI_LOCALE_OVERRIDE;
 }
+
+
 
