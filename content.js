@@ -17,8 +17,131 @@ const processedElementCache = new Set();
 
 // ハイライト処理のマウスカーソル機能
 let highLightOnOff = false; // 機能が有効かどうかのフラグ
+let highlightListenersAttached = false; // attach/detach の二重登録防止
 let currentHighlightedElement = null; // 現在ハイライトされている要素
 let mouseTimeoutForHighlight = null; // マウスが250ms間動かなかった場合のタイマー
+
+// §71 RK-2: トップ以外（iframe）では UI を出さずハイライト同期のみ
+function isTopBrowsingContext() {
+  try {
+    return window === window.top;
+  } catch (_e) {
+    // cross-origin で top に触れない場合はフレーム側として扱う
+    return false;
+  }
+}
+
+function shouldSkipSubframeHighlightBootstrap() {
+  if (isTopBrowsingContext()) return false;
+  try {
+    const host = location.hostname || '';
+    // 広告・計測系 iframe は初期化を省略（§71）
+    if (
+      /doubleclick|googlesyndication|googletagmanager|criteo|rokt\.com|rokt-api|facebook\.com|scorecardresearch|taboola|outbrain|amazon-adsystem|adservice\./i.test(
+        host
+      ) ||
+      (/ias\.rakuten\.co\.jp/i.test(host) && /\/gw\.js/i.test(location.pathname + location.search))
+    ) {
+      return true;
+    }
+    // 極小フレームは初期化を省略
+    if (window.innerWidth > 0 && window.innerHeight > 0) {
+      if (window.innerWidth < 40 || window.innerHeight < 40) return true;
+    }
+  } catch (_e) {
+    return true;
+  }
+  return false;
+}
+
+function persistHighlightOnOffToChromeStorage(enabled) {
+  try {
+    if (!chrome?.storage?.local) return;
+    chrome.storage.local.set({ [CHROME_STORAGE_HIGHLIGHT_ONOFF]: !!enabled });
+  } catch (_e) {
+    /* ignore storage write errors */
+  }
+}
+
+function syncHighlightButtonUi() {
+  if (!isTopBrowsingContext()) return;
+  try {
+    const host = document.getElementById(ID_YOMUP_POPUP_CONTAINER);
+    const img = host?.shadowRoot?.querySelector('.lightbulb-button img');
+    if (!img) return;
+    if (highLightOnOff) img.classList.add('active');
+    else img.classList.remove('active');
+  } catch (_e) {
+    /* ignore */
+  }
+}
+
+function setHighlightModeEnabled(enabled, options) {
+  const next = !!enabled;
+  const skipPersist = !!(options && options.skipPersist);
+  const changed = next !== highLightOnOff;
+  highLightOnOff = next;
+  if (!skipPersist) {
+    try {
+      localStorage.setItem(LOCALSTRG_HIGHLIGHT_ONOFF, highLightOnOff.toString());
+    } catch (_e) {
+      /* ignore */
+    }
+    persistHighlightOnOffToChromeStorage(highLightOnOff);
+  }
+  if (highLightOnOff) {
+    attachHighlightListeners();
+  } else {
+    clearCurrentHighlight();
+    detachHighlightListeners();
+  }
+  if (changed) syncHighlightButtonUi();
+}
+
+function applySharedHighlightOnOff(enabled) {
+  setHighlightModeEnabled(enabled, { skipPersist: true });
+}
+
+function bootstrapSharedHighlightState() {
+  if (shouldSkipSubframeHighlightBootstrap()) return;
+  try {
+    if (!chrome?.storage?.local) return;
+    chrome.storage.local.get([CHROME_STORAGE_HIGHLIGHT_ONOFF], (result) => {
+      try {
+        if (chrome.runtime?.lastError) return;
+        let enabled = result && result[CHROME_STORAGE_HIGHLIGHT_ONOFF];
+        if (typeof enabled !== 'boolean') {
+          // 未移行: トップの localStorage を種にしつつ、iframe は storage 待ち
+          if (isTopBrowsingContext()) {
+            enabled = localStorage.getItem(LOCALSTRG_HIGHLIGHT_ONOFF) === 'true';
+            persistHighlightOnOffToChromeStorage(enabled);
+          } else {
+            enabled = false;
+          }
+        }
+        if (enabled) applySharedHighlightOnOff(true);
+      } catch (_e) {
+        /* ignore */
+      }
+    });
+  } catch (_e) {
+    /* ignore */
+  }
+}
+
+function bindSharedHighlightStorageListener() {
+  try {
+    if (!chrome?.storage?.onChanged) return;
+    chrome.storage.onChanged.addListener((changes, areaName) => {
+      if (areaName !== 'local') return;
+      const change = changes && changes[CHROME_STORAGE_HIGHLIGHT_ONOFF];
+      if (!change) return;
+      applySharedHighlightOnOff(!!change.newValue);
+    });
+  } catch (_e) {
+    /* ignore */
+  }
+}
 
 //ポップアップ内ストップウォッチ
 let stopwatchOnOff = false; // ストップウォッチUI表示中かどうかのフラグ
@@ -188,6 +311,15 @@ if (document.readyState === 'loading') {
 function init() {
   debugLog('拡張機能のContent Scriptが読み込まれました');
 
+  bindSharedHighlightStorageListener();
+
+  // §71: iframe はポップアップ復元なし。共有ハイライトのみ同期
+  if (!isTopBrowsingContext()) {
+    bootstrapSharedHighlightState();
+    sessionStorage.removeItem(SESSIONSTRG_PAGE_TRANSITION);
+    return;
+  }
+
   // ページ遷移時かブラウザ起動時かを判定（sessionStorageを使用）
   const pageTransitionFlag = sessionStorage.getItem(SESSIONSTRG_PAGE_TRANSITION);
   isPageTransition = pageTransitionFlag === 'true';
@@ -204,11 +336,15 @@ function init() {
     if (savedHighLight === 'true') {
       highLightOnOff = true;
       attachHighlightListeners(); // 復元時にリスナーを追加
+      persistHighlightOnOffToChromeStorage(true);
     }
 
     // サブポップアップボタン
     const savedSubPopup = localStorage.getItem(LOCALSTRG_SUBPOPUP_ONOFF);
     if (savedSubPopup === 'true') subPopupOnOff = true;
+  } else {
+    // トップ: storage と localStorage の初期同期（iframe 用の種）
+    bootstrapSharedHighlightState();
   }
 
   if (isPageTransition && isPopupMainVisible === 'true') {
@@ -242,7 +378,10 @@ chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
 
   // 読むプが選択された場合（右クリックメニュー）
   if (request && request.action === 'executeYomuP') {
-    executeYomuP(); // 読むプの処理を実行
+    // §71: iframe にはポップアップを出さない（トップのみ）
+    if (isTopBrowsingContext()) {
+      executeYomuP();
+    }
   }
 
   // レスポンスを返す
@@ -254,6 +393,8 @@ chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
 
 // === 読むプ本体処理 =========================================================
 function executeYomuP() {
+  if (!isTopBrowsingContext()) return;
+
   // ポップアップが表示されているかどうかを確認
   const existingPopup = document.getElementById(ID_YOMUP_POPUP_CONTAINER);
   
@@ -1579,17 +1720,11 @@ function hideYomuPPopup(preserveModes = false) {
 
 // === ハイライト処理モードをトグルON/OFFする関数 ===============================
 function toggleHighlightMode() {
-  highLightOnOff = !highLightOnOff; // 状態を反転
-  localStorage.setItem(LOCALSTRG_HIGHLIGHT_ONOFF, highLightOnOff.toString());
-
+  setHighlightModeEnabled(!highLightOnOff);
   if (highLightOnOff) {
     debugLog('Highlightモードが有効になりました');
-    attachHighlightListeners(); // イベントリスナーを追加
   } else {
-    // 現在のハイライトをクリア
-    clearCurrentHighlight();
     debugLog('Highlightモードが無効になりました');
-    detachHighlightListeners(); // イベントリスナーを削除
   }
 }
 
@@ -2630,6 +2765,7 @@ function findLayoutTableCellInnerBlockFromPoint(clientX, clientY, tableCell) {
 }
 
 // §49 MS-4: 長文条件 TD（直下 DIV のみ）はセル全文が上限超過で不発 → 内側 LI / P を優先
+// §70 RK-1: 画像+タイトル型トピックス等 — セル全文1チャンク上限超過を避けるため inline を先に
 function findContentTableCellInnerBlockFromPoint(clientX, clientY, tableCell) {
   if (!tableCell || !isTableCellHighlightHost(tableCell)) return null;
   if (isLayoutTableCell(tableCell)) return null;
@@ -2650,6 +2786,13 @@ function findContentTableCellInnerBlockFromPoint(clientX, clientY, tableCell) {
     ) {
       return { mode: 'element', element: node };
     }
+    // 楽天トピックス等: タイトル／日付 span を TD 全文より先に採用
+    if (
+      isInlineTextHostElement(node) &&
+      scoreInlineTextHostCandidate(node, clientX, clientY)
+    ) {
+      return { mode: 'inline-text', element: node };
+    }
     node = node.parentElement;
   }
 
@@ -2663,6 +2806,11 @@ function findContentTableCellInnerBlockFromPoint(clientX, clientY, tableCell) {
     getContainingTextRectsForPoint(deepestLi, clientX, clientY).length > 0
   ) {
     return { mode: 'element', element: deepestLi };
+  }
+
+  const inlineHost = findBestInlineTextHostFromPoint(clientX, clientY);
+  if (inlineHost && tableCell.contains(inlineHost)) {
+    return { mode: 'inline-text', element: inlineHost };
   }
 
   return null;
@@ -10521,19 +10669,23 @@ function cleanupAllListeners() {
 
 // === ハイライト用イベントリスナーの管理 =================================
 function attachHighlightListeners() {
+  if (highlightListenersAttached) return;
   document.addEventListener('mousemove', handleMouseMove);
   document.addEventListener('mouseout', handleMouseOut);
   document.addEventListener('click', handleProgressPauseClick, true);
   document.addEventListener('scroll', handleHighlightViewportChange, { capture: true, passive: true });
   window.addEventListener('resize', handleHighlightViewportChange, { passive: true });
+  highlightListenersAttached = true;
 }
 
 function detachHighlightListeners() {
+  if (!highlightListenersAttached) return;
   document.removeEventListener('mousemove', handleMouseMove);
   document.removeEventListener('mouseout', handleMouseOut);
   document.removeEventListener('click', handleProgressPauseClick, true);
   document.removeEventListener('scroll', handleHighlightViewportChange, { capture: true });
   window.removeEventListener('resize', handleHighlightViewportChange);
+  highlightListenersAttached = false;
 }
 
 

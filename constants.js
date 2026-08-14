@@ -107,6 +107,8 @@ const LOCALSTRG_YOMUP_REDISP = 'YomuPPopupVisible'; //リロード時の再表�
 const LOCALSTRG_YOMUP_XYPOS = 'YomuPPopupPosition'; //メインポップアップのXY座標
 const LOCALSTRG_YOMUPSUB_XYPOS = 'subPopupPosition'; //サブポップアップのXY座標
 const LOCALSTRG_HIGHLIGHT_ONOFF = 'highLightOnOff'; //電球ボタン復元用
+// §71 RK-2: オリジンの異なる iframe とハイライト ON/OFF を共有（chrome.storage.local）
+const CHROME_STORAGE_HIGHLIGHT_ONOFF = 'highLightOnOff';
 const LOCALSTRG_SUBPOPUP_ONOFF = 'subPopupOnOff'; //サブポップアップボタン復元用
 const LOCALSTRG_STOPWATCH_STATE = 'stopwatchState'; //ストップウォッチ状態保存用
 
