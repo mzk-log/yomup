@@ -3133,6 +3133,30 @@ function isStructuralParagraphLeadingBlockLabel(el, parent, text) {
   return true;
 }
 
+// 文中強調: <strong>読むプ</strong>は、… のように直後が助詞等で続く場合は構造ラベルにしない
+function isInlineEmphasisContinuingSentence(el) {
+  if (!el) return false;
+  let n = el.nextSibling;
+  while (n) {
+    if (n.nodeType === Node.TEXT_NODE) {
+      const raw = n.textContent || '';
+      if (!raw.trim()) {
+        n = n.nextSibling;
+        continue;
+      }
+      const t = raw.replace(/^\s+/, '');
+      return /^(は|が|を|に|と|も|や|の|で|へ|から|まで|より|って|という|とは|について|において|として|により|による)/.test(
+        t
+      );
+    }
+    if (n.nodeType === Node.ELEMENT_NODE) {
+      return false;
+    }
+    n = n.nextSibling;
+  }
+  return false;
+}
+
 // label〜br のあいだに有意テキストがあるか（MS-2: strong+本文+br を CK-3 誤判定しない）
 function hasSignificantContentBetweenNodes(fromNode, toNode) {
   if (!fromNode || !toNode) return false;
@@ -3352,6 +3376,26 @@ function resolveParagraphBlockLabelLineTextContext(p, clientX, clientY) {
   return lines[findLineIndexAtCaret(lines, clientX, clientY)];
 }
 
+// §4.7 / Y-1b: <p> 内 \n\n 空行分割 — AI-1 全文句点分割より先に caret 行を採用
+function paragraphHasSourceBlankLineSplits(p) {
+  if (!p || p.tagName !== 'P') return false;
+  const walker = document.createTreeWalker(p, NodeFilter.SHOW_TEXT);
+  while (walker.nextNode()) {
+    if (/\n{2,}/.test(walker.currentNode.textContent || '')) return true;
+  }
+  return false;
+}
+
+function resolveParagraphBlankLineTextContext(p, clientX, clientY) {
+  if (!paragraphHasSourceBlankLineSplits(p)) return null;
+  if (typeof clientX !== 'number' || typeof clientY !== 'number') return null;
+  const lines = collectBlockTextSegmentLines(p).filter(
+    (line) => line.segments.length > 0 && (line.blockText || '').trim()
+  );
+  if (lines.length <= 1) return null;
+  return lines[findLineIndexAtCaret(lines, clientX, clientY)];
+}
+
 function isBlockDisplayLabel(el) {
   const display = window.getComputedStyle(el).display;
   return display === 'block' || display === 'flex' || display === 'list-item' || display === 'grid';
@@ -3442,6 +3486,9 @@ function isBlockLabelElement(el) {
   if (!text) return false;
 
   if (getFollowingSiblingTextLength(parent, el) < BLOCK_LABEL_MIN_FOLLOWING_CHARS) return false;
+
+  // デモ等: 文の途中の強調（「読むプは、…」）をラベル分割しない
+  if (isInlineEmphasisContinuingSentence(el)) return false;
 
   // Gemini ul>li>p>b「仕組み：」型 — コロン付き先頭ラベルは構造のみで採用（layout 不要）
   if (isStructuralColonBlockLabel(el, parent, text)) {
@@ -7241,6 +7288,13 @@ function resolveHighlightTextContext(highlightBlock, languageMode, clientX, clie
       clientY
     );
     if (blockLabelLineEarly) return blockLabelLineEarly;
+    // §4.7 Y-1b: \n\n 空行の見た目塊を AI-1 全文句点分割より先に採用
+    const blankLineEarly = resolveParagraphBlankLineTextContext(
+      highlightBlock.element,
+      clientX,
+      clientY
+    );
+    if (blankLineEarly) return blankLineEarly;
   }
 
   const useLineSplit = languageMode === LANGUAGE_MODE_JA || isPreHighlightBlock(highlightBlock);
@@ -7305,6 +7359,12 @@ function resolveHighlightTextContext(highlightBlock, languageMode, clientX, clie
         clientY
       );
       if (blockLabelLine) return blockLabelLine;
+      const blankLine = resolveParagraphBlankLineTextContext(
+        highlightBlock.element,
+        clientX,
+        clientY
+      );
+      if (blankLine) return blankLine;
     }
     return collectHighlightBlockTextSegments(highlightBlock);
   }
