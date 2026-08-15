@@ -906,22 +906,45 @@ function showYomuPPopup(
     color: #6c757d !important;
     font-size: 16px !important;
     line-height: 1.2 !important;
+    display: flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    gap: 6px !important;
   }
   .strCnt-button,
   .lightbulb-button,
   .stopwatch-button,
-  .hourglass-button,
-  .reload-button {
-    display: inline-block !important;
-    margin-right: 8px !important;
+  .hourglass-button {
+    display: inline-flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    margin-right: 0 !important;
     cursor: pointer !important;
     position: relative !important;
+    vertical-align: middle !important;
+    box-sizing: border-box !important;
+    /* 4ボタン共通: 影付き枠（高さ揃え） */
+    border: 1px solid #ced4da !important;
+    border-radius: 6px !important;
+    background-color: #f8f9fa !important;
+    padding: 3px 4px !important;
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.12) !important;
+  }
+  /* 主機能: ハイライトだけ枠色をやや黒寄り（影は他と同じ） */
+  .lightbulb-button {
+    border-color: #6c757d !important;
+  }
+  /* ON: 枠内を赤で埋める（枠線は残す）— ハイライト／砂時計／ストップウォッチ共通 */
+  .lightbulb-button:has(img.active),
+  .hourglass-button:has(img.active),
+  .stopwatch-button:has(img.active) {
+    background-color: red !important;
   }
   .lightbulb-button img.active,
   .hourglass-button img.active,
   .stopwatch-button img.active {
-    background-color: red !important;
-    border-radius: 25% !important;
+    background-color: transparent !important;
+    border-radius: 0 !important;
     padding: 0px !important;
   }
   /* ツールチップのスタイル */
@@ -1045,6 +1068,15 @@ function showYomuPPopup(
     line-height: 1.4 !important;
     left: 50% !important;
     transform: translateX(-50%) !important;
+    /* 上に出すとポップアップ本体が隠れるため下側に表示 */
+    top: 100% !important;
+    bottom: auto !important;
+    margin-top: 0 !important;
+    margin-bottom: 0 !important;
+    /* ホバー継続用: リンクとの隙間を透明 padding でつなぎ、カーソルを受け取る */
+    padding-top: 6px !important;
+    background-clip: content-box !important;
+    pointer-events: auto !important;
   }
   .donation-link:hover {
     color: #495057 !important;
@@ -1082,11 +1114,6 @@ function showYomuPPopup(
   const hourglassButton = document.createElement('div');
   hourglassButton.className = 'hourglass-button';
   hourglassButton.innerHTML = `<img src="${chrome.runtime.getURL('images/GA02_hourglass-start-solid-full.svg')}" width="16" height="16" alt="${t('altHourglass')}" style="cursor: pointer;"><div class="tooltip">${t('partialTimerTooltip')}</div>`;
-
-  // リロードボタンを作成
-  const reloadButton = document.createElement('div');
-  reloadButton.className = 'reload-button';
-  reloadButton.innerHTML = `<img src="${chrome.runtime.getURL('images/GD01_rotate-right-solid-full.svg')}" width="16" height="16" alt="${t('altReload')}" style="cursor: pointer;"><div class="tooltip">${t('reloadTooltip')}</div>`;
 
 
   // 文字数カウントボタンのクリックイベントを追加
@@ -1380,37 +1407,6 @@ function showYomuPPopup(
     toggleSubPopup(); // サブポップアップの処理を実行
   });
 
-  // リロードボタンのクリックイベントを追加
-  const reloadIcon = reloadButton.querySelector('img');
-  reloadIcon.addEventListener('click', function (e) {
-    e.stopPropagation();
-    // e.preventDefault()は削除（location.reload()を明示的に呼ぶので不要）
-    debugLog('リロードボタンがクリックされました');
-    try {
-      // リロード前にポップアップ表示状態を保存
-      const popupMain = document.getElementById(ID_YOMUP_POPUP_CONTAINER);
-      if (popupMain) {
-        localStorage.setItem(LOCALSTRG_YOMUP_REDISP, 'true');
-        // 保存を確実にするため、同期的に確認
-        const saved = localStorage.getItem(LOCALSTRG_YOMUP_REDISP);
-        if (saved !== 'true') {
-          debugError('localStorageへの保存に失敗しました');
-        } else {
-          debugLog('localStorageに保存しました:', saved);
-        }
-      }
-      // リロード前にクリーンアップ処理を実行
-      cleanupAllListeners();
-      // localStorageは同期的に保存されるので、setTimeoutは不要
-      // 直接リロードを実行
-      location.reload();
-    } catch (error) {
-      debugError('リロード処理中にエラーが発生:', error);
-      // エラーが発生してもリロードは実行
-      location.reload();
-    }
-  });
-
 
   // 全体情報（1行目）
   const totalInfo = document.createElement('div');
@@ -1435,7 +1431,6 @@ function showYomuPPopup(
   playIcon.appendChild(lightbulbButton);
   playIcon.appendChild(hourglassButton);
   playIcon.appendChild(stopwatchButton);
-  playIcon.appendChild(reloadButton);
   popup.appendChild(playIcon);
 
   const pageRoot = findPageMainContentRoot();
@@ -1538,15 +1533,27 @@ function showYomuPPopup(
   addClickToCloseFunctionality(popup);
 
 
-  // 各ボタンにマウスイベントを追加
-  function addTooltipEvents(button) {
+  // 各ボタンにマウスイベントを追加（表示は showDelayMs 後。離脱は即非表示。子へ移動時は継続）
+  function addTooltipEvents(button, showDelayMs) {
     const tooltip = button.querySelector('.tooltip');
+    const showDelay = typeof showDelayMs === 'number' ? showDelayMs : 500;
+    let showTimer = null;
 
     button.addEventListener('mouseenter', function () {
-      tooltip.classList.add('show');
+      if (showTimer) clearTimeout(showTimer);
+      showTimer = setTimeout(() => {
+        showTimer = null;
+        tooltip.classList.add('show');
+      }, showDelay);
     });
 
-    button.addEventListener('mouseleave', function () {
+    button.addEventListener('mouseleave', function (e) {
+      // 吹き出し（子要素）へカーソルが移った場合は表示を維持
+      if (e.relatedTarget && button.contains(e.relatedTarget)) return;
+      if (showTimer) {
+        clearTimeout(showTimer);
+        showTimer = null;
+      }
       tooltip.classList.remove('show');
     });
   }
@@ -1557,11 +1564,11 @@ function showYomuPPopup(
   addTooltipEvents(lightbulbButton);
   addTooltipEvents(hourglassButton);
   addTooltipEvents(stopwatchButton);
-  addTooltipEvents(reloadButton);
   addTooltipEvents(limitSelectWrapper);
   addTooltipEvents(readingSpeedSelectWrapper);
   addTooltipEvents(readingModeProgressBtn);
-  addTooltipEvents(donationLinkRow);
+  // 寄付: 表示1秒遅延。吹き出し内ホバー中は表示継続
+  addTooltipEvents(donationLinkRow, 1000);
 
   // モード状態に基づいてボタンのactiveクラスを復元
   if (isPageTransition && ENABLE_BUTTON_STATE_RESTORE) { //ページ遷移時のみ、有効 or 無効 を定数で切り替え
