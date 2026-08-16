@@ -5469,7 +5469,32 @@ function hasOnlyBrDirectElementChildren(el) {
   return brCount >= 1;
 }
 
+// §73 LX-1: br-only / AL-3 用。塊・画像を含まない単純なインライン <a>（tel: 等）
+function isSimpleInlineAnchor(el) {
+  if (!el || el.nodeType !== Node.ELEMENT_NODE || el.tagName !== 'A') return false;
+  if (isYomupUiElement(el) || isEditableElement(el)) return false;
+  if (
+    el.querySelector &&
+    el.querySelector(
+      'div, p, li, ul, ol, dl, dt, dd, table, h1, h2, h3, h4, h5, h6, img, picture, svg, video, iframe, a, button'
+    )
+  ) {
+    return false;
+  }
+  for (let i = 0; i < el.childNodes.length; i++) {
+    const child = el.childNodes[i];
+    if (child.nodeType !== Node.ELEMENT_NODE) continue;
+    if (!isPhrasingHighlightElement(child)) return false;
+  }
+  return !!(el.textContent || '').trim();
+}
+
+function isBrOnlyDivAllowedInlineChild(el) {
+  return isPhrasingHighlightElement(el) || isSimpleInlineAnchor(el);
+}
+
 // §43 AL-3: text + span/strong + br のみの div（Arduino error-item 等）。純 br-only の拡張
+// §73: 単純インライン a（電話番号リンク等）も許可
 function hasOnlyPhrasingOrBrDirectElementChildren(el) {
   if (!el) return false;
   let brCount = 0;
@@ -5482,7 +5507,7 @@ function hasOnlyPhrasingOrBrDirectElementChildren(el) {
       brCount++;
       continue;
     }
-    if (!isPhrasingHighlightElement(child)) return false;
+    if (!isBrOnlyDivAllowedInlineChild(child)) return false;
     phrasingCount++;
   }
   // 純 br-only は hasOnlyBrDirectElementChildren 側。こちらは phrasing 混在が必須
@@ -5490,6 +5515,7 @@ function hasOnlyPhrasingOrBrDirectElementChildren(el) {
 }
 
 // §52 CO-1: text + strong/span 等のみ（br なし）。leaf-text-div 拡張用。br 混在は §28/AL-3 へ委譲
+// §73: 単純インライン a も許可（br なし leaf と同型）
 function hasOnlyNonBrPhrasingDirectElementChildren(el) {
   if (!el) return false;
   let phrasingCount = 0;
@@ -5497,7 +5523,7 @@ function hasOnlyNonBrPhrasingDirectElementChildren(el) {
     const child = el.childNodes[i];
     if (child.nodeType !== Node.ELEMENT_NODE) continue;
     if (child.tagName === 'BR') return false;
-    if (!isPhrasingHighlightElement(child)) return false;
+    if (!isBrOnlyDivAllowedInlineChild(child)) return false;
     phrasingCount++;
   }
   return phrasingCount >= 1;
