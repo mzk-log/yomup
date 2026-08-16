@@ -97,7 +97,6 @@ function setHighlightModeEnabled(enabled, options) {
   ) {
     next = false;
   }
-  const changed = next !== highLightOnOff;
   highLightOnOff = next;
   if (!skipPersist) {
     try {
@@ -113,13 +112,14 @@ function setHighlightModeEnabled(enabled, options) {
     clearCurrentHighlight();
     detachHighlightListeners();
   }
-  if (changed) syncHighlightButtonUi();
+  // UI は状態の正に合わせる（クリック側での classList.toggle はしない）
+  syncHighlightButtonUi();
 }
 
 function applySharedHighlightOnOff(enabled) {
-  // トップに窓が無いのに storage が true のときは幽霊 ON を消す（§74）
+  // §75: 窓なしトップはローカル OFF のままにするが、共有 storage へ false を書き戻さない
+  // （他タブの ON を潰して電球が無反応になるのを防ぐ）
   if (isTopBrowsingContext() && enabled && !isYomupPopupVisible()) {
-    persistHighlightOnOffToChromeStorage(false);
     setHighlightModeEnabled(false, { skipPersist: true });
     return;
   }
@@ -128,7 +128,8 @@ function applySharedHighlightOnOff(enabled) {
 
 function bootstrapSharedHighlightState() {
   if (shouldSkipSubframeHighlightBootstrap()) return;
-  // §74 案A: トップは窓なしでは有効化せず、共有 storage の幽霊 ON を落とす
+  // §74/§75: トップ・窓なしではこのタブだけ有効化しない。storage は触らない
+  // （false 書きは窓クローズ時 hideYomuPPopup に限定）
   if (isTopBrowsingContext()) {
     if (!isYomupPopupVisible()) {
       if (highLightOnOff) {
@@ -137,7 +138,6 @@ function bootstrapSharedHighlightState() {
         clearCurrentHighlight();
         detachHighlightListeners();
       }
-      persistHighlightOnOffToChromeStorage(false);
       return;
     }
   }
@@ -151,12 +151,11 @@ function bootstrapSharedHighlightState() {
           // 未移行: トップの localStorage を種にしつつ、iframe は storage 待ち
           if (isTopBrowsingContext()) {
             enabled = localStorage.getItem(LOCALSTRG_HIGHLIGHT_ONOFF) === 'true';
-            // 窓があるときだけ種を書く
+            // 窓があるときだけ種を書く（窓なしで false を撒かない）
             if (isYomupPopupVisible()) {
               persistHighlightOnOffToChromeStorage(enabled);
             } else {
               enabled = false;
-              persistHighlightOnOffToChromeStorage(false);
             }
           } else {
             enabled = false;
@@ -1162,11 +1161,10 @@ function showYomuPPopup(
   });
 
 
-  // 電球アイコンのクリックイベントを追加
+  // 電球アイコンのクリックイベントを追加（UI の active は setHighlightModeEnabled 側で同期）
   const lightbulbIcon = lightbulbButton.querySelector('img');
   lightbulbIcon.addEventListener('click', function (e) {
     e.stopPropagation(); // イベントの伝播を停止
-    this.classList.toggle('active');
     toggleHighlightMode(); // ハイライト処理を実行
   });
 
