@@ -76,9 +76,27 @@ function syncHighlightButtonUi() {
   }
 }
 
+// §74 案A: トップでは読むプ窓が表示されているときだけハイライトを有効化できる
+function isYomupPopupVisible() {
+  try {
+    return !!document.getElementById(ID_YOMUP_POPUP_CONTAINER);
+  } catch (_e) {
+    return false;
+  }
+}
+
 function setHighlightModeEnabled(enabled, options) {
-  const next = !!enabled;
+  let next = !!enabled;
   const skipPersist = !!(options && options.skipPersist);
+  // トップ: 窓なしでは ON にしない（iframe は窓なし同期を許可）
+  if (
+    next &&
+    isTopBrowsingContext() &&
+    !(options && options.allowWithoutPopup) &&
+    !isYomupPopupVisible()
+  ) {
+    next = false;
+  }
   const changed = next !== highLightOnOff;
   highLightOnOff = next;
   if (!skipPersist) {
@@ -99,11 +117,30 @@ function setHighlightModeEnabled(enabled, options) {
 }
 
 function applySharedHighlightOnOff(enabled) {
+  // トップに窓が無いのに storage が true のときは幽霊 ON を消す（§74）
+  if (isTopBrowsingContext() && enabled && !isYomupPopupVisible()) {
+    persistHighlightOnOffToChromeStorage(false);
+    setHighlightModeEnabled(false, { skipPersist: true });
+    return;
+  }
   setHighlightModeEnabled(enabled, { skipPersist: true });
 }
 
 function bootstrapSharedHighlightState() {
   if (shouldSkipSubframeHighlightBootstrap()) return;
+  // §74 案A: トップは窓なしでは有効化せず、共有 storage の幽霊 ON を落とす
+  if (isTopBrowsingContext()) {
+    if (!isYomupPopupVisible()) {
+      if (highLightOnOff) {
+        setHighlightModeEnabled(false, { skipPersist: true });
+      } else {
+        clearCurrentHighlight();
+        detachHighlightListeners();
+      }
+      persistHighlightOnOffToChromeStorage(false);
+      return;
+    }
+  }
   try {
     if (!chrome?.storage?.local) return;
     chrome.storage.local.get([CHROME_STORAGE_HIGHLIGHT_ONOFF], (result) => {
@@ -114,12 +151,19 @@ function bootstrapSharedHighlightState() {
           // 未移行: トップの localStorage を種にしつつ、iframe は storage 待ち
           if (isTopBrowsingContext()) {
             enabled = localStorage.getItem(LOCALSTRG_HIGHLIGHT_ONOFF) === 'true';
-            persistHighlightOnOffToChromeStorage(enabled);
+            // 窓があるときだけ種を書く
+            if (isYomupPopupVisible()) {
+              persistHighlightOnOffToChromeStorage(enabled);
+            } else {
+              enabled = false;
+              persistHighlightOnOffToChromeStorage(false);
+            }
           } else {
             enabled = false;
           }
         }
         if (enabled) applySharedHighlightOnOff(true);
+        else applySharedHighlightOnOff(false);
       } catch (_e) {
         /* ignore */
       }
@@ -330,20 +374,13 @@ function init() {
   debugLog('ポップアップ復元チェック:', isPopupMainVisible);
   
   // ボタンの状態をlocalStorageから復元（ページ遷移時のみ）
+  // §74 案A: ハイライトは窓表示後に有効化する（ここでは attach しない）
   if (ENABLE_BUTTON_STATE_RESTORE && isPageTransition && isPopupMainVisible === 'true') { //有効 or 無効を定数で切り替え、かつページ遷移時のみ
-    // 電球ボタン
-    const savedHighLight = localStorage.getItem(LOCALSTRG_HIGHLIGHT_ONOFF);
-    if (savedHighLight === 'true') {
-      highLightOnOff = true;
-      attachHighlightListeners(); // 復元時にリスナーを追加
-      persistHighlightOnOffToChromeStorage(true);
-    }
-
-    // サブポップアップボタン
+    // サブポップアップボタンのみ先にフラグ復元（ハイライトは showYomuPPopup 側）
     const savedSubPopup = localStorage.getItem(LOCALSTRG_SUBPOPUP_ONOFF);
     if (savedSubPopup === 'true') subPopupOnOff = true;
   } else {
-    // トップ: storage と localStorage の初期同期（iframe 用の種）
+    // トップ: 窓なし起動時は共有ハイライトの幽霊 ON を落とす。iframe は storage 同期
     bootstrapSharedHighlightState();
   }
 
@@ -1571,7 +1608,14 @@ function showYomuPPopup(
   addTooltipEvents(donationLinkRow, 1000);
 
   // モード状態に基づいてボタンのactiveクラスを復元
+  // §74 案A: ハイライトは窓が表示されたこの時点でのみ有効化
   if (isPageTransition && ENABLE_BUTTON_STATE_RESTORE) { //ページ遷移時のみ、有効 or 無効 を定数で切り替え
+    const savedHighLight = localStorage.getItem(LOCALSTRG_HIGHLIGHT_ONOFF);
+    if (savedHighLight === 'true') {
+      setHighlightModeEnabled(true);
+    } else {
+      setHighlightModeEnabled(false);
+    }
     if (highLightOnOff && lightbulbIcon) {
       lightbulbIcon.classList.add('active');
     }
@@ -1580,10 +1624,13 @@ function showYomuPPopup(
       showSubPopup();
     }
   } else if (!isPageTransition) {
-    // ブラウザ起動時はボタン状態を初期化
-    highLightOnOff = false;
+    // ブラウザ起動時はボタン状態を初期化（窓は出ているがハイライトは OFF）
+    setHighlightModeEnabled(false);
     subPopupOnOff = false;
     stopwatchOnOff = false;
+  } else {
+    // ページ遷移だが復元無効など
+    setHighlightModeEnabled(false);
   }
 
   // ストップウォッチの状態を復元（ページ遷移時のみ）
@@ -1693,6 +1740,8 @@ function hideYomuPPopup(preserveModes = false) {
       } else {
         // 念のため、highLightOnOffがfalseでもリスナーが残っている可能性があるので削除
         detachHighlightListeners();
+        // §74: 窓クローズ時は iframe 同期用 storage も必ず OFF
+        persistHighlightOnOffToChromeStorage(false);
       }
       if (subPopupOnOff) toggleSubPopup();
     }
