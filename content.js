@@ -2582,12 +2582,41 @@ function isHeadingTitleTextNode(node, headingEl) {
   return el === headingEl;
 }
 
+function headingHasSignificantDirectText(headingEl) {
+  if (!headingEl || !headingEl.childNodes) return false;
+  for (let i = 0; i < headingEl.childNodes.length; i++) {
+    const n = headingEl.childNodes[i];
+    if (n.nodeType === Node.TEXT_NODE && (n.textContent || '').trim()) return true;
+  }
+  return false;
+}
+
+// §76 SP-1: HubSpot hs_cos_wrapper 等 — 全文を包む単一 phrasing はソフト折り返し（CW-1 subtitle ではない）
+function isHeadingSoftWrapPhrasingWrapper(headingEl) {
+  if (!headingEl || headingHasSignificantDirectText(headingEl)) return false;
+  let wrapper = null;
+  const children = headingEl.children || [];
+  for (let i = 0; i < children.length; i++) {
+    const child = children[i];
+    if (!child || child.nodeType !== Node.ELEMENT_NODE) continue;
+    const tag = child.tagName;
+    if (tag === 'BR' || tag === 'WBR') continue;
+    if (wrapper) return false;
+    wrapper = child;
+  }
+  if (!wrapper || !isHeadingTitlePhrasingAncestor(wrapper)) return false;
+  const headingText = (headingEl.textContent || '').replace(/\s+/g, ' ').trim();
+  const wrapText = (wrapper.textContent || '').replace(/\s+/g, ' ').trim();
+  return headingText.length > 0 && wrapText === headingText;
+}
+
 // §33 CW-1: h1 + span.subtitle 等 — 子要素で複数視覚行になる見出しのみ pointer 行に絞る
 // §58 AT-5: <br>/<wbr> だけの見出しはソフト折り返し全文を光らせる（BR を「装飾子」とみなさない）
 function shouldFilterHeadingOverlayToPointerLine(headingElement, chunkRects) {
   if (!isHeadingHighlightHost(headingElement) || !chunkRects || chunkRects.length <= 1) {
     return false;
   }
+  if (isHeadingSoftWrapPhrasingWrapper(headingElement)) return false;
   let hasElementChild = false;
   for (let i = 0; i < headingElement.children.length; i++) {
     const child = headingElement.children[i];
